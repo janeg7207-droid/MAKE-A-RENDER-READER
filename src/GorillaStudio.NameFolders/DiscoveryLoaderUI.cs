@@ -29,8 +29,13 @@ namespace GorillaStudio.NameFolders
             {
                 window.Loaded -= loaded;
                 AttachDiscoveryButton(window);
+                AttachPerformanceControls(window);
             };
-            if (window.IsLoaded) AttachDiscoveryButton(window);
+            if (window.IsLoaded)
+            {
+                AttachDiscoveryButton(window);
+                AttachPerformanceControls(window);
+            }
             else window.Loaded += loaded;
         }
 

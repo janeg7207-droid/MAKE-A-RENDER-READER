@@ -164,8 +164,12 @@ internal static class Program
             constructor.Body.Instructions.Insert(initializeIndex + 1,
                 Instruction.Create(OpCodes.Call, new Importer(module).Import(initialize)));
 
+            HashSet<int> changedMethods = PatchPreviewHooks(module, helper, window);
+            changedMethods.Add(method.MDToken.ToInt32());
+            changedMethods.Add(constructor.MDToken.ToInt32());
+
             // Keep every untouched body's bytecode, local signatures, and stack header unchanged.
-            // The injected sequence requires only two stack slots; the original maximum is larger.
+            // Each hook fits within its method's validated original stack maximum.
             foreach (MethodDef existing in module.GetTypes().SelectMany(t => t.Methods).Where(m => m.HasBody))
                 existing.Body.KeepOldMaxStack = true;
             var options = new ModuleWriterOptions(module);
@@ -174,13 +178,13 @@ internal static class Program
             wroteOutput = true;
             module.Write(output, options);
 
-            VerifyUnchangedBodies(original, output, new HashSet<int> { method.MDToken.ToInt32(), constructor.MDToken.ToInt32() });
+            VerifyUnchangedBodies(original, output, changedMethods);
             VerifyManagedResources(module, output);
             VerifyNativeResources(original, output);
             VerifyInjectedCall(output);
             Console.WriteLine($"Created {output}");
             Console.WriteLine($"Folder state machine: {stateMachine.FullName}");
-            Console.WriteLine("Verified: only SetFolder.MoveNext and MainWindow constructor IL changed; all other method bodies, licensing/authentication, managed resources, and Windows resources are preserved.");
+            Console.WriteLine("Verified: only SetFolder.MoveNext, MainWindow constructor, Go.MoveNext, RunPy.MoveNext, and StartBackgroundMake IL changed; all other method bodies, licensing/authentication, managed resources, and Windows resources are preserved.");
             return 0;
         }
         catch (Exception exception)
@@ -208,6 +212,97 @@ internal static class Program
             !stateMachine.Name.String.StartsWith("<SetFolder>d__", StringComparison.Ordinal))
             throw new InvalidOperationException("The folder method's async state machine is not nested in the expected main window.");
         return stateMachine;
+    }
+
+    private static TypeDef FindAsyncStateMachine(TypeDef window, string name)
+    {
+        MethodDef method = window.Methods.Single(candidate => candidate.Name == name && !candidate.IsStatic);
+        dnlib.DotNet.CustomAttribute attribute = method.CustomAttributes.Single(candidate =>
+            candidate.AttributeType.FullName == "System.Runtime.CompilerServices.AsyncStateMachineAttribute");
+        if (attribute.ConstructorArguments.Count != 1 || attribute.ConstructorArguments[0].Value is not TypeSig signature)
+            throw new InvalidOperationException($"The native {name} method has no readable async-state-machine declaration.");
+        TypeDef stateMachine = signature.ToTypeDefOrRef().ResolveTypeDefThrow();
+        if (stateMachine.DeclaringType != window || !stateMachine.Name.String.StartsWith("<" + name + ">d__", StringComparison.Ordinal))
+            throw new InvalidOperationException($"The native {name} state machine is not nested in the expected main window.");
+        return stateMachine;
+    }
+
+    private static HashSet<int> PatchPreviewHooks(ModuleDef module, ModuleDef helper, TypeDef window)
+    {
+        TypeDef bridge = helper.GetTypes().Single(type => type.FullName == BridgeType);
+        MethodDef configure = bridge.Methods.Single(method => method.Name == "ConfigurePreviewProcess" &&
+            method.IsPublic && method.IsStatic && method.MethodSig.Params.Count == 4 &&
+            method.MethodSig.Params[0].ElementType == ElementType.Object &&
+            method.MethodSig.Params[1].ElementType == ElementType.Object &&
+            method.MethodSig.Params[2].ElementType == ElementType.String &&
+            method.MethodSig.Params[3].FullName == "System.Collections.Generic.IEnumerable`1<System.String>" &&
+            method.MethodSig.RetType.ElementType == ElementType.Void);
+        MethodDef runPreview = bridge.Methods.Single(method => method.Name == "RunPreviewProcess" &&
+            method.IsPublic && method.IsStatic && method.MethodSig.Params.Count == 5 &&
+            method.MethodSig.Params[0].ElementType == ElementType.Object);
+        MethodDef backgroundEnabled = bridge.Methods.Single(method => method.Name == "get_BackgroundMakeEnabled" &&
+            method.IsPublic && method.IsStatic && method.MethodSig.Params.Count == 0 &&
+            method.MethodSig.RetType.ElementType == ElementType.Boolean);
+
+        // Go still performs its original unlock/Busy checks and preparation. Only its
+        // engine call passes through the cache; the same signature forwards full MAKE.
+        MethodDef go = FindAsyncStateMachine(window, "Go").Methods.Single(method => method.Name == "MoveNext");
+        Instruction engineCall = go.Body.Instructions.Single(instruction => instruction.OpCode == OpCodes.Call &&
+            instruction.Operand is IMethod called && called.Name == "RunPy" && called.DeclaringType == window);
+        var nativeRun = (IMethod)engineCall.Operand;
+        if (nativeRun.MethodSig.Params.Count != 4 ||
+            nativeRun.MethodSig.RetType.FullName != runPreview.MethodSig.RetType.FullName ||
+            !nativeRun.MethodSig.Params.Select(parameter => parameter.FullName)
+                .SequenceEqual(runPreview.MethodSig.Params.Skip(1).Select(parameter => parameter.FullName)))
+            throw new InvalidOperationException("The native render process signature does not match the preview-cache bridge.");
+        engineCall.Operand = new Importer(module).Import(runPreview);
+
+        // Configure a fresh Process instance inside the original initial path, after
+        // game/Blender environment variables and handlers have already been assigned.
+        TypeDef runState = FindAsyncStateMachine(window, "RunPy");
+        MethodDef run = runState.Methods.Single(method => method.Name == "MoveNext");
+        FieldDef owner = runState.Fields.Single(field => field.Name == "<>4__this");
+        FieldDef process = runState.Fields.Single(field => field.FieldType.FullName == "System.Diagnostics.Process");
+        FieldDef script = runState.Fields.Single(field => field.Name == "script");
+        FieldDef arguments = runState.Fields.Single(field => field.Name == "args");
+        Instruction start = run.Body.Instructions.Single(instruction => instruction.OpCode == OpCodes.Callvirt &&
+            instruction.Operand is IMethod called && called.Name == "Start" &&
+            called.DeclaringType.FullName == "System.Diagnostics.Process" && called.MethodSig.Params.Count == 0 &&
+            called.MethodSig.RetType.ElementType == ElementType.Boolean);
+        int startIndex = run.Body.Instructions.IndexOf(start);
+        Instruction originalLoad = run.Body.Instructions[startIndex - 2];
+        if (originalLoad.OpCode != OpCodes.Ldarg_0 || run.Body.Instructions[startIndex - 1].OpCode != OpCodes.Ldfld ||
+            !ReferenceEquals(run.Body.Instructions[startIndex - 1].Operand, process) || run.Body.MaxStack < 4 ||
+            run.Body.ExceptionHandlers.Any(handler => handler.TryStart == originalLoad || handler.TryEnd == originalLoad ||
+                handler.HandlerStart == originalLoad || handler.HandlerEnd == originalLoad || handler.FilterStart == originalLoad))
+            throw new InvalidOperationException("The native process start is not a supported preview-configuration hook.");
+        var configureInstructions = new[]
+        {
+            Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldfld, owner),
+            Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldfld, process),
+            Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldfld, script),
+            Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldfld, arguments),
+            Instruction.Create(OpCodes.Call, new Importer(module).Import(configure))
+        };
+        if (run.Body.Instructions.Any(instruction => instruction.Operand is Instruction target && target == originalLoad ||
+            instruction.Operand is IList<Instruction> targets && targets.Contains(originalLoad)))
+            throw new InvalidOperationException("An unsupported branch enters the native process start hook.");
+        for (int index = 0; index < configureInstructions.Length; index++)
+            run.Body.Instructions.Insert(startIndex - 2 + index, configureInstructions[index]);
+        run.Body.SimplifyBranches();
+        run.Body.OptimizeBranches();
+
+        // Full renders begin only when requested by MAKE unless the user opts into
+        // background rendering. The existing full-render implementation is retained.
+        MethodDef background = window.Methods.Single(method => method.Name == "StartBackgroundMake" &&
+            !method.IsStatic && method.HasBody && method.MethodSig.RetType.ElementType == ElementType.Void);
+        if (background.Body.ExceptionHandlers.Count != 0 || background.Body.Instructions.Count == 0)
+            throw new InvalidOperationException("The native background-render method has an unsupported entry path.");
+        Instruction originalEntry = background.Body.Instructions[0];
+        background.Body.Instructions.Insert(0, Instruction.Create(OpCodes.Call, new Importer(module).Import(backgroundEnabled)));
+        background.Body.Instructions.Insert(1, Instruction.Create(OpCodes.Brtrue, originalEntry));
+        background.Body.Instructions.Insert(2, Instruction.Create(OpCodes.Ret));
+        return new HashSet<int> { go.MDToken.ToInt32(), run.MDToken.ToInt32(), background.MDToken.ToInt32() };
     }
 
     private static void VerifyUnchangedBodies(string original, string output, ISet<int> changedTokens)
@@ -329,5 +424,35 @@ internal static class Program
             .Count(instruction => instruction.OpCode == OpCodes.Call && instruction.Operand is IMethod called &&
                 called.DeclaringType.FullName == BridgeType && called.Name == "Initialize");
         if (initializeCalls != 1) throw new InvalidDataException("The saved executable does not contain exactly one roster-button initialization call.");
+
+        TypeDef window = module.GetTypes().Single(type => type.FullName == MainWindowType);
+        MethodDef go = FindAsyncStateMachine(window, "Go").Methods.Single(method => method.Name == "MoveNext");
+        if (go.Body.Instructions.Count(instruction => instruction.OpCode == OpCodes.Call &&
+                instruction.Operand is IMethod called && called.DeclaringType.FullName == BridgeType &&
+                called.Name == "RunPreviewProcess") != 1 ||
+            go.Body.Instructions.Any(instruction => instruction.Operand is IMethod called &&
+                called.DeclaringType.FullName == MainWindowType && called.Name == "RunPy"))
+            throw new InvalidDataException("The saved executable does not route its render process through exactly one preview-cache hook.");
+        MethodDef run = FindAsyncStateMachine(window, "RunPy").Methods.Single(method => method.Name == "MoveNext");
+        Instruction[] configurations = run.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Call &&
+            instruction.Operand is IMethod called && called.DeclaringType.FullName == BridgeType &&
+            called.Name == "ConfigurePreviewProcess").ToArray();
+        if (configurations.Length != 1)
+            throw new InvalidDataException("The saved executable does not contain exactly one preview-process configuration call.");
+        int configurationIndex = run.Body.Instructions.IndexOf(configurations[0]);
+        Instruction start = run.Body.Instructions[configurationIndex + 3];
+        if (run.Body.Instructions[configurationIndex + 1].OpCode != OpCodes.Ldarg_0 ||
+            run.Body.Instructions[configurationIndex + 2].OpCode != OpCodes.Ldfld ||
+            start.OpCode != OpCodes.Callvirt || start.Operand is not IMethod startMethod || startMethod.Name != "Start" ||
+            startMethod.DeclaringType.FullName != "System.Diagnostics.Process")
+            throw new InvalidDataException("The preview process configuration is not immediately before native Process.Start.");
+        MethodDef background = window.Methods.Single(method => method.Name == "StartBackgroundMake");
+        if (background.Body.Instructions[0].OpCode != OpCodes.Call ||
+            background.Body.Instructions[0].Operand is not IMethod enabled ||
+            enabled.DeclaringType.FullName != BridgeType || enabled.Name != "get_BackgroundMakeEnabled" ||
+            background.Body.Instructions[1].OpCode != OpCodes.Brtrue ||
+            background.Body.Instructions[1].Operand != background.Body.Instructions[3] ||
+            background.Body.Instructions[2].OpCode != OpCodes.Ret)
+            throw new InvalidDataException("The saved executable does not guard the native background-render entry.");
     }
 }
