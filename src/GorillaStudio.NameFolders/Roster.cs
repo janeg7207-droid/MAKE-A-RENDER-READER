@@ -19,6 +19,10 @@ namespace GorillaStudio.NameFolders
         public string Name { get; set; }
         public string Folder { get; set; }
         public string RosterTable { get; set; }
+        public int SourceId { get; set; }
+        public bool IsMod { get; set; }
+        public string Source { get; set; }
+        public string StockFolder { get; set; }
     }
 
     /// <summary>Imports explicit wrestler IDs and readable names, never render IDs or guessed binary fields.</summary>
@@ -78,24 +82,44 @@ namespace GorillaStudio.NameFolders
             return Directory.GetDirectories(root).FirstOrDefault(path => string.Equals(Path.GetFileName(path), name, StringComparison.OrdinalIgnoreCase));
         }
 
-        private static List<RosterEntry> ReadDiscoveryCompanion(string path)
+        public static List<RosterEntry> LoadDiscovery(string path, string sdbPath = null, string stockIndexPath = null)
         {
             if (!string.Equals(Path.GetFileName(path), "CharProfileTable.jsfb", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Only CharProfileTable.jsfb can locate a Discovery roster. Other .jsfb files are binary game data, not supported roster imports.");
             ValidateProfileTable(path);
-            string containing = Path.GetDirectoryName(Path.GetFullPath(path));
-            string characters = FindChildDirectory(containing, "Characters");
-            if (characters == null && string.Equals(new DirectoryInfo(containing).Name, "Roster", StringComparison.OrdinalIgnoreCase))
-            {
-                DirectoryInfo parent = Directory.GetParent(containing);
-                if (parent != null) characters = FindChildDirectory(parent.FullName, "Characters");
-            }
+            string root = DiscoveryProfiles.DataRoot(path);
+            string characters = FindChildDirectory(root, "Characters");
             if (characters == null)
-                throw new InvalidDataException("Keep CharProfileTable.jsfb in its Discovery Roster folder alongside the companion Characters folder (with ID_Name folders). This experimental importer loads only those known character names and IDs; it does not guess names or IDs from the binary table. You can also import a JSON name-to-ID roster.");
-            List<RosterEntry> entries = LoadDirectory(characters);
+                throw new InvalidDataException("Keep CharProfileTable.jsfb in its Discovery Roster folder alongside the companion Characters folder. Keep Sdb/ENG.sdb beside them to load the game's character names.");
+            List<DiscoveryProfile> profiles = DiscoveryProfiles.Read(path, sdbPath);
+            DiscoveryScanResult scan = DiscoveryScanner.Scan(root, profiles, path);
+            if (scan.Warnings.Any(w => w.StartsWith("Could not read character mapping", StringComparison.Ordinal)))
+                throw new InvalidDataException(string.Join(Environment.NewLine, scan.Warnings));
+            var entries = scan.Entries;
+            stockIndexPath = stockIndexPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "gamepack", "stock_index.json");
+            Dictionary<int, string> stock = File.Exists(stockIndexPath) ? StockModels.Read(root, stockIndexPath) : new Dictionary<int, string>();
+            foreach (DiscoveryProfile profile in profiles)
+            {
+                List<RosterEntry> models = entries.Where(e => e.Id == profile.Id).ToList();
+                if (models.Count == 0)
+                {
+                    var entry = new RosterEntry { Id = profile.Id, SourceId = profile.BaseId, Name = profile.Name ?? "Wrestler " + profile.Id.ToString(CultureInfo.InvariantCulture), Source = "Profile" };
+                    entries.Add(entry);
+                    models.Add(entry);
+                }
+                string key;
+                if (!stock.TryGetValue(profile.Id, out key)) continue;
+                foreach (RosterEntry model in models)
+                {
+                    model.StockFolder = key;
+                    if (model.Folder == null) model.SourceId = FolderNames.ExistingId(key) ?? model.SourceId;
+                }
+            }
             foreach (RosterEntry entry in entries) entry.RosterTable = Path.GetFullPath(path);
-            return entries;
+            return Finish(entries);
         }
+
+        private static List<RosterEntry> ReadDiscoveryCompanion(string path) { return LoadDiscovery(path); }
 
         // Check the actual FlatBuffer identifier and root structure before using the companion folders.
         // FlatBuffers may reuse a vtable after the root, so the vtable displacement is signed.
@@ -152,7 +176,7 @@ namespace GorillaStudio.NameFolders
                 if (seen.Add(key)) result.Add(entry);
             }
             if (result.Count == 0)
-                throw new InvalidDataException("No roster entries with wrestler IDs were found. Supply JSON names with actual wrestler/character IDs (1–65535), or keep CharProfileTable.jsfb with its companion Characters/123_Name folders. Plain names alone do not identify the game's wrestler IDs.");
+                throw new InvalidDataException("No roster entries were found. Supply JSON names with actual wrestler/character IDs (1–65535), or keep CharProfileTable.jsfb with its companion Characters and Sdb/ENG.sdb folders. Plain names alone do not identify the game's wrestler IDs.");
             return result;
         }
 
@@ -254,7 +278,13 @@ namespace GorillaStudio.NameFolders
             {
                 if (HasProperty(map, IdKeys) || HasProperty(map, NameKeys))
                 {
-                    entries.Add(Create(Property(map, IdKeys) ?? fallbackId, Property(map, NameKeys) ?? fallbackName, Property(map, FolderKeys), source, Property(map, RosterTableKeys)));
+                    var entry = Create(Property(map, IdKeys) ?? fallbackId, Property(map, NameKeys) ?? fallbackName, Property(map, FolderKeys), source, Property(map, RosterTableKeys));
+                    int sourceId;
+                    if (TryId(Property(map, new[] { "sourceid" }), out sourceId)) entry.SourceId = sourceId;
+                    entry.IsMod = object.Equals(Property(map, new[] { "ismod" }), true);
+                    entry.Source = Property(map, new[] { "source" }) as string;
+                    entry.StockFolder = Property(map, new[] { "stockfolder" }) as string;
+                    entries.Add(entry);
                     return;
                 }
                 if (HasProperty(map, new[] { "stringname" }))

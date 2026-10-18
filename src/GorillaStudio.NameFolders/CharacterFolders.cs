@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace GorillaStudio.NameFolders
 {
@@ -17,6 +18,27 @@ namespace GorillaStudio.NameFolders
     /// <summary>Plans compatibility paths without creating links or changing character data.</summary>
     public static class CharacterFolders
     {
+        public static bool HasAmbiguousChildren(string folder)
+        {
+            return Directory.Exists(folder) && !PhysicalId(folder).HasValue
+                && Directory.GetDirectories(folder).Select(p => FolderNames.ExistingId(new DirectoryInfo(p).Name))
+                    .Where(value => value.HasValue).Select(value => value.Value).Distinct().Take(2).Count() > 1;
+        }
+
+        public static int? PhysicalId(string folder)
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return null;
+            string name = new DirectoryInfo(folder).Name;
+            int? prefix = FolderNames.ExistingId(name);
+            if (prefix.HasValue) return prefix;
+            Match placeholder = Regex.Match(name, @"^placeholder_(\d+)_A\d+$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            int id;
+            if (placeholder.Success && int.TryParse(placeholder.Groups[1].Value, out id) && id >= 1 && id <= 65535) return id;
+            int[] children = Directory.GetDirectories(folder).Select(p => FolderNames.ExistingId(new DirectoryInfo(p).Name))
+                .Where(value => value.HasValue).Select(value => value.Value).Distinct().Take(2).ToArray();
+            return children.Length == 1 ? (int?)children[0] : null;
+        }
+
         public static string FindDiscoveryTable(string source)
         {
             if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source)) return null;
@@ -36,6 +58,8 @@ namespace GorillaStudio.NameFolders
                 throw new DirectoryNotFoundException("Choose an existing wrestler folder.");
             if (selected == null) throw new ArgumentNullException("selected", "Choose a wrestler.");
             string fullSource = new DirectoryInfo(source).FullName;
+            if (HasAmbiguousChildren(fullSource))
+                throw new InvalidDataException("This folder contains different model IDs. Choose the specific numbered character or attire folder to load.");
             string sourceRoot = InferDataRoot(fullSource);
             string rosterDirectory = !string.IsNullOrWhiteSpace(selected.RosterTable)
                 && File.Exists(selected.RosterTable)
@@ -52,7 +76,11 @@ namespace GorillaStudio.NameFolders
             if (rosterDirectory == null && platformRoot != null)
                 rosterDirectory = ChildDirectory(platformRoot, "Roster");
             string sourceRoster = sourceRoot == null ? null : ChildDirectory(sourceRoot, "Roster");
-            string alias = FolderNames.AliasName(selected.Id, selected.Name);
+            // Discovery can place one model over a different roster slot. The original
+            // engine needs the physical ID for stock-body extraction; SetTarget carries
+            // the selected logical roster ID separately.
+            int sourceId = PhysicalId(fullSource) ?? (selected.SourceId > 0 ? selected.SourceId : selected.Id);
+            string alias = FolderNames.AliasName(sourceId, selected.Name);
             return new CharacterFolderPlan
             {
                 SourceFolder = fullSource,

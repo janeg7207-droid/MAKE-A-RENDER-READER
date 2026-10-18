@@ -46,6 +46,11 @@ internal static class Program
                 .Single(m => m.Name == "Initialize" && m.IsPublic && m.IsStatic &&
                     m.MethodSig.Params.Count == 1 && m.MethodSig.Params[0].ElementType == ElementType.Object &&
                     m.MethodSig.RetType.ElementType == ElementType.Void);
+            MethodDef applySelection = helper.GetTypes()
+                .Single(t => t.FullName == BridgeType).Methods
+                .Single(m => m.Name == "ApplySelection" && m.IsPublic && m.IsStatic &&
+                    m.MethodSig.Params.Count == 1 && m.MethodSig.Params[0].ElementType == ElementType.Object &&
+                    m.MethodSig.RetType.ElementType == ElementType.Void);
             // Compiler-generated state-machine numbers change between release versions.
             // Follow the method's actual AsyncStateMachine attribute instead of a name.
             TypeDef stateMachine = FindFolderStateMachine(module);
@@ -53,7 +58,12 @@ internal static class Program
             FieldDef folderField = stateMachine.Fields.Single(f => f.Name == "folder");
             FieldDef stateField = stateMachine.Fields.Single(f => f.Name == "<>1__state");
             FieldDef ownerField = stateMachine.Fields.Single(f => f.Name == "<>4__this");
-            FieldDef busyField = ownerField.FieldType.ToTypeDefOrRef().ResolveTypeDefThrow().Fields.Single(f => f.Name == "Busy");
+            TypeDef ownerType = ownerField.FieldType.ToTypeDefOrRef().ResolveTypeDefThrow();
+            FieldDef busyField = ownerType.Fields.Single(f => f.Name == "Busy");
+            if (!ownerType.Methods.Any(candidate => candidate.Name == "SetTarget" && !candidate.IsStatic &&
+                candidate.MethodSig.Params.Count == 1 && candidate.MethodSig.Params[0].ElementType == ElementType.String &&
+                candidate.MethodSig.RetType.ElementType == ElementType.Void))
+                throw new InvalidOperationException("Mapped roster selections require the v1.0.2 native target-slot API; this older executable is not supported.");
             if (method.Body.Instructions.Any(i => i.Operand is IMethod m && m.DeclaringType.FullName == BridgeType))
                 throw new InvalidOperationException("This executable already calls the folder picker.");
             if (!method.Body.Instructions.Any(i => i.OpCode == OpCodes.Ldstr && (string)i.Operand == @"^\d+_.+"))
@@ -106,6 +116,38 @@ internal static class Program
             };
             for (int i = 0; i < injected.Length; i++)
                 instructions.Insert(insertionIndex + i, injected[i]);
+
+            // Keep the source folder's physical model ID for stock-body extraction, then
+            // apply the selected logical slot through the original target-slot API before
+            // the original preparation starts. Cancellation and Busy leave before here.
+            Instruction prepareCall = instructions.Last(instruction => instruction.OpCode == OpCodes.Call &&
+                instruction.Operand is IMethod called && called.Name == "Prepare" &&
+                called.DeclaringType.FullName == MainWindowType && called.MethodSig.Params.Count == 1 &&
+                called.MethodSig.Params[0].ElementType == ElementType.String);
+            if (method.Body.MaxStack < 3 || method.Body.ExceptionHandlers.Any(handler =>
+                handler.TryStart == prepareCall || handler.TryEnd == prepareCall ||
+                handler.HandlerStart == prepareCall || handler.HandlerEnd == prepareCall || handler.FilterStart == prepareCall))
+                throw new InvalidOperationException("The native preparation call is not a safe target-selection hook.");
+            Instruction applyStart = Instruction.Create(OpCodes.Ldarg_0);
+            var applyInstructions = new[]
+            {
+                applyStart,
+                Instruction.Create(OpCodes.Ldfld, ownerField),
+                Instruction.Create(OpCodes.Call, new Importer(module).Import(applySelection))
+            };
+            // The null-taunt path branches straight to Prepare with its arguments already
+            // on the stack; it must pass through the hook just like the selected-taunt path.
+            foreach (Instruction instruction in instructions)
+            {
+                if (instruction.Operand is Instruction target && target == prepareCall)
+                    instruction.Operand = applyStart;
+                else if (instruction.Operand is IList<Instruction> targets)
+                    for (int i = 0; i < targets.Count; i++)
+                        if (targets[i] == prepareCall) targets[i] = applyStart;
+            }
+            int applyIndex = instructions.IndexOf(prepareCall);
+            for (int i = 0; i < applyInstructions.Length; i++)
+                instructions.Insert(applyIndex + i, applyInstructions[i]);
 
             // InitializeComponent has created and named the original controls at this point.
             // The helper adds one roster button at runtime without modifying WPF resources.
@@ -271,6 +313,16 @@ internal static class Program
         int calls = moveNext.Body.Instructions.Count(i => i.OpCode == OpCodes.Call && i.Operand is IMethod method &&
             method.DeclaringType.FullName == BridgeType && method.Name == "PrepareFolder");
         if (calls != 1) throw new InvalidDataException("The saved executable does not contain exactly one folder-picker call.");
+        Instruction[] applyCalls = moveNext.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Call &&
+            instruction.Operand is IMethod called && called.DeclaringType.FullName == BridgeType &&
+            called.Name == "ApplySelection").ToArray();
+        if (applyCalls.Length != 1) throw new InvalidDataException("The saved executable does not contain exactly one native-target selection call.");
+        int applyIndex = moveNext.Body.Instructions.IndexOf(applyCalls[0]);
+        Instruction prepareCall = moveNext.Body.Instructions[applyIndex + 1];
+        if (prepareCall.OpCode != OpCodes.Call || prepareCall.Operand is not IMethod prepare ||
+            prepare.Name != "Prepare" || prepare.DeclaringType.FullName != MainWindowType ||
+            moveNext.Body.Instructions.Any(instruction => instruction.Operand is Instruction target && target == prepareCall))
+            throw new InvalidDataException("A native preparation path bypasses the target-selection hook.");
         int initializeCalls = module.GetTypes().Single(t => t.FullName == MainWindowType).Methods
             .Where(method => method.IsInstanceConstructor && method.HasBody)
             .SelectMany(method => method.Body.Instructions)

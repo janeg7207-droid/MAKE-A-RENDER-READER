@@ -15,6 +15,25 @@ namespace GorillaStudio.NameFolders
 
     public static class RosterSession
     {
+        public static void BindImportedModels(IEnumerable<RosterEntry> imported, IEnumerable<RosterEntry> current, string table)
+        {
+            if (string.IsNullOrWhiteSpace(table)) return;
+            var models = current.Where(e => SameTable(e.RosterTable, table)).ToList();
+            foreach (RosterEntry entry in imported)
+            {
+                if (string.IsNullOrWhiteSpace(entry.RosterTable)) entry.RosterTable = table;
+                if (!SameTable(entry.RosterTable, table)) continue;
+                List<RosterEntry> matches = models.Where(e => e.Id == entry.Id).ToList();
+                if (matches.Count != 1) continue; // A JSON slot cannot select between different models by itself.
+                RosterEntry model = matches[0];
+                if (string.IsNullOrWhiteSpace(entry.Folder) && Directory.Exists(model.Folder)) entry.Folder = model.Folder;
+                if (entry.SourceId == 0) entry.SourceId = model.SourceId;
+                if (entry.StockFolder == null) entry.StockFolder = model.StockFolder;
+                if (entry.Source == null) entry.Source = model.Source;
+                entry.IsMod = entry.IsMod || model.IsMod;
+            }
+        }
+
         public static RosterSessionData Open(string source, IEnumerable<RosterEntry> saved)
         {
             if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source))
@@ -37,8 +56,21 @@ namespace GorillaStudio.NameFolders
             foreach (RosterEntry entry in remembered)
             {
                 // Never bring a different mod roster into this Discovery directory.
-                // Fresh directory metadata wins over remembered entries with the same ID and name.
-                if (SameTable(entry.RosterTable, table) && identities.Add(Identity(entry))) entries.Add(entry);
+                if (!SameTable(entry.RosterTable, table)) continue;
+                // Earlier builds saved folder prefixes as roster IDs. Replace those
+                // directory-derived rows with the freshly decoded mapping and SDB name.
+                if (entry.SourceId == 0 && entry.Source == null && !string.IsNullOrWhiteSpace(entry.Folder)
+                    && entries.Any(e => !string.IsNullOrWhiteSpace(e.Folder)
+                        && string.Equals(Path.GetFullPath(e.Folder), Path.GetFullPath(entry.Folder), StringComparison.OrdinalIgnoreCase))) continue;
+                RosterEntry fresh = entries.FirstOrDefault(e => string.Equals(Identity(e), Identity(entry), StringComparison.OrdinalIgnoreCase));
+                if (fresh != null && string.IsNullOrWhiteSpace(fresh.Folder) && Directory.Exists(entry.Folder))
+                {
+                    fresh.Folder = entry.Folder;
+                    fresh.SourceId = entry.SourceId;
+                    fresh.IsMod = entry.IsMod;
+                    fresh.Source = entry.Source;
+                }
+                if (identities.Add(Identity(entry))) entries.Add(entry);
             }
             return new RosterSessionData { Entries = entries, ChooseCharacterFolder = chooseCharacterFolder, DiscoveryTable = Path.GetFullPath(table) };
         }
@@ -51,6 +83,8 @@ namespace GorillaStudio.NameFolders
             if (string.IsNullOrWhiteSpace(selectedFolder) || !Directory.Exists(selectedFolder))
                 throw new DirectoryNotFoundException("Choose an existing character folder.");
             entry.Folder = Path.GetFullPath(selectedFolder);
+            int? physical = CharacterFolders.PhysicalId(selectedFolder);
+            if (physical.HasValue) entry.SourceId = physical.Value;
         }
 
         private static string Identity(RosterEntry entry)

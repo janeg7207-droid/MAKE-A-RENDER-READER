@@ -1,51 +1,64 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Adds **Load Discovery roster…** beneath the supplied v1.0.2 app's Browse/Find controls. Choose an extracted Discovery folder, search your superstar roster, and load the selected character's actual model folder. The new button uses the original style. Native name search, stock-body extraction, sign-in, licence checks and rendering remain in the updated application.
+The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including custom wrestler names and IDs. It joins model paths through CharacterMapping.jsfb instead of treating every folder prefix as the wrestler's roster ID. The helper is version **1.3.0**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
-- [Full experimental program ZIP](https://github.com/janeg7207-droid/MAKE-A-RENDER-READER/raw/refs/heads/main/downloads/GorillaStudio_v1.0.2_Discovery_Experimental.zip)
+- [Full program ZIP](https://github.com/janeg7207-droid/MAKE-A-RENDER-READER/raw/refs/heads/main/downloads/GorillaStudio_v1.0.2_Discovery_Experimental.zip)
 - [Small update ZIP for an existing v1.0.2 copy](https://github.com/janeg7207-droid/MAKE-A-RENDER-READER/raw/refs/heads/main/downloads/GorillaStudio_v1.0.2_Discovery_Experimental_Update.zip)
 - [Source ZIP](https://github.com/janeg7207-droid/MAKE-A-RENDER-READER/raw/refs/heads/main/downloads/GorillaStudio_v1.0.2_Discovery_Experimental_Source.zip)
 
-The full program ZIP uses Git LFS. Download it through the link above; cloning the repository requires Git LFS to retrieve that file. SHA-256 checksums are in the downloads folder.
+Extract the small update into the folder containing GorillaStudio.exe in a **separate copy of v1.0.2**. Replace the executable and helper DLL together, keeping the original engine, data and plugin folders. It also updates the previous experimental v1.0.2 build. It does not apply to v1.0.
+
+The full program ZIP uses Git LFS. Use the download link above, or install Git LFS before cloning. SHA-256 checksums are in downloads.
 
 ## Use
 
-1. Extract the full experimental build into a separate folder. Keep GorillaStudio.NameFolders.dll beside GorillaStudio.exe.
-2. Click **Load Discovery roster…** and choose your extracted discovery_data folder, containing Characters and Roster/CharProfileTable.jsfb. Selecting Characters or Roster directly also works.
-3. Select a superstar and click **Load selected wrestler**. The original app remembers the selected Discovery root, so its **Find by name…** feature can locate those mod folders too.
-4. Continue with Preview / Make / Install. The original v1.0.2 requirements still apply: Windows, Blender 5.2 or newer, and WWE 2K26 with its required plugin setup.
+1. Keep your extracted Discovery folders together:
 
-Dropping the Discovery root or an individual character folder also works. Direct character drops discover the sibling roster while keeping the dragged character as the source. Plain folder names require no numeric prefix; select the correct wrestler each time.
+       discovery_data/
+         Roster/CharProfileTable.jsfb
+         Characters/CharacterMapping.jsfb
+         Characters/<your character folders>/
+         Sdb/ENG.sdb
 
-Only **JSON and JSFB** files are accepted by the picker's **Load roster file…** control. The included rosters/Discovery_roster.json contains the 10 named characters from the uploaded data. JSON supports arrays such as [{"id":1506,"name":"Flammer"}], common roster wrappers, and name-to-ID or ID-to-name maps. Actual wrestler IDs must be 1–65535; render-picture numbers and numeric localization keys cannot supply wrestler names.
+2. Click **Load Discovery roster…** and choose discovery_data. Selecting its Characters or Roster folder also works. Subsequent clicks open that roster directly; **Change…** chooses a different data folder.
+3. Search by name, wrestler ID or model-folder name. **Models in data** filters to characters with local model folders. The source column shows how the folder was identified. **Refresh data** rescans changed files.
+4. Select a wrestler and click **Load selected wrestler**. Plain folder names need no number. Unresolved folders stay visible and ask you to choose a roster slot. **Use folder for another wrestler…** lets you explicitly assign a model to another profile. Folders containing different numbered models require choosing a specific model folder first.
+5. Continue with the original Preview / Make / Install controls. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
 
-JSFB import validates CharProfileTable.jsfb and indexes known names/IDs from its companion Characters/ID_Name folders. This experiment lists the available character folders; it does not decode every localized name from the entire binary profile table. The native finder retains its original stock-game search.
+A roster profile can exist without its model in the extracted data. Such rows remain visible. If CharacterMapping and the supplied stock index uniquely identify an installed-game model, the loader uses the original game's extractor. Otherwise it asks for the actual mod folder. **Choose model folder…** lets you supply a mod folder directly for any selected profile. A custom wrestler's numeric slot alone cannot identify its model assets.
 
-Saved manual or JSON-added entries remain when reopening the same Discovery roster. Entries from another explicit roster table stay separate. In collection mode, a manually selected character folder is remembered. Roster data and compatibility links are stored under %LOCALAPPDATA%/GorillaStudio/NameFolders.
+ENG.sdb supplies the readable character names. Keep your own current file in Sdb/ENG.sdb. Missing localized strings display as “Wrestler <ID>”; the loader never substitutes a localization key as a wrestler name.
 
-Plain-name links require a local Windows drive supporting NTFS junctions. Original character folders are not renamed or copied. Apply the small update ZIP only to a **separate copy of v1.0.2**, keeping the original data/engine/plugin folders; it is not an update for v1.0.
+Only **JSON and JSFB** are accepted by **Load roster file…**. SDB is read automatically as companion name data. JSON supports arrays such as [{"id":1506,"name":"Flammer"}], common roster wrappers, and name-to-ID or ID-to-name maps. Actual wrestler IDs must be 1–65535. The included rosters/Discovery_roster.json is a portable name/ID export; point the loader at your Discovery folder to discover its models.
+
+Dropping a character folder also opens the picker, keeping that folder as the model source. The selected logical roster ID controls the target slot and render links; the physical source ID controls stock-body extraction. For example, the supplied mapping associates physical folder 312_CM_Punk with roster ID 1481.
+
+Saved manual entries and model choices reopen with the same roster. Freshly scanned model mappings take precedence. Older saved folder-derived entries are refreshed to their actual mapped IDs. Settings and NTFS compatibility links are stored under %LOCALAPPDATA%/GorillaStudio/NameFolders. Original character folders keep their names and contents. Plain-name links require a local Windows drive supporting NTFS junctions.
 
 ## Validation
 
-- The .NET Framework 4.8 helper builds with zero warnings/errors.
-- **46** importer, name, path and session checks pass, including the actual JSFB, all 10 supplied characters, and reopening a roster with an added eleventh character.
-- The **original v1.0.2 engine** loads all 10 IDs and attire models. Eight have roster-picture links; Hogan 2002 (109) and Rey Mysterio 2019 (123) have none in the supplied table.
-- A separate copy named Flammer Experimental, selected as ID 1506, loads with the correct female flag, attire and render hash E4A5CD759AD62903. Original input hashes remain unchanged.
-- A real render attempt reached v1.0.2's stock-body extraction, then stopped because the build environment has no installed WWE 2K26 files / oo2core_9_win64.dll. The updated extraction feature is retained; complete rendering was not validated here.
-- The patcher verifies that only the window constructor and folder-loading method change. Other methods, authentication/licensing, WPF resources and native resources are preserved.
-- Windows GUI interaction and junction creation still need a Windows smoke test. Engine data checks ran under Python 3.14 on Linux using equivalent directory links.
+- The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and all **10 extracted model folders**. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
+- Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
+- A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
+- The original v1.0.2 engine verifies physical 312 → logical 1481 and physical 123 → logical 910. It retains the original model/body source while using the selected profile's render links and gender. The 1481 case selects 148100_CM_PUNK_GM.
+- A real render attempt loads the added Flammer model and reaches original stock-body extraction, then stops because this environment lacks WWE 2K26 / oo2core_9_win64.dll. Complete rendering and Windows GUI/junction interaction remain unverified.
+- The patcher verifies that only the window constructor and folder-loading state machine change; authentication, licensing and other methods/resources are preserved.
+
+Detailed results are included in TEST_RESULTS.json inside the ZIPs.
 
 ## Build
 
-Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Linux is supported; running requires Windows .NET Framework 4.8.
+Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Linux is supported; running requires Windows.
 
     dotnet build src/GorillaStudio.NameFolders/GorillaStudio.NameFolders.csproj -c Release
     dotnet build tools/GorillaStudioPatcher/GorillaStudioPatcher.csproj -c Release
     dotnet run --project tests/RosterTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/DiscoveryScannerTests -c Release -- /path/to/discovery_data /path/to/Sdb/ENG.sdb /path/to/original/data/gamepack/stock_index.json
+    dotnet run --project tests/GameModelBridgeTests -c Release
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
-Copy the original release's remaining files and the helper DLL into the new output folder. The patcher refuses to overwrite an existing output or remove a strong-name signature.
+Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.
 
-Run tests/validate_user_data.py --help for original-engine validation arguments. It requires Python 3.14, NumPy 2.4.3 and Pillow. It creates a separate test character, checks original input hashes, and records the actual render outcome. Missing-game/body blockers are reported as blocked, never as completed renders.
+The Python validators in tests use the original engine bytecode with CPython 3.14, NumPy 2.4.3 and Pillow. Run each with --help for arguments. validate_user_data.py performs an actual render attempt; validate_mapped_engine.py observes logical-slot handling and stops deliberately before game extraction. Neither script tests the Windows GUI.

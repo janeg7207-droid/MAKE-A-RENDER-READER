@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -35,7 +36,7 @@ namespace GorillaStudio.NameFolders
                 RosterSessionData session = RosterSession.Open(source, ReadRoster());
                 List<RosterEntry> entries = session.Entries;
                 int? existing = FolderNames.ExistingId(baseName);
-                if (existing.HasValue && !entries.Exists(e => e.Id == existing.Value
+                if (session.DiscoveryTable == null && existing.HasValue && !entries.Exists(e => e.Id == existing.Value
                     && string.Equals(e.Name, FolderNames.DisplayName(baseName), StringComparison.OrdinalIgnoreCase)))
                     entries.Add(new RosterEntry { Id = existing.Value, Name = FolderNames.DisplayName(baseName), Folder = source });
 
@@ -66,6 +67,7 @@ namespace GorillaStudio.NameFolders
                     }
                     SaveRoster(picker.Entries);
                     lastDiscoveryRoot = plan.DataRoot;
+                    RegisterSelection(alias, picker.SelectedEntry);
                     return alias;
                 }
             }
@@ -97,7 +99,7 @@ namespace GorillaStudio.NameFolders
             try
             {
                 var json = new JavaScriptSerializer { MaxJsonLength = 32 * 1024 * 1024 };
-                File.WriteAllText(temp, json.Serialize(entries), new UTF8Encoding(false));
+                File.WriteAllText(temp, json.Serialize(entries.Where(e => e.Id > 0).ToList()), new UTF8Encoding(false));
                 if (File.Exists(path)) File.Replace(temp, path, null);
                 else File.Move(temp, path);
             }

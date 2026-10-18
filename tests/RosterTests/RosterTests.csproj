@@ -10,5 +10,12 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/FolderNames.cs" Link="FolderNames.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/CharacterFolders.cs" Link="CharacterFolders.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/RosterSession.cs" Link="RosterSession.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/RosterAccess.cs" Link="RosterAccess.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/FlatBufferFile.cs" Link="FlatBufferFile.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryProfiles.cs" Link="DiscoveryProfiles.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/CharacterMappingReader.cs" Link="CharacterMappingReader.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryScanner.cs" Link="DiscoveryScanner.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/StockModels.cs" Link="StockModels.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/SelectionBridge.cs" Link="SelectionBridge.cs" />
   </ItemGroup>
 </Project>

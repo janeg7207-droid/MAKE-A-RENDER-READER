@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -22,6 +23,7 @@ namespace GorillaStudio.NameFolders
         {
             var window = instance as Window;
             if (window == null) return;
+            SetGameModelWindow(window);
             RoutedEventHandler loaded = null;
             loaded = (sender, args) =>
             {
@@ -46,62 +48,77 @@ namespace GorillaStudio.NameFolders
             var button = new Button
             {
                 Content = "Load Discovery roster…",
-                ToolTip = "Choose the extracted discovery_data folder to load your superstar roster.",
+                ToolTip = "Open your remembered Discovery roster. Choose its folder only the first time.",
                 Style = reference.Style,
                 FontFamily = reference.FontFamily,
                 FontSize = reference.FontSize,
                 Padding = reference.Padding,
-                Margin = new Thickness(0, 8, 0, 0),
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
-            Grid.SetRow(button, row);
-            Grid.SetColumn(button, 0);
-            Grid.SetColumnSpan(button, Math.Max(1, grid.ColumnDefinitions.Count));
-            button.Click += async (sender, args) => await OpenDiscoveryAsync(window, button);
-            grid.Children.Add(button);
+            var change = new Button
+            {
+                Content = "Change…",
+                ToolTip = "Choose a different Discovery folder.",
+                Style = reference.Style,
+                FontFamily = reference.FontFamily,
+                FontSize = reference.FontSize,
+                Padding = new Thickness(9, reference.Padding.Top, 9, reference.Padding.Bottom),
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            var access = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            access.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            access.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+            access.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn(change, 2);
+            access.Children.Add(button);
+            access.Children.Add(change);
+            Grid.SetRow(access, row);
+            Grid.SetColumn(access, 0);
+            Grid.SetColumnSpan(access, Math.Max(1, grid.ColumnDefinitions.Count));
+            button.Click += async (sender, args) => await OpenDiscoveryAsync(window, button, change, false);
+            change.Click += async (sender, args) => await OpenDiscoveryAsync(window, button, change, true);
+            grid.Children.Add(access);
             attachedWindows.Add(window);
             window.Closed += (sender, args) => attachedWindows.Remove(window);
         }
 
-        private static async Task OpenDiscoveryAsync(Window window, Button button)
+        private static async Task OpenDiscoveryAsync(Window window, Button button, Button change, bool chooseAnother)
         {
             Type type = window.GetType();
-            var busy = type.GetField("Busy", InstanceMembers);
-            if (busy != null && busy.GetValue(window) is bool && (bool)busy.GetValue(window)) return;
+            foreach (string name in new[] { "Busy", "GameBusy" })
+            {
+                var busy = type.GetField(name, InstanceMembers);
+                if (busy != null && busy.GetValue(window) is bool && (bool)busy.GetValue(window)) return;
+            }
             button.IsEnabled = false;
+            change.IsEnabled = false;
             try
             {
-                string source;
-                using (var dialog = new Forms.FolderBrowserDialog
+                string source = RememberedRoot(window);
+                if (chooseAnother || source == null)
                 {
-                    Description = "Choose the extracted discovery_data folder containing Characters and Roster.",
-                    ShowNewFolderButton = false
-                })
-                {
-                    if (dialog.ShowDialog(new NativeOwner(new WindowInteropHelper(window).Handle)) != Forms.DialogResult.OK) return;
-                    source = dialog.SelectedPath;
+                    using (var dialog = new Forms.FolderBrowserDialog
+                    {
+                        Description = "Choose the extracted discovery_data folder containing Characters and Roster.",
+                        ShowNewFolderButton = false,
+                        SelectedPath = source ?? ""
+                    })
+                    {
+                        if (dialog.ShowDialog(new NativeOwner(new WindowInteropHelper(window).Handle)) != Forms.DialogResult.OK) return;
+                        source = RosterAccess.RootFor(dialog.SelectedPath);
+                    }
                 }
-                if (CharacterFolders.FindDiscoveryTable(source) == null)
+                if (source == null)
                     throw new InvalidDataException("Choose discovery_data, Characters or Roster from the extracted Discovery files. The data needs Characters and Roster\\CharProfileTable.jsfb together.");
+                // Remember the location before the character picker opens: cancelling the
+                // character choice must not make the next click browse for the same root.
+                RememberRoot(window, source);
                 string prepared = PrepareFolder(source);
                 if (prepared == null) return;
 
-                // The native name finder and game setup will use the same selected Discovery root.
-                if (!string.IsNullOrWhiteSpace(lastDiscoveryRoot))
-                {
-                    var setup = type.GetField("SetupFolder", InstanceMembers);
-                    if (setup != null && setup.FieldType == typeof(string))
-                    {
-                        setup.SetValue(window, lastDiscoveryRoot);
-                        var save = type.GetMethod("SaveUserSettings", InstanceMembers, null, Type.EmptyTypes, null);
-                        try { if (save != null) save.Invoke(window, null); }
-                        catch (TargetInvocationException error)
-                        {
-                            Forms.MessageBox.Show("The roster loaded, but its location could not be saved.\n\n" + (error.InnerException ?? error).Message,
-                                "Gorilla Studio — Discovery roster", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
-                        }
-                    }
-                }
+                string selectedRoot = RosterAccess.RootFor(lastDiscoveryRoot);
+                if (selectedRoot != null && !string.Equals(selectedRoot, source, StringComparison.OrdinalIgnoreCase))
+                    RememberRoot(window, selectedRoot);
 
                 var setFolder = type.GetMethod("SetFolder", InstanceMembers, null, new[] { typeof(string) }, null);
                 if (setFolder == null) throw new MissingMethodException("This Gorilla Studio version has no supported folder-loading method.");
@@ -120,7 +137,60 @@ namespace GorillaStudio.NameFolders
                 if (invocation != null && invocation.InnerException != null) error = invocation.InnerException;
                 Forms.MessageBox.Show(error.Message, "Gorilla Studio — Discovery roster", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Error);
             }
-            finally { button.IsEnabled = true; }
+            finally { button.IsEnabled = true; change.IsEnabled = true; }
+        }
+
+        private static string RememberedRoot(Window window)
+        {
+            string current = RosterAccess.RootFor(lastDiscoveryRoot);
+            if (current != null) return current;
+            string preferred = null;
+            try
+            {
+                string path = Path.Combine(StorageDirectory, "discovery-root.txt");
+                if (File.Exists(path)) preferred = File.ReadAllText(path).Trim();
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            var setup = window.GetType().GetField("SetupFolder", InstanceMembers);
+            string configured = setup == null ? null : setup.GetValue(window) as string;
+            string root = RosterAccess.FindRoot(preferred, configured, null);
+            return root ?? RosterAccess.FindRoot(null, null, ReadRoster());
+        }
+
+        private static void RememberRoot(Window window, string root)
+        {
+            lastDiscoveryRoot = root;
+            try
+            {
+                Directory.CreateDirectory(StorageDirectory);
+                string path = Path.Combine(StorageDirectory, "discovery-root.txt");
+                string temp = Path.Combine(StorageDirectory, "discovery-root-" + Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    File.WriteAllText(temp, root, new UTF8Encoding(false));
+                    if (File.Exists(path)) File.Replace(temp, path, null);
+                    else File.Move(temp, path);
+                }
+                finally { if (File.Exists(temp)) File.Delete(temp); }
+
+                // Keep the original native name finder and game setup on the same root.
+                Type type = window.GetType();
+                var setup = type.GetField("SetupFolder", InstanceMembers);
+                if (setup != null && setup.FieldType == typeof(string))
+                {
+                    setup.SetValue(window, root);
+                    var save = type.GetMethod("SaveUserSettings", InstanceMembers, null, Type.EmptyTypes, null);
+                    if (save != null) save.Invoke(window, null);
+                }
+            }
+            catch (Exception error)
+            {
+                var invocation = error as TargetInvocationException;
+                if (invocation != null && invocation.InnerException != null) error = invocation.InnerException;
+                Forms.MessageBox.Show("The roster location will be used this session, but could not be saved.\n\n" + error.Message,
+                    "Gorilla Studio — Discovery roster", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
+            }
         }
 
         private sealed class NativeOwner : Forms.IWin32Window

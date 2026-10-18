@@ -14,6 +14,9 @@ namespace GorillaStudio.NameFolders
         private readonly ListView wrestlers = new ListView();
         private readonly Label status = new Label();
         private readonly Button confirm = new Button();
+        private readonly Button chooseSlot = new Button();
+        private readonly Button browseModel = new Button();
+        private readonly ComboBox filter = new ComboBox();
         private readonly NumericUpDown manualId = new NumericUpDown();
         private readonly TextBox manualName = new TextBox();
         private readonly string suggestedName;
@@ -29,8 +32,8 @@ namespace GorillaStudio.NameFolders
             Text = "Gorilla Studio — choose wrestler";
             Font = new Font("Segoe UI", 10);
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(760, 610);
-            Size = new Size(880, 720);
+            MinimumSize = new Size(860, 610);
+            Size = new Size(1050, 760);
             AutoScaleMode = AutoScaleMode.Dpi;
             MinimizeBox = false;
             MaximizeBox = true;
@@ -56,17 +59,30 @@ namespace GorillaStudio.NameFolders
             var loadFile = new Button { Text = "Load roster file…", AutoSize = true, Padding = new Padding(8, 2, 8, 2) };
             loadFile.Click += LoadRosterFile;
             importBar.Controls.Add(loadFile);
+            if (currentRosterTable != null)
+            {
+                var rescan = new Button { Text = "Refresh data", AutoSize = true, Padding = new Padding(8, 2, 8, 2) };
+                rescan.Click += (s, e) => { if (currentRosterTable != null) Import(() => RosterSession.Open(DiscoveryProfiles.DataRoot(currentRosterTable), Entries).Entries); };
+                importBar.Controls.Add(rescan);
+            }
             importBar.Controls.Add(new Label { Text = "JSON or CharProfileTable.jsfb", AutoSize = true, Margin = new Padding(10, 8, 0, 0) });
             layout.Controls.Add(importBar, 0, 2);
 
-            var searchRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2,
+            var searchRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3,
                 Margin = new Padding(0, 0, 0, 6) };
             searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            searchRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             searchRow.Controls.Add(new Label { Text = "Search", AutoSize = true, Margin = new Padding(0, 5, 12, 0) }, 0, 0);
             search.Dock = DockStyle.Fill;
             search.TextChanged += (s, e) => RefreshList(null);
             searchRow.Controls.Add(search, 1, 0);
+            filter.DropDownStyle = ComboBoxStyle.DropDownList;
+            filter.Dock = DockStyle.Fill;
+            filter.Items.AddRange(new object[] { "All wrestlers", "Models in data", "Model not in data" });
+            filter.SelectedIndex = 0;
+            filter.SelectedIndexChanged += (s, e) => RefreshList(null);
+            searchRow.Controls.Add(filter, 2, 0);
             layout.Controls.Add(searchRow, 0, 3);
 
             wrestlers.Dock = DockStyle.Fill;
@@ -75,8 +91,10 @@ namespace GorillaStudio.NameFolders
             wrestlers.MultiSelect = false;
             wrestlers.HideSelection = false;
             wrestlers.Columns.Add("Wrestler ID", 110);
-            wrestlers.Columns.Add("Wrestler name", 550);
-            wrestlers.SelectedIndexChanged += (s, e) => confirm.Enabled = wrestlers.SelectedItems.Count == 1;
+            wrestlers.Columns.Add("Wrestler name", 300);
+            wrestlers.Columns.Add("Model / source", 520);
+            wrestlers.ShowItemToolTips = true;
+            wrestlers.SelectedIndexChanged += (s, e) => UpdateButtons();
             wrestlers.DoubleClick += (s, e) => ConfirmSelection();
             layout.Controls.Add(wrestlers, 0, 4);
 
@@ -115,8 +133,36 @@ namespace GorillaStudio.NameFolders
             confirm.AutoSize = true;
             confirm.Padding = new Padding(8, 4, 8, 4);
             confirm.Click += (s, e) => ConfirmSelection();
+            chooseSlot.Text = "Use folder for another wrestler…";
+            chooseSlot.AutoSize = true;
+            chooseSlot.Padding = new Padding(8, 4, 8, 4);
+            chooseSlot.Click += (s, e) => ChooseFolderSlot();
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(confirm);
+            if (chooseCharacterFolder) buttons.Controls.Add(chooseSlot);
+            if (chooseCharacterFolder)
+            {
+                browseModel.Text = "Choose model folder…";
+                browseModel.AutoSize = true;
+                browseModel.Padding = new Padding(8, 4, 8, 4);
+                browseModel.Click += (s, e) =>
+                {
+                    if (wrestlers.SelectedItems.Count != 1) return;
+                    var entry = (RosterEntry)wrestlers.SelectedItems[0].Tag;
+                    if (entry.Id < 1) return;
+                    using (var dialog = new FolderBrowserDialog { Description = "Choose the model folder for " + entry.Name, ShowNewFolderButton = false })
+                    {
+                        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                        if (CharacterFolders.HasAmbiguousChildren(dialog.SelectedPath))
+                        {
+                            MessageBox.Show(this, "Choose a specific numbered character or attire folder.", "Choose model folder", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            return;
+                        }
+                        CompleteSelection(entry, dialog.SelectedPath);
+                    }
+                };
+                buttons.Controls.Add(browseModel);
+            }
             layout.Controls.Add(buttons, 0, 8);
             CancelButton = cancel;
             ApplyTheme(this);
@@ -161,19 +207,25 @@ namespace GorillaStudio.NameFolders
             wrestlers.Items.Clear();
             foreach (RosterEntry entry in Entries.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id))
             {
+                bool hasModel = Directory.Exists(entry.Folder);
+                if ((filter.SelectedIndex == 1 && !hasModel) || (filter.SelectedIndex == 2 && hasModel)) continue;
                 if (query.Length > 0 && entry.Name.Replace('_', ' ').IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0
-                    && entry.Id.ToString(CultureInfo.InvariantCulture).IndexOf(query, StringComparison.Ordinal) < 0) continue;
-                var item = new ListViewItem(entry.Id.ToString(CultureInfo.InvariantCulture)) { Tag = entry };
+                    && entry.Id.ToString(CultureInfo.InvariantCulture).IndexOf(query, StringComparison.Ordinal) < 0
+                    && (entry.Folder ?? "").Replace('_', ' ').IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var item = new ListViewItem(entry.Id == 0 ? "Choose…" : entry.Id.ToString(CultureInfo.InvariantCulture)) { Tag = entry };
                 item.SubItems.Add(entry.Name);
+                item.SubItems.Add(hasModel ? (entry.Source ?? "Folder") + " · " + Path.GetFileName(entry.Folder)
+                    : entry.StockFolder != null ? "Available from installed game · " + entry.StockFolder : "Profile · choose a model folder");
+                item.ToolTipText = entry.Folder ?? (entry.StockFolder == null ? "This roster profile has no model in the supplied data. Select its mod folder to load it." : "Load verified game model: " + entry.StockFolder);
                 wrestlers.Items.Add(item);
                 if ((preferred != null && preferred.Id == entry.Id && preferred.Name == entry.Name)
                     || (preferred == null && string.Equals(entry.Name.Replace('_', ' '), suggestedName, StringComparison.OrdinalIgnoreCase)))
                     item.Selected = true;
             }
             wrestlers.EndUpdate();
-            confirm.Enabled = wrestlers.SelectedItems.Count == 1;
+            UpdateButtons();
             status.Text = Entries.Count == 0 ? "Load a roster, or enter a wrestler's game ID and name below."
-                : string.Format(CultureInfo.InvariantCulture, "{0} wrestlers loaded · {1} shown. Select a wrestler to continue.", Entries.Count, wrestlers.Items.Count);
+                : string.Format(CultureInfo.InvariantCulture, "{0} roster entries · {1} with model folders · {2} shown", Entries.Count, Entries.Count(e => Directory.Exists(e.Folder)), wrestlers.Items.Count);
             if (wrestlers.SelectedItems.Count > 0) wrestlers.SelectedItems[0].EnsureVisible();
         }
 
@@ -193,6 +245,7 @@ namespace GorillaStudio.NameFolders
             try
             {
                 List<RosterEntry> next = load();
+                RosterSession.BindImportedModels(next, Entries, currentRosterTable);
                 Entries = next;
                 currentRosterTable = CommonRosterTable(next);
                 search.Clear();
@@ -214,6 +267,7 @@ namespace GorillaStudio.NameFolders
                 var entry = Entries.Find(e => e.Id == id && string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
                 if (entry == null) { entry = new RosterEntry { Id = id, Name = name, RosterTable = currentRosterTable }; Entries.Add(entry); }
                 search.Clear();
+                filter.SelectedIndex = 0;
                 RefreshList(entry);
             }
             catch (Exception error)
@@ -222,11 +276,82 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private void ConfirmSelection()
+        private void UpdateButtons()
+        {
+            confirm.Enabled = wrestlers.SelectedItems.Count == 1;
+            var entry = confirm.Enabled ? (RosterEntry)wrestlers.SelectedItems[0].Tag : null;
+            confirm.Text = entry != null && entry.Id == 0 ? "Choose wrestler for folder…" : "Load selected wrestler";
+            chooseSlot.Enabled = entry != null && Directory.Exists(entry.Folder);
+            browseModel.Enabled = entry != null && entry.Id > 0;
+        }
+
+        private void ChooseFolderSlot()
+        {
+            if (wrestlers.SelectedItems.Count != 1) return;
+            var model = (RosterEntry)wrestlers.SelectedItems[0].Tag;
+            if (!Directory.Exists(model.Folder)) return;
+            string modelFolder = model.Folder;
+            if (model.Source == "Choose an attire folder")
+            {
+                using (var dialog = new FolderBrowserDialog { Description = "This folder contains different model IDs. Choose the specific character or attire folder to load.", SelectedPath = modelFolder, ShowNewFolderButton = false })
+                {
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    modelFolder = dialog.SelectedPath;
+                    if (!CharacterFolders.PhysicalId(modelFolder).HasValue)
+                    {
+                        MessageBox.Show(this, "Choose a specific numbered character or attire folder.", "Choose model folder", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                }
+            }
+            using (var picker = new WrestlerPicker(modelFolder, Entries.Where(e => e.Id > 0).ToList(), false))
+            {
+                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                RosterEntry target = picker.SelectedEntry;
+                if (!Entries.Contains(target)) Entries.Add(target);
+                target.SourceId = CharacterFolders.PhysicalId(modelFolder) ?? (model.SourceId > 0 ? model.SourceId : target.Id);
+                target.IsMod = true;
+                target.Source = "Chosen folder";
+                CompleteSelection(target, modelFolder);
+            }
+        }
+
+        private async void ConfirmSelection()
         {
             if (wrestlers.SelectedItems.Count != 1) return;
             var entry = (RosterEntry)wrestlers.SelectedItems[0].Tag;
+            if (entry.Id == 0) { ChooseFolderSlot(); return; }
             string selectedFolder = chooseCharacterFolder ? entry.Folder : sourceFolder;
+            if (CharacterFolders.HasAmbiguousChildren(selectedFolder))
+            {
+                using (var dialog = new FolderBrowserDialog { Description = "Choose the specific numbered character or attire folder to load.", SelectedPath = selectedFolder, ShowNewFolderButton = false })
+                {
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    selectedFolder = dialog.SelectedPath;
+                    if (CharacterFolders.HasAmbiguousChildren(selectedFolder)) return;
+                }
+            }
+            if (chooseCharacterFolder && !Directory.Exists(selectedFolder) && !string.IsNullOrWhiteSpace(entry.StockFolder))
+            {
+                try
+                {
+                    Enabled = false;
+                    ControlBox = false;
+                    UseWaitCursor = true;
+                    status.Text = "Loading " + entry.Name + " from the installed game…";
+                    selectedFolder = await FolderBridge.RequestGameModelAsync(entry, entry.StockFolder, line =>
+                    {
+                        Action update = () => status.Text = line.Length > 150 ? line.Substring(0, 150) : line;
+                        if (!IsDisposed && IsHandleCreated) { if (InvokeRequired) BeginInvoke(update); else update(); }
+                    });
+                }
+                catch (Exception error)
+                {
+                    MessageBox.Show(this, error.Message, "Could not load game model", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                finally { Enabled = true; ControlBox = true; UseWaitCursor = false; }
+            }
             if (string.IsNullOrWhiteSpace(selectedFolder) || !Directory.Exists(selectedFolder))
             {
                 using (var dialog = new FolderBrowserDialog { Description = "Choose the character folder for " + entry.Name, ShowNewFolderButton = false })
@@ -235,6 +360,11 @@ namespace GorillaStudio.NameFolders
                     selectedFolder = dialog.SelectedPath;
                 }
             }
+            CompleteSelection(entry, selectedFolder);
+        }
+
+        private void CompleteSelection(RosterEntry entry, string selectedFolder)
+        {
             SelectedEntry = entry;
             SelectedFolder = selectedFolder;
             RosterSession.RememberSelection(entry, selectedFolder, chooseCharacterFolder);
