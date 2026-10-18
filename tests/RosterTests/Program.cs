@@ -358,7 +358,8 @@ internal static class Program
         Test("Actual uploaded JSFB reads all 1457 profile IDs and 1308 localized names", () => {
             Equal(1457, profiles.Count); Equal(1457, profiles.Select(p => p.Id).Distinct().Count());
             Equal(1308, profiles.Count(p => !string.IsNullOrWhiteSpace(p.Name)));
-            Equal(1457, actual.Count); Equal(1457, actual.Select(p => p.Id).Distinct().Count());
+            Equal(1458, actual.Count); Equal(1457, actual.Where(p => p.Id > 0).Select(p => p.Id).Distinct().Count());
+            Equal(1, actual.Count(p => p.Id == 0));
             Equal("NICK JACKSON '14", actual.Single(e => e.Id == 204).Name);
             Equal("DAX HARWOOD", actual.Single(e => e.Id == 211).Name);
             Equal("CASH WHEELER", actual.Single(e => e.Id == 213).Name);
@@ -375,9 +376,14 @@ internal static class Program
             Equal((string)null, actual.Single(e => e.Id == 123).Folder);
             Equal((string)null, actual.Single(e => e.Id == 312).Folder);
         });
+        Test("Actual unreferenced Hollywood Hogan stays separate from Karl Anderson's roster slot", () => {
+            var karl = actual.Single(e => e.Id == 109); Equal("KARL ANDERSON", karl.Name); Equal((string)null, karl.Folder);
+            var hogan = actual.Single(e => e.Id == 0); Equal("Hollywood Hogan 2002", hogan.Name); Equal(109, hogan.SourceId);
+            Equal(Path.Combine(discovery, "Characters", "109_Hollywood_Hogan_2002"), hogan.Folder); Equal("Choose roster slot", hogan.Source);
+        });
         Test("Actual JSFB roster entries retain their original table context", () => {
             foreach (RosterEntry entry in actual) Equal(table, entry.RosterTable);
-            var roundTrip = Load("actual-context.json", JsonSerializer.Serialize(actual));
+            var roundTrip = Load("actual-context.json", JsonSerializer.Serialize(actual.Where(e => e.Id > 0).ToList()));
             Equal(1457, roundTrip.Count);
             foreach (RosterEntry entry in roundTrip)
             {
@@ -407,9 +413,9 @@ internal static class Program
             var saved = RosterImport.LoadFile(table);
             string addedFolder = Directory.CreateDirectory(Path.Combine(root, "saved-added-model")).FullName;
             saved.Add(new RosterEntry { Id = 4000, Name = "2 Cold Scorpio", Folder = addedFolder, RosterTable = table, SourceId = 1506, IsMod = true, Source = "Manual selection" });
-            var reloaded = Load("saved-added.json", JsonSerializer.Serialize(saved));
+            var reloaded = Load("saved-added.json", JsonSerializer.Serialize(saved.Where(e => e.Id > 0).ToList()));
             var session = RosterSession.Open(discovery, reloaded);
-            Equal(1458, session.Entries.Count); Equal(true, session.ChooseCharacterFolder);
+            Equal(1459, session.Entries.Count); Equal(true, session.ChooseCharacterFolder);
             var added = session.Entries.Single(e => e.Id == 4000); Equal(addedFolder, added.Folder); Equal(1506, added.SourceId); Equal(true, added.IsMod);
             foreach (RosterEntry entry in session.Entries.Where(e => e.Id != 4000)) Equal(actual.Single(e => e.Id == entry.Id).Name, entry.Name);
         });
@@ -469,22 +475,43 @@ internal static class Program
             foreach (RosterEntry entry in legacy) entry.RosterTable = table;
             var saved = Load("legacy-folder-roster.json", JsonSerializer.Serialize(legacy));
             Equal(0, saved.Single(e => e.Id == 123).SourceId); Equal((string)null, saved.Single(e => e.Id == 312).Source);
-            var migrated = RosterSession.Open(discovery, saved).Entries; Equal(1457, migrated.Count);
+            var migrated = RosterSession.Open(discovery, saved).Entries; Equal(1458, migrated.Count);
             Equal((string)null, migrated.Single(e => e.Id == 123).Folder); Equal((string)null, migrated.Single(e => e.Id == 312).Folder);
             Equal(123, migrated.Single(e => e.Id == 910).SourceId); Equal(312, migrated.Single(e => e.Id == 1481).SourceId);
             Equal(actual.Single(e => e.Id == 109).Name, migrated.Single(e => e.Id == 109).Name);
             foreach (RosterEntry entry in migrated.Where(e => e.Folder != null)) Equal(1, migrated.Count(e => e.Folder == entry.Folder));
         });
+        Test("A saved guessed Hollywood Hogan body is not restored to Karl Anderson on upgrade", () => {
+            var guessed = new RosterEntry { Id = 109, Name = "KARL ANDERSON", Folder = Path.Combine(discovery, "Characters", "109_Hollywood_Hogan_2002"),
+                RosterTable = table, SourceId = 109, IsMod = true, Source = "Folder ID" };
+            var session = RosterSession.Open(discovery, new[] { guessed }); Equal(1458, session.Entries.Count);
+            var karl = session.Entries.Single(e => e.Id == 109); Equal("KARL ANDERSON", karl.Name); Equal((string)null, karl.Folder);
+            Equal(guessed.Folder, session.Entries.Single(e => e.Id == 0).Folder);
+        });
+        Test("A saved physical folder ID cannot bypass a freshly decoded different logical slot", () => {
+            var oldProfile = actual.Single(e => e.Id == 123);
+            var guessed = new RosterEntry { Id = 123, Name = oldProfile.Name, Folder = Path.Combine(discovery, "Characters", "123_Rey_Mysterio_2019"),
+                RosterTable = table, SourceId = 123, IsMod = true, Source = "Folder ID" };
+            var session = RosterSession.Open(discovery, new[] { guessed }); Equal(1458, session.Entries.Count);
+            Equal((string)null, session.Entries.Single(e => e.Id == 123).Folder);
+            Equal(guessed.Folder, session.Entries.Single(e => e.Id == 910).Folder);
+        });
+        Test("Migration retains an explicit chosen model even when its physical number differs", () => {
+            var chosen = new RosterEntry { Id = 109, Name = "KARL ANDERSON", Folder = Path.Combine(discovery, "Characters", "109_Hollywood_Hogan_2002"),
+                RosterTable = table, SourceId = 109, IsMod = true, Source = "Chosen model" };
+            var session = RosterSession.Open(discovery, new[] { chosen }); Equal(1458, session.Entries.Count);
+            Equal(chosen.Folder, session.Entries.Single(e => e.Id == 109).Folder); Equal("Chosen model", session.Entries.Single(e => e.Id == 109).Source);
+        });
         Test("Migration preserves an explicit new manual choice using an existing model folder", () => {
             var chosen = new RosterEntry { Id = 4000, Name = "2 Cold Scorpio", Folder = Path.Combine(discovery, "Characters", "312_CM_Punk"),
                 RosterTable = table, SourceId = 312, IsMod = true, Source = "Manual selection" };
-            var session = RosterSession.Open(discovery, new[] { chosen }); Equal(1458, session.Entries.Count);
+            var session = RosterSession.Open(discovery, new[] { chosen }); Equal(1459, session.Entries.Count);
             Equal(chosen.Folder, session.Entries.Single(e => e.Id == 4000).Folder); Equal(312, session.Entries.Single(e => e.Id == 4000).SourceId);
         });
         Test("Dropping actual Flammer discovers the full roster and preserves single-source mapping mode", () => {
             string source = Path.Combine(discovery, "Characters", "1506_Flammer");
             var session = RosterSession.Open(source, null);
-            Equal(1457, session.Entries.Count); Equal(false, session.ChooseCharacterFolder);
+            Equal(1458, session.Entries.Count); Equal(false, session.ChooseCharacterFolder);
             Equal(table, session.DiscoveryTable); Equal("DAX HARWOOD", session.Entries.Single(e => e.Id == 211).Name);
         });
         Test("Actual roster plus one new unnumbered character imports 11 without guessing its ID", () => {

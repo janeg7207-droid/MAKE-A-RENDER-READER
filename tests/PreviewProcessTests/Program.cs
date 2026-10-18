@@ -2,6 +2,15 @@ using System;
 using System.Diagnostics;
 using GorillaStudio.NameFolders;
 
+namespace GorillaStudio.NameFolders
+{
+    public static class DiscoveryTauntBridge
+    {
+        public static void ConfigureProcess(object owner, Process process, string script,
+            System.Collections.Generic.IEnumerable<string> args) { }
+    }
+}
+
 // The environment bridge is exercised without loading the Windows-only UI.
 namespace GorillaStudio.NameFolders
 {

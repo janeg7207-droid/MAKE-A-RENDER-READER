@@ -43,10 +43,12 @@ internal static class Program
             WriteString(sdb, newKey, newName);
             List<RosterEntry> refreshed = RosterSession.Refresh(table, baseline);
             Check("Refreshing the same JSFB path discovers a newly added profile and SDB name", () => {
-                Equal(1457, baseline.Count);
+                Equal(1457, baseline.Count); // This copied fixture contains the profile tables, not all original models.
+                Equal(1457, baseline.Count(entry => entry.Id > 0));
                 Equal(1457, baseline.Select(entry => entry.Id).Distinct().Count());
                 Equal(false, baseline.Any(entry => entry.Id == newId || entry.Id == boundaryId));
                 Equal(1458, refreshed.Count);
+                Equal(1458, refreshed.Count(entry => entry.Id > 0));
                 RosterEntry added = refreshed.Single(entry => entry.Id == newId);
                 Equal(newName, added.Name); Equal(1506, added.SourceId); Equal(table, added.RosterTable);
                 Equal(true, DiscoveryProfiles.Read(table).Single(profile => profile.Id == newId).Female);
@@ -75,6 +77,7 @@ internal static class Program
                 Equal(Path.GetDirectoryName(table), plan.RosterDirectory); Equal(data, plan.DataRoot);
                 Equal(candidates[0].Folder, plan.SourceFolder); Equal(4000, addedEntry.Id);
                 Equal(1458, reopened.Count);
+                Equal(1458, reopened.Count(entry => entry.Id > 0));
                 RosterEntry entry = reopened.Single(item => item.Id == newId);
                 Equal(newName, entry.Name); Equal(4000, entry.Id); Equal(1506, entry.SourceId);
                 Equal(candidates[0].Folder, entry.Folder); Equal(table, entry.RosterTable); Equal(true, entry.IsMod);
@@ -106,6 +109,7 @@ internal static class Program
             List<RosterEntry> extendedAgain = RosterSession.Refresh(table, renamedEntries);
             Check("A later addition at ID 65527 loads without a cached roster size or stock-ID limit", () => {
                 Equal(1459, extendedAgain.Count);
+                Equal(1459, extendedAgain.Count(entry => entry.Id > 0));
                 Equal("GROWTH BOUNDARY WRESTLER", extendedAgain.Single(entry => entry.Id == boundaryId).Name);
                 Equal(baseline.Single(entry => entry.Id == ushort.MaxValue).Name, extendedAgain.Single(entry => entry.Id == ushort.MaxValue).Name);
                 Equal(renamed, extendedAgain.Single(entry => entry.Id == newId).Name);

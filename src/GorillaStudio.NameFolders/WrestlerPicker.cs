@@ -28,10 +28,11 @@ namespace GorillaStudio.NameFolders
         public List<RosterEntry> Entries { get; private set; }
         public RosterEntry SelectedEntry { get; private set; }
         public string SelectedFolder { get; private set; }
+        public string CurrentRosterFile { get { return currentRosterFile; } }
 
-        public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseCharacterFolder)
+        public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseCharacterFolder, string rosterFile = null)
         {
-            Text = "Gorilla Studio — choose wrestler";
+            Text = chooseCharacterFolder ? "Gorilla Studio — select wrestler" : "Gorilla Studio — choose wrestler";
             Font = new Font("Segoe UI", 10);
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(860, 610);
@@ -44,7 +45,7 @@ namespace GorillaStudio.NameFolders
             sourceFolder = source;
             this.chooseCharacterFolder = chooseCharacterFolder;
             currentRosterTable = CommonRosterTable(entries);
-            currentRosterFile = currentRosterTable;
+            currentRosterFile = rosterFile ?? currentRosterTable;
             suggestedName = FolderNames.DisplayName(new DirectoryInfo(source).Name);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 9 };
@@ -52,7 +53,7 @@ namespace GorillaStudio.NameFolders
             for (int row = 0; row < layout.RowCount; row++)
                 layout.RowStyles.Add(new RowStyle(row == 4 ? SizeType.Percent : SizeType.AutoSize, row == 4 ? 100 : 0));
             Controls.Add(layout);
-            layout.Controls.Add(new Label { Text = chooseCharacterFolder ? "Choose a character from your Discovery data" : "Choose the wrestler for this folder", AutoSize = true,
+            layout.Controls.Add(new Label { Text = chooseCharacterFolder ? "Select a wrestler — the app loads their model automatically" : "Choose the wrestler for this folder", AutoSize = true,
                 Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, 0, 8) }, 0, 0);
             layout.Controls.Add(new Label { Text = source, AutoSize = true, MaximumSize = new Size(800, 56),
                 AutoEllipsis = true, Margin = new Padding(0, 0, 0, 10) }, 0, 1);
@@ -86,7 +87,7 @@ namespace GorillaStudio.NameFolders
             searchRow.Controls.Add(search, 1, 0);
             filter.DropDownStyle = ComboBoxStyle.DropDownList;
             filter.Dock = DockStyle.Fill;
-            filter.Items.AddRange(new object[] { "All wrestlers", "Models in data", "Model not in data" });
+            filter.Items.AddRange(new object[] { "All wrestlers", "Ready locally", "Need model files", "Unassigned models" });
             filter.SelectedIndex = 0;
             filter.SelectedIndexChanged += (s, e) => RefreshList(null);
             searchRow.Controls.Add(filter, 2, 0);
@@ -103,6 +104,19 @@ namespace GorillaStudio.NameFolders
             wrestlers.ShowItemToolTips = true;
             wrestlers.SelectedIndexChanged += (s, e) => UpdateButtons();
             wrestlers.DoubleClick += (s, e) => ConfirmSelection();
+            wrestlers.MouseUp += (s, e) =>
+            {
+                if (!chooseCharacterFolder || e.Button != MouseButtons.Left || modelSelectionBusy) return;
+                ListViewItem clicked = wrestlers.GetItemAt(e.X, e.Y);
+                if (clicked != null && clicked.Selected) ConfirmSelection();
+            };
+            wrestlers.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode != Keys.Enter) return;
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                ConfirmSelection();
+            };
             layout.Controls.Add(wrestlers, 0, 4);
 
             status.AutoSize = true;
@@ -132,7 +146,9 @@ namespace GorillaStudio.NameFolders
             manual.Controls.Add(manualRow);
             layout.Controls.Add(manual, 0, 6);
 
-            layout.Controls.Add(new Label { Text = "Choose the game's wrestler ID, not a roster-picture number. Your original folder keeps its name.",
+            layout.Controls.Add(new Label { Text = chooseCharacterFolder
+                ? "Select a wrestler, then press Preview in the main window. Model library locations and your choices are remembered."
+                : "Choose the game's wrestler ID, not a roster-picture number. Your original folder keeps its name.",
                 AutoSize = true, Margin = new Padding(0, 2, 0, 10) }, 0, 7);
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
             var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, Padding = new Padding(8, 4, 8, 4) };
@@ -185,8 +201,10 @@ namespace GorillaStudio.NameFolders
             };
             wrestlers.DrawItem += (s, e) => { if (wrestlers.View != View.Details) e.DrawDefault = true; };
             wrestlers.DrawSubItem += (s, e) => e.DrawDefault = true;
-            // Enter remains useful in the search/manual fields; loading requires an explicit click or a list double-click.
+            // Searching and keyboard navigation never load a model. Clicking a roster
+            // row or pressing Enter in the list commits that explicit selection.
             RefreshList(null);
+            Shown += (sender, args) => search.Focus();
         }
 
         private static void ApplyTheme(Control control)
@@ -213,7 +231,8 @@ namespace GorillaStudio.NameFolders
             wrestlers.Items.Clear();
             foreach (RosterEntry entry in Entries.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id))
             {
-                bool hasModel = Directory.Exists(entry.Folder);
+                bool hasModel = HasIndexedModel(entry.Folder);
+                if ((filter.SelectedIndex == 3 && entry.Id > 0) || (filter.SelectedIndex != 3 && entry.Id < 1)) continue;
                 if ((filter.SelectedIndex == 1 && !hasModel) || (filter.SelectedIndex == 2 && hasModel)) continue;
                 if (query.Length > 0 && entry.Name.Replace('_', ' ').IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0
                     && entry.Id.ToString(CultureInfo.InvariantCulture).IndexOf(query, StringComparison.Ordinal) < 0
@@ -223,8 +242,8 @@ namespace GorillaStudio.NameFolders
                 List<ModelCandidate> choices;
                 item.SubItems.Add(hasModel ? (entry.Source ?? "Folder") + " · " + Path.GetFileName(entry.Folder)
                     : modelChoices.TryGetValue(entry, out choices) ? choices.Count + " matching models · choose from list"
-                    : entry.StockFolder != null ? "Available from installed game · " + entry.StockFolder : "Model not found · Scan models folder…");
-                item.ToolTipText = entry.Folder ?? (entry.StockFolder == null ? "This roster profile has no model in the supplied data. Select its mod folder to load it." : "Load verified game model: " + entry.StockFolder);
+                    : entry.StockFolder != null ? "Loads automatically from installed game · " + entry.StockFolder : "Model files not indexed · Set model library…");
+                item.ToolTipText = entry.Folder ?? (entry.StockFolder == null ? "Set your main Characters or mods folder once so the app can find this wrestler's model." : "Load verified game model: " + entry.StockFolder);
                 wrestlers.Items.Add(item);
                 if ((preferred != null && preferred.Id == entry.Id && preferred.Name == entry.Name)
                     || (preferred == null && string.Equals(entry.Name.Replace('_', ' '), suggestedName, StringComparison.OrdinalIgnoreCase)))
@@ -233,7 +252,7 @@ namespace GorillaStudio.NameFolders
             wrestlers.EndUpdate();
             UpdateButtons();
             status.Text = Entries.Count == 0 ? "Load a roster, or enter a wrestler's game ID and name below."
-                : string.Format(CultureInfo.InvariantCulture, "{0} roster entries · {1} with model folders · {2} shown", Entries.Count, Entries.Count(e => Directory.Exists(e.Folder)), wrestlers.Items.Count);
+                : string.Format(CultureInfo.InvariantCulture, "{0} wrestlers · {1} ready locally · {2} shown", Entries.Count(e => e.Id > 0), Entries.Count(e => e.Id > 0 && HasIndexedModel(e.Folder)), wrestlers.Items.Count);
             if (wrestlers.SelectedItems.Count > 0) wrestlers.SelectedItems[0].EnsureVisible();
         }
 
@@ -341,33 +360,14 @@ namespace GorillaStudio.NameFolders
                 await modelScanTask;
                 if (IsDisposed) return;
                 string selectedFolder = chooseCharacterFolder ? entry.Folder : sourceFolder;
-                if (CharacterFolders.HasAmbiguousChildren(selectedFolder))
+                if (chooseCharacterFolder)
+                    selectedFolder = await ResolveSelectedModelAsync(entry);
+                else if (CharacterFolders.HasAmbiguousChildren(selectedFolder))
                 {
                     selectedFolder = FolderLocationDialog.Choose(this, "Choose a specific model",
                         "Choose the specific numbered character or attire folder to load.", selectedFolder);
                     if (selectedFolder == null || CharacterFolders.HasAmbiguousChildren(selectedFolder)) return;
                 }
-                List<ModelCandidate> choices;
-                if (chooseCharacterFolder && !Directory.Exists(selectedFolder) && modelChoices.TryGetValue(entry, out choices))
-                    selectedFolder = await ChooseExistingModelAsync(entry);
-                else if (chooseCharacterFolder && !Directory.Exists(selectedFolder) && !string.IsNullOrWhiteSpace(entry.StockFolder))
-                {
-                    try
-                    {
-                        Enabled = false;
-                        ControlBox = false;
-                        UseWaitCursor = true;
-                        status.Text = "Loading " + entry.Name + " from the installed game…";
-                        selectedFolder = await FolderBridge.RequestGameModelAsync(entry, entry.StockFolder, line =>
-                        {
-                            Action update = () => status.Text = line.Length > 150 ? line.Substring(0, 150) : line;
-                            if (!IsDisposed && IsHandleCreated) { if (InvokeRequired) BeginInvoke(update); else update(); }
-                        });
-                    }
-                    finally { Enabled = true; ControlBox = true; UseWaitCursor = false; }
-                }
-                else if (!Directory.Exists(selectedFolder))
-                    selectedFolder = await ChooseExistingModelAsync(entry);
                 if (selectedFolder != null && !IsDisposed) CompleteSelection(entry, selectedFolder);
             }
             catch (Exception error)

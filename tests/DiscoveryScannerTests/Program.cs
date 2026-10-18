@@ -76,6 +76,44 @@ internal static class Program
                 Equal(1481, entry.Id); Equal(312, entry.SourceId); Equal("CM Punk GM", entry.Name); Equal("Character mapping", entry.Source);
                 Equal(Directory.GetParent(model).Parent.FullName, entry.Folder);
             });
+            Check("A physical folder number cannot select a conflicting localized roster profile", () => {
+                string root = Data("conflicting-profile"); Model(root, "109_Hollywood_Hogan_2002", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, Profiles(109, "Karl Anderson")).Entries.Single();
+                Equal(0, entry.Id); Equal(109, entry.SourceId); Equal("Hollywood Hogan 2002", entry.Name); Equal("Choose roster slot", entry.Source);
+            });
+            Check("An unmapped numbered model may resolve by a unique exact localized name", () => {
+                string root = Data("numbered-name"); Model(root, "109_Hollywood_Hogan_2002", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, new[] { new DiscoveryProfile { Id = 109, Name = "Karl Anderson" }, new DiscoveryProfile { Id = 9000, Name = "Hollywood Hogan 2002" } }).Entries.Single();
+                Equal(9000, entry.Id); Equal(109, entry.SourceId); Equal("Hollywood Hogan 2002", entry.Name); Equal("Name match", entry.Source);
+            });
+            Check("A numbered model's matching profile name remains loadable with no path mapping", () => {
+                string root = Data("matching-numbered-name"); Model(root, "343_Brock_Lesnar", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, Profiles(343, "BROCK LESNAR")).Entries.Single();
+                Equal(343, entry.Id); Equal(343, entry.SourceId); Equal("Name match", entry.Source);
+            });
+            Check("A numbered model does not choose between duplicate localized names", () => {
+                string root = Data("duplicate-numbered-name"); Model(root, "215_PAC", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, new[] { new DiscoveryProfile { Id = 4000, Name = "PAC" }, new DiscoveryProfile { Id = 4001, Name = "PAC" } }).Entries.Single();
+                Equal(0, entry.Id); Equal(215, entry.SourceId); Equal("PAC", entry.Name);
+            });
+            Check("Explicit placeholder slot folders remain supported beside a mapping", () => {
+                string root = Data("mapped-placeholder"); Model(root, "placeholder_368_A0", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, Profiles(368, "Roman Reigns")).Entries.Single(); Equal(368, entry.Id); Equal("Folder ID", entry.Source);
+            });
+            Check("Mapping-free collections retain their explicit folder-ID import", () => {
+                string root = Data("legacy-folder-id"); Model(root, "109_Hollywood_Hogan_2002", "Default_Attire", "Attire.mcd");
+                var entry = DiscoveryScanner.Scan(root, Profiles(109, "Karl Anderson")).Entries.Single(); Equal(109, entry.Id); Equal("Folder ID", entry.Source);
+            });
+            Check("Profiles without usable names retain explicit folder-ID import", () => {
+                string root = Data("unnamed-profiles"); Model(root, "109_Hollywood_Hogan_2002", "Default_Attire", "Attire.mcd");
+                Mapping(Path.Combine(root, "Characters", "CharacterMapping.jsfb"), new KeyValuePair<int, ulong>[0]);
+                var entry = DiscoveryScanner.Scan(root, Profiles(109, null)).Entries.Single(); Equal(109, entry.Id); Equal(109, entry.SourceId);
+            });
             Check("One shared physical model keeps all distinct mapped slots", () => {
                 string root = Data("shared-model"); Model(root, "Plain Mod", "Default_Attire", "Attire.mcd");
                 ulong hash = CharacterMappingReader.ModelPathHash("Characters/Plain Mod/Default_Attire/Attire.mcd");
@@ -169,6 +207,14 @@ internal static class Program
         Check("Actual mapping variants collapse without dropping modded identities", () => {
             Equal(10, scan.Entries.Count); Equal(1, scan.Entries.Count(e => e.Id == 927));
             Equal(true, scan.Entries.All(e => e.IsMod && e.SourceId > 0 && Directory.Exists(e.Folder)));
+        });
+        Check("Actual unmapped Hollywood Hogan is not attached to Karl Anderson's profile", () => {
+            var entry = scan.Entries.Single(e => Path.GetFileName(e.Folder) == "109_Hollywood_Hogan_2002");
+            Equal(0, entry.Id); Equal(109, entry.SourceId); Equal("Hollywood Hogan 2002", entry.Name); Equal("Choose roster slot", entry.Source);
+        });
+        Check("Actual unmapped Brock resolves by his unique profile name", () => {
+            var entry = scan.Entries.Single(e => Path.GetFileName(e.Folder) == "343_Brock_Lesnar");
+            Equal(343, entry.Id); Equal(343, entry.SourceId); Equal("BROCK LESNAR", entry.Name); Equal("Name match", entry.Source);
         });
         Check("Actual localized names come from profiles without hash-derived labels", () => {
             foreach (var entry in scan.Entries)

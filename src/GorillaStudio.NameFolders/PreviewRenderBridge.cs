@@ -29,7 +29,7 @@ namespace GorillaStudio.NameFolders
                 PreviewRequest request = preview && frozen ? PreviewRequest.Capture(owner, script, arguments, fast) : null;
                 string key = request == null ? null : await Task.Run(() => request.Fingerprint());
                 PreviewCacheStore store = null;
-                if (key != null)
+                if (key != null && request.EngineRootUnchanged())
                 {
                     try { store = new PreviewCacheStore(Path.Combine(StorageDirectory, "preview-cache")); } catch { }
                     if (store != null)
@@ -39,6 +39,7 @@ namespace GorillaStudio.NameFolders
                         {
                             cached = true;
                             if (onLine != null) foreach (string line in lines) onLine(line);
+                            try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, lines); } catch { }
                             return new ValueTuple<int, List<string>>(0, lines);
                         }
                     }
@@ -52,6 +53,8 @@ namespace GorillaStudio.NameFolders
                     string after = await Task.Run(() => request.Fingerprint());
                     if (key == after) await Task.Run(() => store.Save(key, result.Item2));
                 }
+                if (preview && result.Item1 == 0)
+                    try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, result.Item2); } catch { }
                 return result;
             }
             finally
@@ -85,6 +88,7 @@ namespace GorillaStudio.NameFolders
         {
             private string[] arguments;
             private string script, baseDirectory, engine, studio, library, blender, game, setup;
+            private string discoveryEngineRoot, inheritedEngineRoot;
             private bool fast;
 
             internal static PreviewRequest Capture(object owner, string script, string[] args, bool fast)
@@ -96,7 +100,9 @@ namespace GorillaStudio.NameFolders
                         baseDirectory = ReadPath(owner, "BaseDir") ?? AppDomain.CurrentDomain.BaseDirectory,
                         engine = ReadPath(owner, "EngineExe"), studio = ReadPath(owner, "Studio"),
                         library = ReadPath(owner, "Library"), blender = ReadPath(owner, "BlenderPath"),
-                        game = ReadPath(owner, "Game"), setup = ReadPath(owner, "SetupFolder")
+                        game = ReadPath(owner, "Game"), setup = ReadPath(owner, "SetupFolder"),
+                        discoveryEngineRoot = DiscoveryEngineRoot,
+                        inheritedEngineRoot = Environment.GetEnvironmentVariable("GS_ROOT")
                     };
                 }
                 catch { return null; }
@@ -107,6 +113,13 @@ namespace GorillaStudio.NameFolders
                 try
                 {
                     if (arguments == null || arguments.Length < 1 || !Directory.Exists(arguments[0]) || !Directory.Exists(baseDirectory)) return null;
+                    // The taunt bridge sets GS_ROOT on each child process rather than
+                    // globally. Track that effective overlay as well as the app files.
+                    if (!EngineRootUnchanged()) return null;
+                    string effectiveRoot = !string.IsNullOrWhiteSpace(discoveryEngineRoot) ? discoveryEngineRoot
+                        : (!string.IsNullOrWhiteSpace(inheritedEngineRoot) ? inheritedEngineRoot : baseDirectory);
+                    effectiveRoot = Path.GetFullPath(effectiveRoot);
+                    if (!Directory.Exists(effectiveRoot)) return null;
                     var files = new HashSet<string>(Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
                     var visited = new HashSet<string>(files.Comparer);
                     var signature = new StringBuilder();
@@ -117,8 +130,10 @@ namespace GorillaStudio.NameFolders
                     AddDiscoveryAncestors(model, files, visited, signature);
                     AddDiscoveryContext(setup, files, visited, signature);
                     foreach (string name in new[] { "library", "caps", "start", "faces", "gamepack" })
-                        AddOptionalTree(Path.Combine(baseDirectory, "data", name), files, visited, signature);
-                    AddOptionalTree(library, files, visited, signature);
+                        AddOptionalTree(Path.Combine(baseDirectory, "data", name), files, visited, signature, name == "library");
+                    foreach (string name in new[] { "library", "caps", "start", "faces", "gamepack" })
+                        AddOptionalTree(Path.Combine(effectiveRoot, "data", name), files, visited, signature, name == "library");
+                    AddOptionalTree(library, files, visited, signature, true);
                     string engineFolder = Path.Combine(baseDirectory, "engine");
                     string executable = engine ?? Path.Combine(engineFolder, "gs_engine.exe");
                     if (File.Exists(executable)) AddFile(executable, files);
@@ -144,10 +159,18 @@ namespace GorillaStudio.NameFolders
                     AddOptionalFile(typeof(FolderBridge).Assembly.Location, files);
                     foreach (string name in new[] { "GORILLA_EXTRA", "GORILLA_BLENDER", "GORILLA_GAME" })
                         signature.Append(name).Append('=').Append(Environment.GetEnvironmentVariable(name) ?? "").Append('\n');
-                    signature.Append("game=").Append(game).Append("\nblender=").Append(blender).Append("\nscript=").Append(script);
-                    return PreviewCache.Key(arguments, fast, files, signature.ToString());
+                    signature.Append("game=").Append(game).Append("\nblender=").Append(blender).Append("\nscript=").Append(script)
+                        .Append("\neffective-root=").Append(effectiveRoot).Append("\ninherited-GS_ROOT=").Append(inheritedEngineRoot);
+                    string key = PreviewCache.Key(arguments, fast, files, signature.ToString());
+                    return EngineRootUnchanged() ? key : null;
                 }
                 catch { return null; }
+            }
+
+            internal bool EngineRootUnchanged()
+            {
+                return string.Equals(discoveryEngineRoot, DiscoveryEngineRoot, StringComparison.Ordinal)
+                    && string.Equals(inheritedEngineRoot, Environment.GetEnvironmentVariable("GS_ROOT"), StringComparison.Ordinal);
             }
 
             private static void AddDiscoveryAncestors(string model, HashSet<string> files, HashSet<string> visited, StringBuilder signature)
@@ -166,23 +189,29 @@ namespace GorillaStudio.NameFolders
                 AddOptionalFile(Path.Combine(folder, "Sdb", "ENG.sdb"), files);
             }
 
-            private static void AddOptionalTree(string folder, HashSet<string> files, HashSet<string> visited, StringBuilder signature)
+            private static void AddOptionalTree(string folder, HashSet<string> files, HashSet<string> visited, StringBuilder signature, bool libraryRoot = false)
             {
-                if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder)) AddTree(folder, files, visited, signature);
+                if (!string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder)) AddTree(folder, files, visited, signature, libraryRoot);
             }
 
-            private static void AddTree(string folder, HashSet<string> files, HashSet<string> visited, StringBuilder signature)
+            private static void AddTree(string folder, HashSet<string> files, HashSet<string> visited, StringBuilder signature, bool libraryRoot = false)
             {
                 string resolved = DirectoryLinks.Resolve(folder);
                 if (!visited.Add(resolved)) return;
                 var directory = new DirectoryInfo(resolved);
                 long stamp = directory.LastWriteTimeUtc.Ticks;
                 foreach (string file in Directory.GetFiles(resolved)) AddFile(file, files);
-                foreach (string child in Directory.GetDirectories(resolved).OrderBy(path => path, StringComparer.Ordinal)) AddTree(child, files, visited, signature);
+                foreach (string child in Directory.GetDirectories(resolved).OrderBy(path => path, StringComparer.Ordinal))
+                {
+                    // These files display completed previews; they never feed model
+                    // rendering. Capturing a thumbnail must not invalidate its preview.
+                    if (libraryRoot && string.Equals(Path.GetFileName(child), "previews_game", StringComparison.OrdinalIgnoreCase)) continue;
+                    AddTree(child, files, visited, signature);
+                }
                 directory.Refresh();
                 if (!directory.Exists || directory.LastWriteTimeUtc.Ticks != stamp) throw new IOException("Preview inputs changed during scanning.");
                 // Directory times also distinguish empty/missing/new attire folders.
-                signature.Append(resolved).Append(':').Append(stamp).Append('\n');
+                signature.Append(resolved).Append(':').Append(libraryRoot ? "library-inputs" : stamp.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
             }
 
             private static void AddFile(string path, HashSet<string> files)

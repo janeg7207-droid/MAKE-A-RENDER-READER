@@ -68,17 +68,19 @@ namespace GorillaStudio.NameFolders
             if (characterRoots.Count == 0) throw new InvalidDataException("The selected data folder has no Characters directory or sibling BakeMe_Characters\\Characters directory.");
             string primaryMapping = primaryCharacters == null ? null : ChildFile(primaryCharacters, "CharacterMapping.jsfb");
             var mappings = new Dictionary<string, Dictionary<ulong, List<int>>>(StringComparer.OrdinalIgnoreCase);
+            var readableMappings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string characters in characterRoots)
             {
                 string physicalRoot = Directory.GetParent(characters) == null ? characters : Directory.GetParent(characters).FullName;
                 var indexes = new List<Dictionary<ulong, List<int>>>();
+                bool hasReadableMapping = false;
                 foreach (string path in new[] { ChildFile(characters, "CharacterMapping.jsfb"), primaryMapping }.Where(p => p != null).Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     Dictionary<ulong, List<int>> index;
                     if (!mappings.TryGetValue(path, out index))
                     {
-                        try { index = CharacterMappingReader.Read(path); }
+                        try { index = CharacterMappingReader.Read(path); readableMappings.Add(path); }
                         catch (Exception error) when (error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException)
                         {
                             result.Warnings.Add("Could not read character mapping " + path + ": " + error.Message);
@@ -87,6 +89,7 @@ namespace GorillaStudio.NameFolders
                         mappings.Add(path, index);
                     }
                     indexes.Add(index);
+                    hasReadableMapping = hasReadableMapping || readableMappings.Contains(path);
                 }
                 IEnumerable<string> folders = singleFolder == null ? Directories(characters, result) : new[] { singleFolder };
                 foreach (string folder in folders.OrderBy(p => p, StringComparer.OrdinalIgnoreCase))
@@ -120,8 +123,9 @@ namespace GorillaStudio.NameFolders
                     string origin;
                     if (ambiguousAttires) { resolved = new List<int> { 0 }; origin = "Choose an attire folder"; }
                     else if (mappedIds.Count > 0) { resolved = mappedIds.OrderBy(id => id).ToList(); origin = "Character mapping"; }
-                    else if (physicalId > 0) { resolved = new List<int> { physicalId }; origin = "Folder ID"; }
-                    else if (byName.TryGetValue(NameKey(fallback), out resolved)) origin = "Name match";
+                    else if (physicalId > 0 && (placeholder > 0 || !hasReadableMapping || byName.Count == 0))
+                    { resolved = new List<int> { physicalId }; origin = "Folder ID"; }
+                    else if (byName.TryGetValue(NameKey(fallback), out resolved) && (physicalId == 0 || resolved.Count == 1)) origin = "Name match";
                     else { resolved = new List<int> { 0 }; origin = "Choose roster slot"; }
                     foreach (int id in resolved)
                     {

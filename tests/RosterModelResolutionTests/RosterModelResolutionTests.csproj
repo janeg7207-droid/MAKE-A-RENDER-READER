@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/GorillaStudio.NameFolders/Roster.cs" Link="Roster.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/FolderNames.cs" Link="FolderNames.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/CharacterFolders.cs" Link="CharacterFolders.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/FlatBufferFile.cs" Link="FlatBufferFile.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryProfiles.cs" Link="DiscoveryProfiles.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/CharacterMappingReader.cs" Link="CharacterMappingReader.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryScanner.cs" Link="DiscoveryScanner.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/StockModels.cs" Link="StockModels.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/ModelLibrary.cs" Link="ModelLibrary.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/ModelLibraryBinding.cs" Link="ModelLibraryBinding.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/MappedModelLibrary.cs" Link="MappedModelLibrary.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/RosterModelResolution.cs" Link="RosterModelResolution.cs" />
+  </ItemGroup>
+</Project>

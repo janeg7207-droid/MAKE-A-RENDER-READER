@@ -18,19 +18,21 @@ namespace GorillaStudio.NameFolders
         private readonly RosterEntry selected;
         private readonly string initialPath;
         private string selectedPath;
+        private readonly bool matchingOnly;
 
         internal static string Choose(IWin32Window owner, RosterEntry selected,
-            IEnumerable<ModelCandidate> candidates, string initialPath)
+            IEnumerable<ModelCandidate> candidates, string initialPath, bool matchingOnly = false)
         {
             if (selected == null) throw new ArgumentNullException("selected");
-            using (var dialog = new ModelChoiceDialog(selected, candidates, initialPath))
+            using (var dialog = new ModelChoiceDialog(selected, candidates, initialPath, matchingOnly))
                 return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.selectedPath : null;
         }
 
-        private ModelChoiceDialog(RosterEntry selected, IEnumerable<ModelCandidate> candidates, string initialPath)
+        private ModelChoiceDialog(RosterEntry selected, IEnumerable<ModelCandidate> candidates, string initialPath, bool matchingOnly)
         {
             this.selected = selected;
             this.initialPath = initialPath;
+            this.matchingOnly = matchingOnly;
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             this.candidates = (candidates ?? Enumerable.Empty<ModelCandidate>())
                 .Where(candidate => candidate != null && !string.IsNullOrWhiteSpace(candidate.Folder)
@@ -57,7 +59,8 @@ namespace GorillaStudio.NameFolders
             Controls.Add(layout);
             layout.Controls.Add(new Label
             {
-                Text = "Choose the model to use for " + selected.Name,
+                Text = matchingOnly ? "More than one model matches " + selected.Name + ". Choose once; your choice is remembered."
+                    : "Choose the model to use for " + selected.Name,
                 AutoSize = true, MaximumSize = new Size(900, 0),
                 Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, 0, 14)
             }, 0, 0);
@@ -117,7 +120,7 @@ namespace GorillaStudio.NameFolders
             };
             actions.Controls.Add(cancel);
             actions.Controls.Add(load);
-            actions.Controls.Add(chooseFolder);
+            if (!matchingOnly) actions.Controls.Add(chooseFolder);
             layout.Controls.Add(actions, 0, 4);
             CancelButton = cancel;
 
@@ -135,7 +138,7 @@ namespace GorillaStudio.NameFolders
             };
             models.DrawItem += (sender, args) => { if (models.View != View.Details) args.DrawDefault = true; };
             models.DrawSubItem += (sender, args) => args.DrawDefault = true;
-            search.Text = selected.Name ?? "";
+            search.Text = matchingOnly ? "" : selected.Name ?? "";
             RefreshModels();
             Shown += (sender, args) => { search.Focus(); search.SelectAll(); };
         }
@@ -167,7 +170,7 @@ namespace GorillaStudio.NameFolders
             finally { models.EndUpdate(); }
             load.Enabled = models.SelectedItems.Count == 1;
             status.Text = models.Items.Count == 0
-                ? "No matching model folders. Click Show all or choose another folder."
+                ? (matchingOnly ? "No matches for this search. Click Show all." : "No matching model folders. Click Show all or choose another folder.")
                 : models.Items.Count + " of " + candidates.Count + " model folders · select a folder, then load it";
         }
 

@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including newly added character IDs and names. **Scan models folder…** finds models already in your extracted mod collection and remembers the location. **Fast Preview**, **Fast MAKE**, and a preview cache reduce repeated rendering work. The helper is version **1.5.0**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model and default attire automatically, then choose a taunt and use **Preview → MAKE → Install**. The loader reads Discovery's current profiles, names and exact character asset mappings, including newly added IDs. It remembers your extracted mod collection and manual choices. **Fast Preview**, **Fast MAKE**, and a preview cache reduce repeated rendering work. The helper is version **1.6.0**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -21,11 +21,25 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
          Characters/CharacterMapping.jsfb
          Characters/<your character folders>/
          Sdb/ENG.sdb
+         MoveData/CAMMoveData.jsfb
+         Animation/<your animation assets>/
 
-2. Click **Load Discovery roster…** and choose discovery_data. Selecting its Characters or Roster folder also works. Subsequent clicks open that roster directly; **Change…** chooses a different data folder.
-3. Click **Scan models folder…** and choose the main folder containing your already extracted wrestler mods. It scans nested folders, attaches unique matching models, and remembers this location for the roster. You can paste a path, drag a folder into the location box, or browse using Explorer's address bar and search. Keep model files extracted; the renderer uses .mcd models.
-4. Search by name, wrestler ID or model-folder name. **Models in data** filters to local models. Select a wrestler and click **Load selected wrestler**. Unique discovered models load directly; multiple matches open a searchable model list. **Choose model folder…** also opens the model list. Plain names need no numeric prefix, and unresolved models stay visible for you to choose their wrestler slot. **Refresh data** rescans remembered locations.
+2. Set **Discovery data…** to your extracted discovery_data folder once, keeping its companion folders together. Selecting Characters or Roster also works. **Roster file…** opens an existing JSON/JSFB roster and remembers that file. **Select wrestler…** opens the current roster directly; it can also open saved or bundled names without asking for a model folder first.
+3. If your models are stored outside Discovery, click **Set model library…** once and select the main folder containing your extracted wrestler mods. It scans nested folders, attaches unique matching models, and remembers this location for the roster. You can paste a path, drag a folder into the location box, or browse using Explorer's address bar and search. Keep model files extracted; the renderer uses .mcd models.
+4. Search by name or ID, then **click the wrestler once**. The picker loads a verified mapped model, a saved choice, or a unique exact-name model, and closes. The renderer selects its default attire automatically. Multiple matching mod packs ask you to choose between those matches once and remember your choice. Missing files show a clear status; the normal roster path does not open a per-wrestler folder hunt. **Choose model folder…** remains available for an explicit override. Plain names need no numeric prefix. **Refresh data** rereads the roster and rescans remembered locations. Folder-to-wrestler manual assignment still requires an explicit choice.
 5. Continue with the original Preview / Make / Install controls. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
+
+## Discovery taunts and previews
+
+Keep the **entire extracted Discovery data folder together**, including MoveData and Animation. The loader reads actual taunt names and IDs from `MoveData/CAMMoveData.jsfb` and joins them to animation records in `.clips` containers and loose `.clip` files. A newer loose edited clip takes precedence over a container record. It converts supported body motion into the original engine's animation format automatically; no Python installation or separate animation browsing is required.
+
+The uploaded data contains **1,584 named taunt variants**. It adds **194 playable motions**, for **1,088 available taunts** with the original library retained. This includes **Undisputed 2**, animation `62541a000`: 281 frames at 60 fps, about 4.68 seconds. The original library had excluded it through a pose-screening heuristic. Variations such as LA Parka 1, 2 and 3 keep their distinct animation files and renderer keys.
+
+Select your wrestler, search for **Undisputed 2**, then click **Preview**. The first successful Preview also supplies that taunt's small browser preview using the actual rendered images. Later browsing reuses it, without another render. The selected wrestler's main Preview uses their loaded model and attire. Changed motions receive new cache keys so old animation or preview files cannot silently replace current Discovery data.
+
+The supplied files lack matching body motion assets for **455 variants**. **45** more use older additional channel sections that this experimental decoder does not yet support. These entries are reported rather than added as playable animations; existing bundled versions remain available where present. The importer never substitutes another taunt. Discovery setup reports available, missing and unsupported counts. It rereads the current folder when selecting the roster, so newly added supported animations are picked up.
+
+Generated animation data, working captures and previews live in a writable folder under `%LOCALAPPDATA%/GorillaStudio/NameFolders`, alongside the preview cache. The original Discovery files and application assets remain intact. Unchanged refreshes reuse decoded motion and keep the selected taunt.
 
 ## Faster previews and renders
 
@@ -48,9 +62,9 @@ These are individual measurements in original-then-fast order, using a shared pr
 
 After adding characters, save your updated CharProfileTable.jsfb and Sdb/ENG.sdb, put their extracted models inside a remembered models folder, then click **Refresh data**. It rereads the current roster and names, rescans the model folders, and includes new IDs. For an imported JSON roster, Refresh data reloads that same JSON file during the current session. Renamed characters replace stale saved labels; conflicting saved model choices require selection. Reopening Discovery also rereads its current files.
 
-A roster profile can exist without its model in the selected data. **Model not found · Scan models folder…** means that the name and ID were read, but no matching extracted model has been located. Point the scan at the parent folder containing your actual mod folders once, rather than browsing separately for PAC, AJ Styles and every other character. The supplied Discovery archive itself contains ten extracted character models; the other profiles need their models from your collection or the installed game.
+A roster profile can exist without its model in the selected data. **Model files missing** means that the name and ID were read, but no matching extracted model has been located. Point the model library at the parent folder containing your actual mod folders once. The supplied Discovery archive itself contains ten extracted character models; the other profiles need their models from your collection or a verified installed-game mapping.
 
-Existing model associations remain authoritative. Library matching prefers exact names; duplicate matches require your choice. It does not use a custom wrestler's logical ID to guess a stock body. Verified installed-game models retain the original extractor. You can explicitly map any discovered model to another profile with **Use folder for another wrestler…**.
+Existing explicit model associations remain authoritative. Fresh matches prefer the exact CharacterMapping asset-path hash, then exact names and proven stock mappings. Duplicate matches require your choice. A physical folder number is not enough to override a conflicting localized profile: the uploaded physical 109 Hollywood Hogan folder no longer loads as Karl Anderson's logical slot 109. Unassigned physical models remain in the separate model list. Verified installed-game models retain the original extractor. You can explicitly map any discovered model to another profile with **Use folder for another wrestler…**.
 
 ENG.sdb supplies the readable character names. Keep your own current file in Sdb/ENG.sdb. Missing localized strings display as “Wrestler <ID>”; the loader never substitutes a localization key as a wrestler name.
 
@@ -62,13 +76,14 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 
 ## Validation
 
-- The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and all **10 extracted model folders**. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **411 portable checks pass**: 166 roster/model checks and 245 preview-cache, process-setting, bridge and benchmark checks. These include callback replay, model/texture changes, failed renders, full-MAKE cache bypass, original-quality opt-out, measured timing arithmetic, native access guards and benchmark output isolation. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
+- **764 portable checks pass** across 17 suites, covering roster-first launches, actual model mappings, saved choices, default attire, motion decoding/import, preview capture, callback replay, model/texture changes, failed renders, full-MAKE cache bypass, original-quality opt-out, measured timing arithmetic, native access guards and benchmark output isolation. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
 - The original v1.0.2 engine verifies physical 312 → logical 1481 and physical 123 → logical 910. It retains the original model/body source while using the selected profile's render links and gender. The 1481 case selects 148100_CM_PUNK_GM.
 - A real render attempt loads the added Flammer model and reaches original stock-body extraction, then stops because this environment lacks WWE 2K26 / oo2core_9_win64.dll. Complete rendering and Windows GUI/junction interaction remain unverified.
+- The original default-attire function is exercised on all ten uploaded model folders and direct-MCD compatibility layouts. The independent motion decoder matches a bundled animation's translations exactly and its quaternions within 0.000001. The unmodified original capture engine consumes the imported Undisputed 2 motion and produces 281 frames for a 175-bone skeleton, including 74 H helper bones. Full Blender image rendering remains unverified here.
 - The patcher verifies a five-method allowlist: the window constructor, folder-loading state machine, Go state machine, process-launch state machine and automatic-render entry point. All other method bodies, authentication/licensing and managed/native resources are preserved. Engine binaries remain unchanged; faster detail is passed only to each applicable render process.
 
 Detailed results are included in TEST_RESULTS.json inside the ZIPs.
@@ -89,6 +104,13 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/PreviewProcessTests -c Release
     dotnet run --project tests/PreviewRenderBridgeTests -c Release
     dotnet run --project tests/RenderBenchmarkTests -c Release
+    dotnet run --project tests/RosterLaunchTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/RosterModelResolutionTests -c Release
+    dotnet run --project tests/MappedModelLibraryTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/AutomaticAttireTests -c Release
+    dotnet run --project tests/DiscoveryTauntsTests -c Release -- /path/to/discovery_data/MoveData/CAMMoveData.jsfb
+    dotnet run --project tests/DiscoveryMotionTests -c Release
+    dotnet run --project tests/DiscoveryTauntLibraryTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data /path/to/disposable-import-output
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.

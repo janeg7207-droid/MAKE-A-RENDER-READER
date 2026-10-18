@@ -17,11 +17,13 @@ namespace GorillaStudio.NameFolders
         private readonly Label modelsInfo = new Label();
         private List<string> modelRoots = new List<string>();
         private List<ModelCandidate> modelInventory = new List<ModelCandidate>();
+        private HashSet<string> readyModelFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<RosterEntry, List<ModelCandidate>> modelChoices = new Dictionary<RosterEntry, List<ModelCandidate>>();
         private CancellationTokenSource modelScanCancellation;
         private Task modelScanTask = Task.CompletedTask;
         private int modelScanVersion;
         private bool modelSelectionBusy;
+        private bool offeredModelLibrarySetup;
         private FlowLayoutPanel rosterActions;
         private readonly CancellationTokenSource modelLifetime = new CancellationTokenSource();
 
@@ -34,7 +36,7 @@ namespace GorillaStudio.NameFolders
         private void InitializeModelLibrary(FlowLayoutPanel bar)
         {
             rosterActions = bar;
-            scanModels.Text = "Scan models folder…";
+            scanModels.Text = "Set model library…";
             scanModels.AutoSize = true;
             scanModels.Padding = new Padding(8, 2, 8, 2);
             scanModels.Click += async (sender, args) => { if (!modelSelectionBusy) await AddModelsFolderAsync(); };
@@ -76,6 +78,7 @@ namespace GorillaStudio.NameFolders
         private List<string> SearchRoots()
         {
             var roots = new List<string>(modelRoots);
+            roots.AddRange(Entries.Where(entry => Directory.Exists(entry.Folder)).Select(entry => entry.Folder));
             string data = currentRosterTable == null ? sourceFolder : DiscoveryProfiles.DataRoot(currentRosterTable);
             roots.Add(data);
             DirectoryInfo parent = Directory.GetParent(data);
@@ -98,10 +101,13 @@ namespace GorillaStudio.NameFolders
             modelScanCancellation = cancellation;
             int version = ++modelScanVersion;
             scanModels.Enabled = false;
-            modelsInfo.Text = "Looking for existing models…";
+            modelsInfo.Text = "Finding models for your roster…";
             try
             {
                 List<string> roots = SearchRoots();
+                List<RosterEntry> scanEntries = Entries;
+                string scanTable = currentRosterTable;
+                Dictionary<RosterEntry, List<ModelCandidate>> mappedChoices = null;
                 List<ModelCandidate> found = await Task.Run(() =>
                 {
                     var result = new List<ModelCandidate>();
@@ -112,15 +118,35 @@ namespace GorillaStudio.NameFolders
                         foreach (ModelCandidate model in ModelLibrary.Scan(root, cancellation.Token))
                             if (seen.Add(model.Folder)) result.Add(model);
                     }
+                    mappedChoices = MappedModelLibrary.FindMatches(scanEntries, result, scanTable, cancellation.Token);
                     return result;
                 }, cancellation.Token);
                 if (IsDisposed || version != modelScanVersion) return;
                 modelInventory = found;
-                ModelLibraryBindingResult binding = ModelLibraryBinding.Apply(Entries, found, currentRosterTable);
+                foreach (var mapping in mappedChoices)
+                {
+                    if (Directory.Exists(mapping.Key.Folder) || mapping.Value.Count != 1) continue;
+                    ModelCandidate model = mapping.Value[0];
+                    mapping.Key.Folder = model.Folder;
+                    if (model.SourceId > 0) mapping.Key.SourceId = model.SourceId;
+                    mapping.Key.Source = "Character mapping";
+                    mapping.Key.IsMod = true;
+                }
+                // A verified ambiguous mapping must not be silently overridden by a
+                // convenient display-name match or stock-body fallback.
+                List<RosterEntry> bindable = Entries.Where(entry => Directory.Exists(entry.Folder)
+                    || !mappedChoices.ContainsKey(entry)).ToList();
+                ModelLibraryBindingResult binding = ModelLibraryBinding.Apply(bindable, found, currentRosterTable, false);
+                ModelLibraryBinding.AddUnassigned(Entries, found, currentRosterTable);
                 modelChoices = binding.Choices;
+                foreach (var mapping in mappedChoices)
+                    if (!Directory.Exists(mapping.Key.Folder) && mapping.Value.Count > 1) modelChoices[mapping.Key] = mapping.Value;
+                readyModelFolders = new HashSet<string>(Entries.Where(entry => Directory.Exists(entry.Folder)
+                    && found.Any(model => SameFolderOrChild(model.Folder, entry.Folder))).Select(entry => Path.GetFullPath(entry.Folder)),
+                    StringComparer.OrdinalIgnoreCase);
                 RosterEntry selected = wrestlers.SelectedItems.Count == 1 ? (RosterEntry)wrestlers.SelectedItems[0].Tag : null;
                 RefreshList(selected);
-                modelsInfo.Text = found.Count + " model folders found";
+                modelsInfo.Text = found.Count + " model folders indexed · locations remembered";
                 // Save discovered locations even when the user closes the roster without
                 // loading a wrestler. The next session should not repeat the folder hunt.
                 FolderBridge.SaveRoster(Entries);
@@ -169,11 +195,10 @@ namespace GorillaStudio.NameFolders
         {
             await modelScanTask;
             if (IsDisposed) return null;
-            if (!forceChoice && Directory.Exists(entry.Folder)) return entry.Folder;
-            if (modelInventory.Count == 0 || (!forceChoice && modelRoots.Count == 0))
+            if (!forceChoice) return await ResolveSelectedModelAsync(entry);
+            if (modelInventory.Count == 0)
             {
                 if (!await AddModelsFolderAsync()) return null;
-                if (!forceChoice && Directory.Exists(entry.Folder)) return entry.Folder;
             }
             List<ModelCandidate> choices = modelInventory;
             string initial = entry.Folder ?? modelRoots.LastOrDefault() ?? sourceFolder;
@@ -195,7 +220,6 @@ namespace GorillaStudio.NameFolders
                 if (inside.Count > 1)
                 {
                     if (!await AddModelsRootAsync(chosen)) return null;
-                    if (!forceChoice && Directory.Exists(entry.Folder)) return entry.Folder;
                     choices = inside;
                     initial = chosen;
                     continue;
@@ -206,6 +230,81 @@ namespace GorillaStudio.NameFolders
                 entry.IsMod = true;
                 return candidate.Folder;
             }
+            return null;
+        }
+
+        private bool HasIndexedModel(string folder)
+        {
+            return Directory.Exists(folder) && readyModelFolders.Contains(Path.GetFullPath(folder));
+        }
+
+        private static bool SameFolderOrChild(string candidate, string parent)
+        {
+            string root = Path.GetFullPath(parent).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string path = Path.GetFullPath(candidate).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.Equals(path, root, StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async Task<string> ResolveSelectedModelAsync(RosterEntry entry)
+        {
+            await modelScanTask;
+            if (IsDisposed) return null;
+            RosterModelResolution resolution = await Task.Run(() => RosterModelResolution.Resolve(entry, modelInventory, currentRosterTable));
+            if (IsDisposed) return null;
+            if (resolution.State == RosterModelState.Ready)
+            {
+                if (!resolution.ExistingAssociation)
+                {
+                    entry.Source = "Found in models folder";
+                    entry.IsMod = true;
+                }
+                if (resolution.SourceId > 0) entry.SourceId = resolution.SourceId;
+                return resolution.Folder;
+            }
+            if (resolution.State == RosterModelState.ChooseMatchingModel)
+            {
+                string chosen = ModelChoiceDialog.Choose(this, entry, resolution.Choices, entry.Folder, true);
+                if (chosen == null) return null;
+                ModelCandidate selected = resolution.Choices.First(candidate => string.Equals(candidate.Folder, chosen, StringComparison.OrdinalIgnoreCase));
+                if (selected.SourceId > 0) entry.SourceId = selected.SourceId;
+                entry.Source = "Chosen model folder";
+                entry.IsMod = true;
+                return selected.Folder;
+            }
+            if (resolution.State == RosterModelState.InstalledGame)
+            {
+                try
+                {
+                    Enabled = false;
+                    ControlBox = false;
+                    UseWaitCursor = true;
+                    status.Text = "Loading " + entry.Name + " from the installed game…";
+                    return await FolderBridge.RequestGameModelAsync(entry, entry.StockFolder, line =>
+                    {
+                        Action update = () => status.Text = line.Length > 150 ? line.Substring(0, 150) : line;
+                        if (!IsDisposed && IsHandleCreated) { if (InvokeRequired) BeginInvoke(update); else update(); }
+                    });
+                }
+                finally { if (!IsDisposed) { Enabled = true; ControlBox = true; UseWaitCursor = false; } }
+            }
+
+            string notice = "The roster contains " + entry.Name + ", but its extracted model files were not found.\n\n"
+                + "Set your model library to the main Characters or mods folder once. The app finds each wrestler inside it automatically.";
+            string marker = ModelsSettingsPath + ".setup-shown";
+            if (modelRoots.Count == 0 && !offeredModelLibrarySetup && !File.Exists(marker))
+            {
+                offeredModelLibrarySetup = true;
+                try { Directory.CreateDirectory(FolderBridge.StorageDirectory); File.WriteAllText(marker, "Model library setup offered."); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                if (MessageBox.Show(this, notice + "\n\nSet your model library now?", "Model library setup",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes && await AddModelsFolderAsync())
+                    return await ResolveSelectedModelAsync(entry);
+                return null;
+            }
+            MessageBox.Show(this, notice + "\n\nUse Set model library… to add another collection, then load this wrestler again.",
+                "Model files not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return null;
         }
     }

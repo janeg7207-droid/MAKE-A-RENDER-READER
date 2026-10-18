@@ -40,17 +40,41 @@ namespace GorillaStudio.NameFolders
                     && string.Equals(e.Name, FolderNames.DisplayName(baseName), StringComparison.OrdinalIgnoreCase)))
                     entries.Add(new RosterEntry { Id = existing.Value, Name = FolderNames.DisplayName(baseName), Folder = source });
 
-                using (var picker = new WrestlerPicker(source, entries, session.ChooseCharacterFolder))
+                return ChooseRosterModel(source, session);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.Message, "Gorilla Studio — load wrestler", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return null;
+            }
+        }
+
+        internal static string PrepareRoster(string discoveryRoot, string rosterFile)
+        {
+            string bundled = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json");
+            RosterSessionData session = RosterLaunch.Open(discoveryRoot, ReadRoster(), rosterFile, bundled);
+            string source = RosterAccess.RootFor(session.DiscoveryTable) ?? RosterAccess.RootFor(discoveryRoot)
+                ?? AppDomain.CurrentDomain.BaseDirectory;
+            return ChooseRosterModel(source, session, rosterFile);
+        }
+
+        private static string ChooseRosterModel(string source, RosterSessionData session, string rosterFile = null)
+        {
+                using (var picker = new WrestlerPicker(source, session.Entries, session.ChooseCharacterFolder, rosterFile))
                 {
                     if (picker.ShowDialog() != DialogResult.OK || picker.SelectedEntry == null) return null;
                     source = DirectoryLinks.Resolve(picker.SelectedFolder);
                     CharacterFolderPlan plan = CharacterFolders.Plan(source, picker.SelectedEntry);
+                    int physicalId = CharacterFolders.PhysicalId(source) ?? (picker.SelectedEntry.SourceId > 0
+                        ? picker.SelectedEntry.SourceId : picker.SelectedEntry.Id);
+                    DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
                     string alias;
-                    if (plan.UseOriginal) alias = plan.SourceFolder;
+                    if (plan.UseOriginal && !attire.WrapDirectModel) alias = plan.SourceFolder;
                     else
                     {
                         // One model may be selected against different mod rosters in different sessions.
-                        string root = Path.Combine(StorageDirectory, "links", plan.CacheKey);
+                        string root = Path.Combine(StorageDirectory, "links", plan.CacheKey
+                            + (attire.WrapDirectModel ? "-" + attire.CacheSuffix : ""));
                         string characters = Path.Combine(root, "Characters");
                         Directory.CreateDirectory(characters);
                         if (plan.RosterDirectory != null) DirectoryLinks.EnsureJunction(Path.Combine(root, "Roster"), plan.RosterDirectory);
@@ -63,19 +87,49 @@ namespace GorillaStudio.NameFolders
                             }
                         }
                         alias = Path.Combine(characters, plan.AliasName);
-                        DirectoryLinks.EnsureJunction(alias, plan.SourceFolder);
+                        if (attire.WrapDirectModel)
+                        {
+                            Directory.CreateDirectory(alias);
+                            if ((File.GetAttributes(alias) & FileAttributes.ReparsePoint) != 0)
+                                throw new IOException("A different model link already occupies this compatibility folder.");
+                            DirectoryLinks.EnsureJunction(Path.Combine(alias, "Default_Attire"), plan.SourceFolder);
+                            if (attire.BaseModelFolder != null)
+                                DirectoryLinks.EnsureJunction(Path.Combine(alias, "BaseModel"), attire.BaseModelFolder);
+                        }
+                        else DirectoryLinks.EnsureJunction(alias, plan.SourceFolder);
                     }
                     SaveRoster(picker.Entries);
+                    if (session.ChooseCharacterFolder && !string.IsNullOrWhiteSpace(picker.CurrentRosterFile))
+                        RememberRosterFile(picker.CurrentRosterFile);
                     lastDiscoveryRoot = plan.DataRoot;
                     RegisterSelection(alias, picker.SelectedEntry);
                     return alias;
                 }
-            }
-            catch (Exception error)
+        }
+
+        private static string RememberedRosterFile()
+        {
+            try
             {
-                MessageBox.Show(error.Message, "Gorilla Studio — load wrestler", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return null;
+                string path = Path.Combine(StorageDirectory, "roster-source.txt");
+                return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
             }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+        }
+
+        private static void RememberRosterFile(string rosterFile)
+        {
+            Directory.CreateDirectory(StorageDirectory);
+            string path = Path.Combine(StorageDirectory, "roster-source.txt");
+            string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, Path.GetFullPath(rosterFile), new UTF8Encoding(false));
+                if (File.Exists(path)) File.Replace(temporary, path, null);
+                else File.Move(temporary, path);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
 
         internal static List<RosterEntry> ReadRoster()

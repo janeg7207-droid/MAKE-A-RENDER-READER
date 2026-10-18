@@ -83,6 +83,16 @@ namespace GorillaStudio.NameFolders
                 if (entry.SourceId == 0 && entry.Source == null && !string.IsNullOrWhiteSpace(entry.Folder)
                     && entries.Any(e => !string.IsNullOrWhiteSpace(e.Folder)
                         && string.Equals(Path.GetFullPath(e.Folder), Path.GetFullPath(entry.Folder), StringComparison.OrdinalIgnoreCase))) continue;
+                if (string.Equals(entry.Source, "Folder ID", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(entry.Folder))
+                {
+                    // Earlier imports treated physical folder prefixes as logical
+                    // roster IDs. Do not restore that guessed association after a
+                    // fresh scan leaves the model unassigned or maps it elsewhere.
+                    List<RosterEntry> physical = entries.Where(e => !string.IsNullOrWhiteSpace(e.Folder)
+                        && string.Equals(Path.GetFullPath(e.Folder), Path.GetFullPath(entry.Folder), StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (physical.Count > 0 && !physical.Any(e => e.Id > 0 && e.Id == entry.Id)) continue;
+                }
                 sameRoster.Add(entry);
             }
             var rememberedBindings = sameRoster.Where(e => Directory.Exists(e.Folder))

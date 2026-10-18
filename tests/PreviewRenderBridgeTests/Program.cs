@@ -26,6 +26,8 @@ internal static class Program
             await MakeAndPrepareBypass();
             await ExceptionBehavior();
             await JunctionAndOutputIsolation();
+            await DiscoveryOverlayInvalidation();
+            await CapturedTauntThumbnails();
             Console.WriteLine(checks + " preview process bridge checks passed.");
             return 0;
         }
@@ -173,6 +175,108 @@ internal static class Program
         Equal(first, PreviewPath(cached.Item2)); Equal(true, File.ReadAllBytes(first).SequenceEqual(Png));
     }
 
+    private static async Task DiscoveryOverlayInvalidation()
+    {
+        FakeOwner owner = Create("overlay-app");
+        string overlay = Path.Combine(root, "discovery-overlay");
+        string manifest = Write(overlay, "data/library/manifest.json");
+        string decoded = Write(overlay, "data/gamepack/decoded/62541_Undisputed2.npz");
+        string original = Write(root, "original-gamepack/taunt001.npz");
+        string linked = Path.Combine(overlay, "data", "gamepack", "decoded", "taunt001.npz");
+        File.CreateSymbolicLink(linked, original);
+        string previous = Environment.GetEnvironmentVariable("GS_ROOT");
+        FolderBridge.DiscoveryEngineRoot = overlay;
+        try
+        {
+            await Run(owner); await Run(owner); Equal(1, owner.Calls);
+            Change(decoded); await Run(owner); Equal(2, owner.Calls);
+            Change(manifest); await Run(owner); Equal(3, owner.Calls);
+            Change(original); await Run(owner); Equal(4, owner.Calls);
+            string secondOverlay = Path.Combine(root, "discovery-overlay-2");
+            Write(secondOverlay, "data/library/manifest.json"); Write(secondOverlay, "data/gamepack/decoded/62541_Undisputed2.npz");
+            FolderBridge.DiscoveryEngineRoot = secondOverlay;
+            await Run(owner); Equal(5, owner.Calls);
+            await Run(owner); Equal(5, owner.Calls);
+            owner.AfterRun = () => FolderBridge.DiscoveryEngineRoot = overlay;
+            await Run(owner, null, null, "hair=overlay-change"); Equal(6, owner.Calls);
+            owner.AfterRun = null;
+            FolderBridge.DiscoveryEngineRoot = secondOverlay;
+            await Run(owner, null, null, "hair=overlay-change"); Equal(7, owner.Calls);
+            await Run(owner, null, null, "hair=overlay-change"); Equal(7, owner.Calls);
+            FolderBridge.DiscoveryEngineRoot = null;
+            Environment.SetEnvironmentVariable("GS_ROOT", overlay);
+            await Run(owner); Equal(8, owner.Calls);
+            await Run(owner); Equal(8, owner.Calls);
+            Change(decoded); await Run(owner); Equal(9, owner.Calls);
+            Environment.SetEnvironmentVariable("GS_ROOT", secondOverlay);
+            await Run(owner); Equal(10, owner.Calls);
+            Environment.SetEnvironmentVariable("GS_ROOT", previous);
+            FolderBridge.DiscoveryEngineRoot = overlay;
+            await Run(owner); Equal(11, owner.Calls);
+            DirectoryLinks.BeforeResolve = path => {
+                if (path != owner.Folder) return;
+                FolderBridge.DiscoveryEngineRoot = secondOverlay;
+                DirectoryLinks.BeforeResolve = null;
+            };
+            await Run(owner); Equal(12, owner.Calls);
+            Equal(false, owner.Timings.Last().Cached);
+            FolderBridge.DiscoveryEngineRoot = Path.Combine(root, "missing-overlay");
+            await Run(owner); await Run(owner); Equal(14, owner.Calls);
+            Equal(false, owner.Timings.Last().Cached);
+        }
+        finally { DirectoryLinks.BeforeResolve = null; FolderBridge.DiscoveryEngineRoot = null; Environment.SetEnvironmentVariable("GS_ROOT", previous); }
+    }
+
+    private static async Task CapturedTauntThumbnails()
+    {
+        FakeOwner owner = Create("capture-app");
+        string overlay = Path.Combine(root, "capture-overlay");
+        string manifest = Write(overlay, "data/library/manifest.json");
+        string motion = Write(overlay, "data/gamepack/decoded/discovery_taunt.npz");
+        FolderBridge.DiscoveryEngineRoot = overlay;
+        int captured = 0;
+        bool captureUsedCache = false;
+        DiscoveryTauntBridge.OnCapture = (actualOwner, actualScript, actualArgs, actualLines) => {
+            Equal(owner, actualOwner); Equal(owner.Script, actualScript);
+            Equal(true, PreviewCache.IsPreviewRequest(actualScript, actualArgs));
+            List<string> lines = actualLines.ToList();
+            captured++;
+            captureUsedCache = PreviewPath(lines).StartsWith(FolderBridge.StoragePath, StringComparison.Ordinal);
+            string directory = Directory.CreateDirectory(Path.Combine(overlay, "data", "library", "previews_game")).FullName;
+            File.Copy(PreviewPath(lines), Path.Combine(directory, "discovery_taunt.png"), true);
+        };
+        try
+        {
+            await Run(owner); Equal(1, owner.Calls); Equal(1, captured); Equal(false, captureUsedCache);
+            await Run(owner); Equal(1, owner.Calls); Equal(2, captured); Equal(true, captureUsedCache);
+            string thumb = Path.Combine(overlay, "data", "library", "previews_game", "discovery_taunt.png");
+            Change(thumb); await Run(owner); Equal(1, owner.Calls);
+            Directory.Delete(Path.GetDirectoryName(thumb), true);
+            await Run(owner); Equal(1, owner.Calls);
+            Change(manifest); await Run(owner); Equal(2, owner.Calls);
+            Change(motion); await Run(owner); Equal(3, owner.Calls);
+            // An actual model folder with the same name is still a render input.
+            string modelTexture = Write(owner.Folder, "previews_game/body.dds");
+            await Run(owner); Equal(4, owner.Calls);
+            Change(modelTexture); await Run(owner); Equal(5, owner.Calls);
+            DiscoveryTauntBridge.OnCapture = (actualOwner, actualScript, actualArgs, actualLines) => { captured++; throw new IOException("thumbnail failure"); };
+            int before = captured;
+            ValueTuple<int, List<string>> hit = await Run(owner);
+            Equal(0, hit.Item1); Equal(5, owner.Calls); Equal(before + 1, captured);
+            ValueTuple<int, List<string>> rendered = await Run(owner, null, null, "hair=new");
+            Equal(0, rendered.Item1); Equal(6, owner.Calls); Equal(before + 2, captured);
+            before = captured;
+            owner.Code = 1;
+            await Run(owner, null, null, "hair=failed"); Equal(before, captured);
+            owner.Code = 0;
+            await FolderBridge.RunPreviewProcess(owner, owner.Script, new[] { owner.Folder, "Taunt1", owner.Output }, null, null);
+            Equal(before, captured);
+            await FolderBridge.RunPreviewProcess(owner, owner.Script, new[] { owner.Folder, "Taunt1", owner.Output, "prepare=model", "quick=1" }, null, null);
+            Equal(before, captured);
+        }
+        finally { DiscoveryTauntBridge.OnCapture = null; FolderBridge.DiscoveryEngineRoot = null; }
+    }
+
     private static Task<ValueTuple<int, List<string>>> Run(FakeOwner owner, Action<string> callback = null, Action<Process> started = null, params string[] options)
     {
         return FolderBridge.RunPreviewProcess(owner, owner.Script, new[] { owner.Folder, "Taunt1", owner.Output, "quick=1" }.Concat(options), callback, started);
@@ -245,9 +349,19 @@ internal static class Program
 
 namespace GorillaStudio.NameFolders
 {
+    internal static class DiscoveryTauntBridge
+    {
+        internal static Action<object, string, IEnumerable<string>, IEnumerable<string>> OnCapture;
+        internal static void CapturePreview(object owner, string script, IEnumerable<string> args, IEnumerable<string> engineLines)
+        {
+            OnCapture?.Invoke(owner, script, args, engineLines);
+        }
+    }
+
     public static partial class FolderBridge
     {
         public static bool FastPreviewEnabled = true, FastRenderEnabled;
+        internal static string DiscoveryEngineRoot;
         internal static string StoragePath;
         internal static string StorageDirectory { get { return StoragePath; } }
         internal static void SetPerformanceBusy(object owner, bool busy)
@@ -267,8 +381,10 @@ namespace GorillaStudio.NameFolders
     internal static class DirectoryLinks
     {
         internal static string FailPath;
+        internal static Action<string> BeforeResolve;
         internal static string Resolve(string path)
         {
+            BeforeResolve?.Invoke(path);
             if (path == FailPath) throw new IOException("Cannot inspect model folder");
             FileSystemInfo info = Directory.Exists(path) ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
             return (info.LinkTarget == null ? info : info.ResolveLinkTarget(true)).FullName;

@@ -14,6 +14,7 @@ namespace GorillaStudio.NameFolders
         {
             var nativeProcess = process as Process;
             if (nativeProcess == null) return;
+            DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);
             string setting;
             if (PreviewCache.IsPreviewRequest(script, args))
             {
