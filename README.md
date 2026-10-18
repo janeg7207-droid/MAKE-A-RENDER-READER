@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model and default attire automatically, then choose a taunt and use **Preview → MAKE → Install**. The loader reads Discovery's current profiles, names and exact character asset mappings, including newly added IDs. It remembers your extracted mod collection and manual choices. **Fast Preview**, **Fast MAKE**, and a preview cache reduce repeated rendering work. The helper is version **1.6.0**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and available roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. The loader reads Discovery's current profiles, names, picture references and exact character asset mappings, including newly added IDs. It remembers your extracted mod collection and manual choices. **Fast Preview**, **Fast MAKE**, and a preview cache reduce repeated rendering work. The helper is version **1.6.1**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -28,6 +28,18 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
 3. If your models are stored outside Discovery, click **Set model library…** once and select the main folder containing your extracted wrestler mods. It scans nested folders, attaches unique matching models, and remembers this location for the roster. You can paste a path, drag a folder into the location box, or browse using Explorer's address bar and search. Keep model files extracted; the renderer uses .mcd models.
 4. Search by name or ID, then **click the wrestler once**. The picker loads a verified mapped model, a saved choice, or a unique exact-name model, and closes. The renderer selects its default attire automatically. Multiple matching mod packs ask you to choose between those matches once and remember your choice. Missing files show a clear status; the normal roster path does not open a per-wrestler folder hunt. **Choose model folder…** remains available for an explicit override. Plain names need no numeric prefix. **Refresh data** rereads the roster and rescans remembered locations. Folder-to-wrestler manual assignment still requires an explicit choice.
 5. Continue with the original Preview / Make / Install controls. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
+
+## Roster pictures and character loading
+
+Custom roster pictures now follow the selected character's actual picture references in CharProfileTable.jsfb. The original renderer discarded references that were absent from its bundled stock picture list. For example, AVERY STYLES, ID 122, has picture reference `1709AEF076130352`; it now survives into the completed GMR and installation map. New characters and changed references are reread from the current table. Shared pictures retain their actual owners, which appear in the result when other wrestlers share a picture.
+
+Keep extracted **DDS or PNG** renders anywhere inside your Discovery data folder, including `UI/Assets/Roster/TypeA` or a `Renders` folder. An external selected model folder is also checked for matching images. Keep the original render filenames, or use an explicit sixteen-digit picture hash as the filename. Matching uses the profile's exact picture reference, rather than a wrestler's folder number. Conflicting images are left unresolved. TEX files are supported only when their contents are already DDS; packed game textures must be extracted as DDS first.
+
+Loading the wrestler also loads a matching image through a local compatibility cache, so the original **Game picture (now)** display and **Auto (from his render)** hair colour can use it. PNG conversion retains transparency. Refresh the data and reselect the wrestler after changing a render image. The original profiles, models and image files remain unchanged. Final GMR files and the installation map contain the actual game picture references, with temporary cache references removed before installation.
+
+The uploaded Discovery copy contains **1,139 picture references**, including **653 absent from the bundled picture names**, but no original roster image files. Picture references alone can link the moving selection render; a static picture display requires the extracted image file. An empty **Game picture (now)** panel is therefore separate from the old false “no picture found” result.
+
+White hair cards are a separate material issue: the original renderer already defaults missing-picture hair to dark brown. Try choosing Dark brown or Black; if the cards stay white, their strand texture or material needs inspection. The new picture loading path does not claim to repair missing hair textures.
 
 ## Discovery taunts and previews
 
@@ -77,13 +89,14 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **764 portable checks pass** across 17 suites, covering roster-first launches, actual model mappings, saved choices, default attire, motion decoding/import, preview capture, callback replay, model/texture changes, failed renders, full-MAKE cache bypass, original-quality opt-out, measured timing arithmetic, native access guards and benchmark output isolation. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- **1,081 portable checks pass** across 23 suites, covering picture references/images, final GMR keys, shared pictures, PNG-to-DDS output, roster-first launches, actual model mappings, saved choices, default attire, motion decoding/import, preview capture, callback replay, model/texture changes, failed renders, full-MAKE cache bypass, original-quality opt-out, measured timing arithmetic, native access guards and benchmark output isolation. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
 - The original v1.0.2 engine verifies physical 312 → logical 1481 and physical 123 → logical 910. It retains the original model/body source while using the selected profile's render links and gender. The 1481 case selects 148100_CM_PUNK_GM.
 - A real render attempt loads the added Flammer model and reaches original stock-body extraction, then stops because this environment lacks WWE 2K26 / oo2core_9_win64.dll. Complete rendering and Windows GUI/junction interaction remain unverified.
 - The original default-attire function is exercised on all ten uploaded model folders and direct-MCD compatibility layouts. The independent motion decoder matches a bundled animation's translations exactly and its quaternions within 0.000001. The unmodified original capture engine consumes the imported Undisputed 2 motion and produces 281 frames for a 175-bone skeleton, including 74 H helper bones. Full Blender image rendering remains unverified here.
+- The original engine finds the prepared image for Avery's actual profile, samples its automatic hair colour, and accepts a finalized GMR with the actual picture hash and all 1,139 installation-map entries. These checks use a synthetic image and structural video fixture; they do not claim an in-game visual test.
 - The patcher verifies a five-method allowlist: the window constructor, folder-loading state machine, Go state machine, process-launch state machine and automatic-render entry point. All other method bodies, authentication/licensing and managed/native resources are preserved. Engine binaries remain unchanged; faster detail is passed only to each applicable render process.
 
 Detailed results are included in TEST_RESULTS.json inside the ZIPs.
@@ -111,6 +124,12 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/DiscoveryTauntsTests -c Release -- /path/to/discovery_data/MoveData/CAMMoveData.jsfb
     dotnet run --project tests/DiscoveryMotionTests -c Release
     dotnet run --project tests/DiscoveryTauntLibraryTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data /path/to/disposable-import-output
+    dotnet run --project tests/DiscoveryRenderLinksTests -c Release -- /path/to/discovery_data/Roster/CharProfileTable.jsfb
+    dotnet run --project tests/DiscoveryRenderImagesTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/DiscoveryRenderOverlayTests -c Release -- /path/to/discovery_data/Roster/CharProfileTable.jsfb /path/to/new-image-fixture
+    dotnet run --project tests/DiscoveryRenderResultTests -c Release -- /path/to/discovery_data/Roster/CharProfileTable.jsfb /path/to/render-fixture
+    dotnet run --project tests/GorillaRenderMetadataTests -c Release
+    dotnet run --project tests/RosterPictureDdsTests -c Release
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.

@@ -257,6 +257,33 @@ internal static class Program
             throw new InvalidOperationException("The native render process signature does not match the preview-cache bridge.");
         engineCall.Operand = new Importer(module).Import(runPreview);
 
+        // Finalize picture keys after every successful native result, including a
+        // completed background render that bypasses the foreground process hook.
+        MethodDef completeResult = bridge.Methods.Single(method => method.Name == "CompleteRenderResult" &&
+            method.IsPublic && method.IsStatic && method.MethodSig.Params.Count == 2 &&
+            method.MethodSig.Params.All(parameter => parameter.ElementType == ElementType.Object) &&
+            method.MethodSig.RetType.ElementType == ElementType.Void);
+        Instruction deserialize = go.Body.Instructions.Single(instruction =>
+            instruction.Operand is MethodSpec called && called.Name == "Deserialize" &&
+            called.GenericInstMethodSig.GenericArguments.Count == 1 &&
+            called.GenericInstMethodSig.GenericArguments[0].FullName == "System.Collections.Generic.Dictionary`2<System.String,System.Object>");
+        int resultIndex = go.Body.Instructions.IndexOf(deserialize) + 1;
+        Instruction storeResult = go.Body.Instructions[resultIndex];
+        if (!storeResult.IsStloc() || go.Body.MaxStack < 2)
+            throw new InvalidOperationException("The native render result has no safe dictionary completion hook.");
+        Local resultLocal = storeResult.GetLocal(go.Body.Variables);
+        FieldDef goOwner = go.DeclaringType.Fields.Single(field => field.Name == "<>4__this");
+        var completeInstructions = new[]
+        {
+            Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Ldfld, goOwner),
+            Instruction.Create(OpCodes.Ldloc, resultLocal),
+            Instruction.Create(OpCodes.Call, new Importer(module).Import(completeResult))
+        };
+        for (int index = 0; index < completeInstructions.Length; index++)
+            go.Body.Instructions.Insert(resultIndex + 1 + index, completeInstructions[index]);
+        go.Body.SimplifyBranches();
+        go.Body.OptimizeBranches();
+
         // Configure a fresh Process instance inside the original initial path, after
         // game/Blender environment variables and handlers have already been assigned.
         TypeDef runState = FindAsyncStateMachine(window, "RunPy");
@@ -434,6 +461,10 @@ internal static class Program
                 called.DeclaringType.FullName == MainWindowType && called.Name == "RunPy"))
             throw new InvalidDataException("The saved executable does not route its render process through exactly one preview-cache hook.");
         MethodDef run = FindAsyncStateMachine(window, "RunPy").Methods.Single(method => method.Name == "MoveNext");
+        if (go.Body.Instructions.Count(instruction => instruction.OpCode == OpCodes.Call &&
+            instruction.Operand is IMethod called && called.DeclaringType.FullName == BridgeType &&
+            called.Name == "CompleteRenderResult") != 1)
+            throw new InvalidDataException("The saved executable does not finalize exactly one native render result.");
         Instruction[] configurations = run.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Call &&
             instruction.Operand is IMethod called && called.DeclaringType.FullName == BridgeType &&
             called.Name == "ConfigurePreviewProcess").ToArray();

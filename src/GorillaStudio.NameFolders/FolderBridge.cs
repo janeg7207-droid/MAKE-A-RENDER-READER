@@ -68,20 +68,25 @@ namespace GorillaStudio.NameFolders
                     int physicalId = CharacterFolders.PhysicalId(source) ?? (picker.SelectedEntry.SourceId > 0
                         ? picker.SelectedEntry.SourceId : picker.SelectedEntry.Id);
                     DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
+                    Dictionary<ulong, string> pictures = PrepareRenderImages(plan);
                     string alias;
-                    if (plan.UseOriginal && !attire.WrapDirectModel) alias = plan.SourceFolder;
+                    if (plan.UseOriginal && !attire.WrapDirectModel && pictures.Count == 0) alias = plan.SourceFolder;
                     else
                     {
                         // One model may be selected against different mod rosters in different sessions.
                         string root = Path.Combine(StorageDirectory, "links", plan.CacheKey
-                            + (attire.WrapDirectModel ? "-" + attire.CacheSuffix : ""));
+                            + (attire.WrapDirectModel ? "-" + attire.CacheSuffix : "")
+                            + (pictures.Count > 0 ? "-pictures-v1" : ""));
                         string characters = Path.Combine(root, "Characters");
                         Directory.CreateDirectory(characters);
-                        if (plan.RosterDirectory != null) DirectoryLinks.EnsureJunction(Path.Combine(root, "Roster"), plan.RosterDirectory);
+                        if (pictures.Count > 0)
+                            DiscoveryRenderOverlay.Prepare(root, Path.Combine(plan.RosterDirectory, "CharProfileTable.jsfb"), pictures);
+                        else if (plan.RosterDirectory != null) DirectoryLinks.EnsureJunction(Path.Combine(root, "Roster"), plan.RosterDirectory);
                         if (plan.DataRoot != null)
                         {
                             foreach (string peer in new[] { "CAS", "UI" })
                             {
+                                if (pictures.Count > 0 && peer == "UI") continue;
                                 string target = Path.Combine(plan.DataRoot, peer);
                                 if (Directory.Exists(target)) DirectoryLinks.EnsureJunction(Path.Combine(root, peer), target);
                             }
@@ -102,6 +107,7 @@ namespace GorillaStudio.NameFolders
                     if (session.ChooseCharacterFolder && !string.IsNullOrWhiteSpace(picker.CurrentRosterFile))
                         RememberRosterFile(picker.CurrentRosterFile);
                     lastDiscoveryRoot = plan.DataRoot;
+                    RememberRenderTable(alias, picker.SelectedEntry.RosterTable);
                     RegisterSelection(alias, picker.SelectedEntry);
                     return alias;
                 }
