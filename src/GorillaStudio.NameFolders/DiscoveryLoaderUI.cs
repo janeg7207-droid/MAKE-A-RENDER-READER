@@ -97,16 +97,10 @@ namespace GorillaStudio.NameFolders
                 string source = RememberedRoot(window);
                 if (chooseAnother || source == null)
                 {
-                    using (var dialog = new Forms.FolderBrowserDialog
-                    {
-                        Description = "Choose the extracted discovery_data folder containing Characters and Roster.",
-                        ShowNewFolderButton = false,
-                        SelectedPath = source ?? ""
-                    })
-                    {
-                        if (dialog.ShowDialog(new NativeOwner(new WindowInteropHelper(window).Handle)) != Forms.DialogResult.OK) return;
-                        source = RosterAccess.RootFor(dialog.SelectedPath);
-                    }
+                    string folder = FolderLocationDialog.Choose(new NativeOwner(new WindowInteropHelper(window).Handle),
+                        "Open Discovery data", "Choose or paste the Discovery data folder containing Characters and Roster.", source ?? "");
+                    if (folder == null) return;
+                    source = RosterAccess.RootFor(folder);
                 }
                 if (source == null)
                     throw new InvalidDataException("Choose discovery_data, Characters or Roster from the extracted Discovery files. The data needs Characters and Roster\\CharProfileTable.jsfb together.");

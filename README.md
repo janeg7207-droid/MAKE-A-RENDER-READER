@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including custom wrestler names and IDs. It joins model paths through CharacterMapping.jsfb instead of treating every folder prefix as the wrestler's roster ID. The helper is version **1.3.0**; the original application is Gorilla Studio v1.0.2.
+The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including custom wrestler names and IDs. **Scan models folder…** finds models already in your extracted mod collection and remembers the location. The helper is version **1.4.0**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -23,11 +23,13 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
          Sdb/ENG.sdb
 
 2. Click **Load Discovery roster…** and choose discovery_data. Selecting its Characters or Roster folder also works. Subsequent clicks open that roster directly; **Change…** chooses a different data folder.
-3. Search by name, wrestler ID or model-folder name. **Models in data** filters to characters with local model folders. The source column shows how the folder was identified. **Refresh data** rescans changed files.
-4. Select a wrestler and click **Load selected wrestler**. Plain folder names need no number. Unresolved folders stay visible and ask you to choose a roster slot. **Use folder for another wrestler…** lets you explicitly assign a model to another profile. Folders containing different numbered models require choosing a specific model folder first.
+3. Click **Scan models folder…** and choose the main folder containing your already extracted wrestler mods. It scans nested folders, attaches unique matching models, and remembers this location for the roster. You can paste a path, drag a folder into the location box, or browse using Explorer's address bar and search. Keep model files extracted; the renderer uses .mcd models.
+4. Search by name, wrestler ID or model-folder name. **Models in data** filters to local models. Select a wrestler and click **Load selected wrestler**. Unique discovered models load directly; multiple matches open a searchable model list. **Choose model folder…** also opens the model list. Plain names need no numeric prefix, and unresolved models stay visible for you to choose their wrestler slot. **Refresh data** rescans remembered locations.
 5. Continue with the original Preview / Make / Install controls. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
 
-A roster profile can exist without its model in the extracted data. Such rows remain visible. If CharacterMapping and the supplied stock index uniquely identify an installed-game model, the loader uses the original game's extractor. Otherwise it asks for the actual mod folder. **Choose model folder…** lets you supply a mod folder directly for any selected profile. A custom wrestler's numeric slot alone cannot identify its model assets.
+A roster profile can exist without its model in the selected data. **Model not found · Scan models folder…** means that the name and ID were read, but no matching extracted model has been located. Point the scan at the parent folder containing your actual mod folders once, rather than browsing separately for PAC, AJ Styles and every other character. The supplied Discovery archive itself contains ten extracted character models; the other profiles need their models from your collection or the installed game.
+
+Existing model associations remain authoritative. Library matching prefers exact names; duplicate matches require your choice. It does not use a custom wrestler's logical ID to guess a stock body. Verified installed-game models retain the original extractor. You can explicitly map any discovered model to another profile with **Use folder for another wrestler…**.
 
 ENG.sdb supplies the readable character names. Keep your own current file in Sdb/ENG.sdb. Missing localized strings display as “Wrestler <ID>”; the loader never substitutes a localization key as a wrestler name.
 
@@ -40,6 +42,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and all **10 extracted model folders**. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
+- **156 portable checks pass**, including extracted PAC/AJ discovery, nested collections, ambiguous matches, moved model folders, physical-ID safety, and the original importer and slot-selection checks. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
 - The original v1.0.2 engine verifies physical 312 → logical 1481 and physical 123 → logical 910. It retains the original model/body source while using the selected profile's render links and gender. The 1481 case selects 148100_CM_PUNK_GM.
@@ -57,6 +60,8 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/RosterTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/DiscoveryScannerTests -c Release -- /path/to/discovery_data /path/to/Sdb/ENG.sdb /path/to/original/data/gamepack/stock_index.json
     dotnet run --project tests/GameModelBridgeTests -c Release
+    dotnet run --project tests/ModelLibraryTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/ModelBindingTests -c Release
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.
