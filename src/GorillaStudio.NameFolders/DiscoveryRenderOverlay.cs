@@ -79,6 +79,8 @@ namespace GorillaStudio.NameFolders
             EnsureRealFile(tablePath);
             string markerPath = Path.Combine(fullRoot, "original-roster.txt");
             EnsureRealFile(markerPath);
+            string aliasesPath = Path.Combine(fullRoot, "picture-aliases.txt");
+            EnsureRealFile(aliasesPath);
             foreach (string destination in result.ImagePaths.Values) EnsureRealFile(destination);
 
             foreach (var entry in result.OriginalToAlias)
@@ -91,8 +93,10 @@ namespace GorillaStudio.NameFolders
                 }
                 CopyAtomic(sources[entry.Key], result.ImagePaths[entry.Key]);
             }
-            WriteAtomic(bytes, tablePath);
             WriteAtomic(Encoding.UTF8.GetBytes(fullTable), markerPath);
+            WriteAtomic(Encoding.UTF8.GetBytes(string.Join("\n", result.OriginalToAlias.OrderBy(pair => pair.Key)
+                .Select(pair => pair.Key.ToString("X16", CultureInfo.InvariantCulture) + " " + pair.Value.ToString("X16", CultureInfo.InvariantCulture)))), aliasesPath);
+            WriteAtomic(bytes, tablePath);
             return result;
         }
 

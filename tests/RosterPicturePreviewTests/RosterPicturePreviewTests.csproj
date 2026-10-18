@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Pfim" Version="0.11.4" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/RosterPicturePreview.cs" Link="RosterPicturePreview.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/RosterPictureDds.cs" Link="RosterPictureDds.cs" />
+  </ItemGroup>
+</Project>

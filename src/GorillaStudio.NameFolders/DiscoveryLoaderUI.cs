@@ -31,6 +31,8 @@ namespace GorillaStudio.NameFolders
                 window.Loaded -= loaded;
                 AttachDiscoveryButton(window);
                 AttachPerformanceControls(window);
+                AttachPictureSelection(window);
+                AttachPlaybackControls(window);
                 if (!NativeStartupAutomation(window))
                     await RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             };
@@ -38,6 +40,8 @@ namespace GorillaStudio.NameFolders
             {
                 AttachDiscoveryButton(window);
                 AttachPerformanceControls(window);
+                AttachPictureSelection(window);
+                AttachPlaybackControls(window);
                 if (!NativeStartupAutomation(window))
                     _ = RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             }
@@ -166,6 +170,18 @@ namespace GorillaStudio.NameFolders
                 await RefreshDiscoveryTauntsAsync(window, source, action == 1);
                 string prepared = PrepareRoster(source, rosterFile);
                 if (prepared == null) return;
+                foreach (string name in new[] { "PreviewButton", "MakeButton", "InstallButton" })
+                {
+                    var control = type.GetField(name, InstanceMembers)?.GetValue(window) as Button;
+                    if (control != null) { loadingControls[control] = control.IsEnabled; control.IsEnabled = false; }
+                }
+                type.GetField("LastGmr", InstanceMembers)?.SetValue(window, null);
+                var previousInstall = type.GetField("InstallButton", InstanceMembers)?.GetValue(window) as Button;
+                if (previousInstall != null) loadingControls[previousInstall] = false;
+                if (renderBusy != null && renderBusy.FieldType == typeof(bool))
+                { renderBusy.SetValue(window, true); ownsRenderBusy = true; }
+                await PrepareSelectedRenderAsync(window, prepared);
+                if (ownsRenderBusy) { renderBusy.SetValue(window, false); ownsRenderBusy = false; }
 
                 string selectedRoot = RosterAccess.RootFor(lastDiscoveryRoot);
                 if (selectedRoot != null)
@@ -183,17 +199,6 @@ namespace GorillaStudio.NameFolders
                 preparedForLoad = prepared;
                 try
                 {
-                    foreach (string name in new[] { "PreviewButton", "MakeButton", "InstallButton" })
-                    {
-                        var field = type.GetField(name, InstanceMembers);
-                        var control = field == null ? null : field.GetValue(window) as Button;
-                        if (control != null) { loadingControls[control] = control.IsEnabled; control.IsEnabled = false; }
-                    }
-                    var lastRender = type.GetField("LastGmr", InstanceMembers);
-                    if (lastRender != null && lastRender.FieldType == typeof(string)) lastRender.SetValue(window, null);
-                    var installField = type.GetField("InstallButton", InstanceMembers);
-                    var install = installField == null ? null : installField.GetValue(window) as Button;
-                    if (install != null) loadingControls[install] = false;
                     var task = setFolder.Invoke(window, new object[] { prepared }) as Task;
                     // SetFolder's initial entry must see Busy=false. After it has
                     // entered its normal async path, block a preview of half-loaded
@@ -204,6 +209,7 @@ namespace GorillaStudio.NameFolders
                         ownsRenderBusy = true;
                     }
                     if (task != null) await task;
+                    await RefreshSelectedPictureAsync(window);
                 }
                 finally { preparedForLoad = null; }
             }
@@ -220,7 +226,9 @@ namespace GorillaStudio.NameFolders
                 change.IsEnabled = changeEnabled;
                 if (ownsRenderBusy) renderBusy.SetValue(window, false);
                 foreach (var state in loadingControls) state.Key.IsEnabled = state.Value;
+                pendingRosterSelection = null;
                 rosterWindowsBusy.Remove(window);
+                QueueSelectedPicture(window);
             }
         }
 

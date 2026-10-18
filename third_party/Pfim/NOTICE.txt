@@ -1,0 +1,8 @@
+Pfim 0.11.4 by Nick Babcock
+https://github.com/nickbabcock/Pfim
+Source revision: 0a00d8152ca4dc0e0a5821c6b8fd5261fca1e84d
+NuGet: https://www.nuget.org/packages/Pfim/0.11.4
+
+Pfim is distributed under the accompanying MIT license. The application uses
+its managed DDS block-compression decoder to show roster pictures directly.
+Pfim.dll targets .NET Standard 2.0 and has no additional package dependencies.

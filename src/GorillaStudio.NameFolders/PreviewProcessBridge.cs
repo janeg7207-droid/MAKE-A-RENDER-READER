@@ -7,6 +7,8 @@ namespace GorillaStudio.NameFolders
 {
     public static partial class FolderBridge
     {
+        static partial void ObservePlaybackSetup(object owner, Process process, string script, IEnumerable<string> args);
+
         // Called immediately before the original engine process starts. The engine
         // appends GORILLA_EXTRA after its renderer arguments, so these last values
         // override the selected detail setting without changing animation timing.
@@ -14,6 +16,7 @@ namespace GorillaStudio.NameFolders
         {
             var nativeProcess = process as Process;
             if (nativeProcess == null) return;
+            ObservePlaybackSetup(owner, nativeProcess, script, args);
             DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);
             string setting;
             if (PreviewCache.IsPreviewRequest(script, args))

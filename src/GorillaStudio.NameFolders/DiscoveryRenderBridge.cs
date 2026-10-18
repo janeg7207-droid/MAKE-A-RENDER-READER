@@ -20,16 +20,18 @@ namespace GorillaStudio.NameFolders
             if (!string.IsNullOrWhiteSpace(table)) renderTables[SelectionPath(folder)] = Path.GetFullPath(table);
         }
 
-        private static Dictionary<ulong, string> PrepareRenderImages(CharacterFolderPlan plan)
+        private static Dictionary<ulong, string> PrepareRenderImages(CharacterFolderPlan plan, int selectedId)
         {
             var prepared = new Dictionary<ulong, string>();
             if (plan.DataRoot == null || plan.RosterDirectory == null) return prepared;
             string table = Path.Combine(plan.RosterDirectory, "CharProfileTable.jsfb");
             var links = DiscoveryRenderLinks.Read(table);
-            var images = DiscoveryRenderImages.Find(plan.DataRoot, links.Values.SelectMany(value => value));
+            List<ulong> required;
+            if (!links.TryGetValue(selectedId, out required)) return prepared;
+            var images = DiscoveryRenderImages.Find(plan.DataRoot, required);
             if (!plan.SourceFolder.StartsWith(plan.DataRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase))
-                foreach (var image in DiscoveryRenderImages.Find(plan.SourceFolder, links.Values.SelectMany(value => value)))
+                foreach (var image in DiscoveryRenderImages.Find(plan.SourceFolder, required))
                     if (!images.ContainsKey(image.Key)) images.Add(image.Key, image.Value);
             foreach (var image in images)
             {
@@ -95,8 +97,10 @@ namespace GorillaStudio.NameFolders
                     string root = parent != null && string.Equals(parent.Name, "Characters", StringComparison.OrdinalIgnoreCase)
                         ? parent.Parent?.FullName : null;
                     string context = root == null ? null : Path.Combine(root, "original-roster.txt");
-                    intermediatePictures = context != null && File.Exists(context);
-                    if (table == null) table = intermediatePictures ? File.ReadAllText(context).Trim()
+                    bool hasContext = context != null && File.Exists(context);
+                    string aliases = root == null ? null : Path.Combine(root, "picture-aliases.txt");
+                    intermediatePictures = hasContext && (aliases == null || !File.Exists(aliases) || new FileInfo(aliases).Length > 0);
+                    if (table == null) table = hasContext ? File.ReadAllText(context).Trim()
                         : root == null ? null : CharacterFolders.FindDiscoveryTable(root);
                 }
                 if (table == null || !File.Exists(table))

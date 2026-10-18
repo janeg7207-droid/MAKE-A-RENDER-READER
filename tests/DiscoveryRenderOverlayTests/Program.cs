@@ -47,6 +47,8 @@ internal static class Program
             Equal("Only exact positive-profile picture hash fields change", true, OnlyPictureFieldsChanged(source, File.ReadAllBytes(result.TablePath), Custom, alias));
             Equal("A plain marker lets later processes recover the original roster table", table,
                 File.ReadAllText(Path.Combine(cache, "original-roster.txt")));
+            Equal("The exact temporary keys are recorded before the table is used", Custom.ToString("X16") + " " + alias.ToString("X16"),
+                File.ReadAllText(Path.Combine(cache, "picture-aliases.txt")));
             Equal("Every generated directory is real", true, new[] { cache, Path.Combine(cache, "Roster"),
                 Path.Combine(cache, "UI", "Assets", "Roster", "TypeA") }.All(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0));
             Equal("The native image index resolves the prepared alias by its real filename", result.ImagePaths[Custom],
@@ -71,6 +73,7 @@ internal static class Program
             var empty = DiscoveryRenderOverlay.Prepare(cache, table, new Dictionary<ulong, string>());
             Equal("Removing a picture removes its temporary alias from the current table", Custom, DiscoveryRenderLinks.Read(empty.TablePath)[9999].Single());
             Equal("No supplied picture means no aliases", 0, empty.OriginalToAlias.Count);
+            Equal("A context without decoded pictures has no intermediate keys to install", "", File.ReadAllText(Path.Combine(cache, "picture-aliases.txt")));
 
             string collisionTable = Write("source/collision.jsfb", Build(new Row(1, Custom, DiscoveryRenderImages.HashStem("discovery_123456789abcdef0"))));
             var collision = DiscoveryRenderOverlay.Prepare(Path.Combine(root, "collision"), collisionTable, images);

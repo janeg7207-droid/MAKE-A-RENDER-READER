@@ -17,5 +17,7 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryScanner.cs" Link="DiscoveryScanner.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/StockModels.cs" Link="StockModels.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/SelectionBridge.cs" Link="SelectionBridge.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryPictureSelection.cs" Link="DiscoveryPictureSelection.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryRenderLinks.cs" Link="DiscoveryRenderLinks.cs" />
   </ItemGroup>
 </Project>

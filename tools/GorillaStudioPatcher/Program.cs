@@ -256,6 +256,11 @@ internal static class Program
                 .SequenceEqual(runPreview.MethodSig.Params.Skip(1).Select(parameter => parameter.FullName)))
             throw new InvalidOperationException("The native render process signature does not match the preview-cache bridge.");
         engineCall.Operand = new Importer(module).Import(runPreview);
+        foreach (Instruction instruction in go.Body.Instructions.Where(instruction => instruction.OpCode == OpCodes.Ldstr))
+        {
+            if ((string)instruction.Operand == "Match card: moves (wrestler ") instruction.Operand = "Match card: configured (wrestler ";
+            if ((string)instruction.Operand == "Roster selection: moves (picture ") instruction.Operand = "Roster selection: linked (picture ";
+        }
 
         // Finalize picture keys after every successful native result, including a
         // completed background render that bypasses the foreground process hook.

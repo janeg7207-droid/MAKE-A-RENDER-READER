@@ -68,49 +68,47 @@ namespace GorillaStudio.NameFolders
                     int physicalId = CharacterFolders.PhysicalId(source) ?? (picker.SelectedEntry.SourceId > 0
                         ? picker.SelectedEntry.SourceId : picker.SelectedEntry.Id);
                     DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
-                    Dictionary<ulong, string> pictures = PrepareRenderImages(plan);
-                    string alias;
-                    if (plan.UseOriginal && !attire.WrapDirectModel && pictures.Count == 0) alias = plan.SourceFolder;
-                    else
-                    {
-                        // One model may be selected against different mod rosters in different sessions.
-                        string root = Path.Combine(StorageDirectory, "links", plan.CacheKey
-                            + (attire.WrapDirectModel ? "-" + attire.CacheSuffix : "")
-                            + (pictures.Count > 0 ? "-pictures-v1" : ""));
-                        string characters = Path.Combine(root, "Characters");
-                        Directory.CreateDirectory(characters);
-                        if (pictures.Count > 0)
-                            DiscoveryRenderOverlay.Prepare(root, Path.Combine(plan.RosterDirectory, "CharProfileTable.jsfb"), pictures);
-                        else if (plan.RosterDirectory != null) DirectoryLinks.EnsureJunction(Path.Combine(root, "Roster"), plan.RosterDirectory);
-                        if (plan.DataRoot != null)
-                        {
-                            foreach (string peer in new[] { "CAS", "UI" })
-                            {
-                                if (pictures.Count > 0 && peer == "UI") continue;
-                                string target = Path.Combine(plan.DataRoot, peer);
-                                if (Directory.Exists(target)) DirectoryLinks.EnsureJunction(Path.Combine(root, peer), target);
-                            }
-                        }
-                        alias = Path.Combine(characters, plan.AliasName);
-                        if (attire.WrapDirectModel)
-                        {
-                            Directory.CreateDirectory(alias);
-                            if ((File.GetAttributes(alias) & FileAttributes.ReparsePoint) != 0)
-                                throw new IOException("A different model link already occupies this compatibility folder.");
-                            DirectoryLinks.EnsureJunction(Path.Combine(alias, "Default_Attire"), plan.SourceFolder);
-                            if (attire.BaseModelFolder != null)
-                                DirectoryLinks.EnsureJunction(Path.Combine(alias, "BaseModel"), attire.BaseModelFolder);
-                        }
-                        else DirectoryLinks.EnsureJunction(alias, plan.SourceFolder);
-                    }
+                    Dictionary<ulong, string> pictures = PrepareRenderImages(plan, picker.SelectedEntry.Id);
+                    string alias = PrepareCharacterAlias(plan, attire, pictures);
                     SaveRoster(picker.Entries);
                     if (session.ChooseCharacterFolder && !string.IsNullOrWhiteSpace(picker.CurrentRosterFile))
                         RememberRosterFile(picker.CurrentRosterFile);
                     lastDiscoveryRoot = plan.DataRoot;
                     RememberRenderTable(alias, picker.SelectedEntry.RosterTable);
+                    RememberPreparedRender(alias, plan, picker.SelectedEntry, pictures);
                     RegisterSelection(alias, picker.SelectedEntry);
                     return alias;
                 }
+        }
+
+        private static string PrepareCharacterAlias(CharacterFolderPlan plan, DirectAttirePlan attire, Dictionary<ulong, string> pictures)
+        {
+            bool pictureContext = plan.RosterDirectory != null;
+            if (plan.UseOriginal && !attire.WrapDirectModel && !pictureContext) return plan.SourceFolder;
+            string root = Path.Combine(StorageDirectory, "links", plan.CacheKey
+                + (attire.WrapDirectModel ? "-" + attire.CacheSuffix : "") + (pictureContext ? "-pictures-v2" : ""));
+            string characters = Path.Combine(root, "Characters");
+            Directory.CreateDirectory(characters);
+            if (pictureContext)
+                DiscoveryRenderOverlay.Prepare(root, Path.Combine(plan.RosterDirectory, "CharProfileTable.jsfb"), pictures);
+            if (plan.DataRoot != null)
+                foreach (string peer in new[] { "CAS", "UI" })
+                {
+                    if (pictureContext && peer == "UI") continue;
+                    string target = Path.Combine(plan.DataRoot, peer);
+                    if (Directory.Exists(target)) DirectoryLinks.EnsureJunction(Path.Combine(root, peer), target);
+                }
+            string alias = Path.Combine(characters, plan.AliasName);
+            if (attire.WrapDirectModel)
+            {
+                Directory.CreateDirectory(alias);
+                if ((File.GetAttributes(alias) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("A different model link already occupies this compatibility folder.");
+                DirectoryLinks.EnsureJunction(Path.Combine(alias, "Default_Attire"), plan.SourceFolder);
+                if (attire.BaseModelFolder != null) DirectoryLinks.EnsureJunction(Path.Combine(alias, "BaseModel"), attire.BaseModelFolder);
+            }
+            else DirectoryLinks.EnsureJunction(alias, plan.SourceFolder);
+            return alias;
         }
 
         private static string RememberedRosterFile()

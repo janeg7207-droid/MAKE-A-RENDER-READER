@@ -19,7 +19,8 @@ namespace GorillaStudio.NameFolders
             {
                 Folder = SelectionPath(prepared),
                 Id = selected.Id,
-                Name = string.IsNullOrWhiteSpace(selected.Name) ? "Wrestler " + selected.Id.ToString(CultureInfo.InvariantCulture) : selected.Name.Trim()
+                Name = string.IsNullOrWhiteSpace(selected.Name) ? "Wrestler " + selected.Id.ToString(CultureInfo.InvariantCulture) : selected.Name.Trim(),
+                RosterTable = selected.RosterTable
             };
         }
 
@@ -54,7 +55,11 @@ namespace GorillaStudio.NameFolders
             var setTarget = type.GetMethod("SetTarget", InstanceMembers, null, new[] { typeof(string) }, null);
             if (setTarget == null) throw new MissingMethodException("This Gorilla Studio version cannot select a mapped wrestler slot.");
             setTarget.Invoke(owner, new object[] { selected.Id.ToString(CultureInfo.InvariantCulture) });
+            DiscoveryPictureSelection.Apply(owner, selected.RosterTable);
+            OnRosterSelectionApplied(owner);
         }
+
+        static partial void OnRosterSelectionApplied(object owner);
 
         private static void AddNativeSlotName(object owner, PendingRosterSelection selected)
         {
@@ -88,6 +93,7 @@ namespace GorillaStudio.NameFolders
             internal string Folder;
             internal int Id;
             internal string Name;
+            internal string RosterTable;
         }
     }
 }
