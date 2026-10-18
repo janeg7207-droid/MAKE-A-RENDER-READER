@@ -90,6 +90,8 @@ internal static class Program
             Write(config, "enabled 0\nenabled 1\n"); Check(Evaluate().IsConfigured, "A later active enable overrides an earlier disabled line");
             Write(config, "# enabled 1\nverbose 1\n"); Check(Issue("enabled state is unknown"), "Commented settings do not imply the plugin is enabled");
             Write(config, "enabled yes\n"); Check(Issue("enabled state is unknown"), "An unknown enabled value requires attention");
+            Write(config, new string('x', 1024 * 1024 + 1));
+            Check(Issue("configuration is too large"), "An oversized plugin config produces a readable diagnostic instead of escaping the check");
             File.Delete(config); Check(Issue("configuration is missing"), "A missing config leaves the enabled state unknown");
             Write(config, "enabled 1\n");
             string plugin = Path.Combine(game, "Plugins", "WWE2K26_MovingRenders.dlp");

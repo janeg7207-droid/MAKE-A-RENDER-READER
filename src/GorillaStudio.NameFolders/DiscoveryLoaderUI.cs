@@ -31,6 +31,8 @@ namespace GorillaStudio.NameFolders
                 window.Loaded -= loaded;
                 AttachDiscoveryButton(window);
                 AttachPerformanceControls(window);
+                AttachAlternateAttireControls(window);
+                AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 if (!NativeStartupAutomation(window))
@@ -40,6 +42,8 @@ namespace GorillaStudio.NameFolders
             {
                 AttachDiscoveryButton(window);
                 AttachPerformanceControls(window);
+                AttachAlternateAttireControls(window);
+                AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 if (!NativeStartupAutomation(window))

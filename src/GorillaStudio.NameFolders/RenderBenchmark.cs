@@ -48,6 +48,7 @@ namespace GorillaStudio.NameFolders
 
             bool previousPreview = FastPreviewEnabled;
             bool previousMake = FastRenderEnabled;
+            bool previousRosterSpeed = RosterSpeedEnabled;
             bool previousBusy = (bool)busy.GetValue(owner);
             List<BenchmarkControlState> controls = BenchmarkControls(owner);
             var measurements = new List<BenchmarkMeasurement>();
@@ -58,6 +59,7 @@ namespace GorillaStudio.NameFolders
             try
             {
                 busy.SetValue(owner, true);
+                RosterSpeedEnabled = false;
                 uiBusy = true;
                 SetPerformanceBusy(owner, true);
                 foreach (BenchmarkControlState control in controls) control.Property.SetValue(control.Control, false, null);
@@ -102,6 +104,7 @@ namespace GorillaStudio.NameFolders
             finally
             {
                 SetPerformanceModes(previousPreview, previousMake);
+                RosterSpeedEnabled = previousRosterSpeed;
                 busy.SetValue(owner, previousBusy);
                 if (uiBusy) SetPerformanceBusy(owner, false);
                 foreach (BenchmarkControlState control in controls)

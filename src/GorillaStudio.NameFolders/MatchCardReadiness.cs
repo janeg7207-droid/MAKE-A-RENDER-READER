@@ -337,7 +337,7 @@ namespace GorillaStudio.NameFolders
 
         private static bool ReadFailure(Exception error)
         {
-            return error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+            return error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException
                 || error is InvalidOperationException || error is FormatException || error is OverflowException
                 || error is NotSupportedException || error is System.Security.SecurityException
 #if NET8_0_OR_GREATER

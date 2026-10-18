@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. **Fast Preview**, **Fast MAKE**, and a preview cache reduce repeated rendering work. The helper is version **1.6.2**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.3**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -28,6 +28,18 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
 3. If your models are stored outside Discovery, click **Set model library…** once and select the main folder containing your extracted wrestler mods. It scans nested folders, attaches unique matching models, and remembers this location for the roster. You can paste a path, drag a folder into the location box, or browse using Explorer's address bar and search. Keep model files extracted; the renderer uses .mcd models.
 4. Search by name or ID, then **click the wrestler once**. The picker loads a verified mapped model, a saved choice, or a unique exact-name model, and closes. The renderer selects its default attire automatically. Multiple matching mod packs ask you to choose between those matches once and remember your choice. Missing files show a clear status; the normal roster path does not open a per-wrestler folder hunt. **Choose model folder…** remains available for an explicit override. Plain names need no numeric prefix. **Refresh data** rereads the roster and rescans remembered locations. Folder-to-wrestler manual assignment still requires an explicit choice.
 5. Continue with the original Preview / Make / Install controls. Tick **Match card** and choose **Loop** for continuous moving match cards. On the first installation, use **Game setup**, then **bake once in Discovery** and restart WWE. Repeat setup and a bake after adding arena mods. **Check match-card setup…** checks the installed slot, screen setting, ending, plugin configuration and screen files; its **Run game setup** uses the remembered actual Discovery folder. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
+
+## Alternate attires
+
+After loading a wrestler, use **Attire model** under Gear to choose an extracted alternate MCD. The list reads that character's attire folders, including nested folders, while excluding BaseModel. **Default (automatic)** keeps the normal default choice. The refresh button reads newly added attires. Gear still selects entrance/ring pieces within the chosen model.
+
+An attire change clears the previous preview/install result and queues preparation of the selected clothes before Preview or MAKE. The character's body, Discovery mapping and logical roster ID remain the same. A removed selected model produces an error rather than silently changing clothes. Attires that only exist in an unextracted game archive need to be extracted first.
+
+## Make several wrestlers with one taunt
+
+Choose the taunt and your hair, gear, ending and screen settings, then open **Batch MAKE…**. Search/select the wrestlers and click **MAKE selected** once. Jobs render one at a time with fast rendering always on. Missing or ambiguous models are reported; select their model once in the normal roster before retrying. Each wrestler uses its default attire, with the current wrestler's explicit attire retained if included.
+
+**Stop after current** finishes the active wrestler and keeps completed files. Each job has its own output folder, and `batch-results.json` records results and skipped models. **Use selected result** restores a completed file for installation without rendering it again. **Install completed** installs the completed group with the game closed, keeps backups and runs game setup once. Bake in Discovery if setup reports changes, then restart WWE.
 
 ## Roster pictures and character loading
 
@@ -69,22 +81,24 @@ Generated animation data, working captures and previews live in a writable folde
 
 ## Faster previews and renders
 
-Fast Preview and Fast MAKE are enabled initially. Click **Speed…** next to Preview to change either setting or restore the original quality.
+Preview and MAKE always use fast rendering. There is no speed selector. Saved settings from an older build cannot turn it off.
 
 | Operation | Original defaults | Faster mode | Calculated rendering work |
 | --- | --- | --- | --- |
 | Wrestler Preview | 384 × 384, 16 samples | 256 × 256, 8 samples | 77.8% fewer pixel-samples |
-| MAKE GORILLA RENDER | 1024 × 1024, 64 samples | 1024 × 1024, 32 samples | 50% fewer samples |
+| MAKE GORILLA RENDER | 1024 × 1024, 64 samples | 1024 × 1024, 8 samples | 87.5% fewer samples |
 
-These are work calculations, **not measured time savings**. Model loading, Blender startup, encoding, GPU load and other fixed costs still take time. Preview retains its animation frames and playback rate. Fast MAKE retains full output resolution and animation timing, with fewer lighting samples; untick it for the original shadow quality. Existing inherited renderer options remain in effect except for the faster mode's explicit overrides.
+These are work calculations, **not measured time savings**. Model loading, Blender startup, encoding, GPU load and other fixed costs still take time. Preview retains its animation frames and playback rate. MAKE retains full output resolution and animation timing, with fewer lighting samples; shadows may look noisier. Close WWE while rendering to leave the GPU available.
+
+The original engine's normal parallel MAKE path bypassed `GORILLA_EXTRA`, so older fast settings did not reliably reach full rendering. The new `engine/gr_render.py` entry point forwards those settings to the unchanged compiled renderer. Native command and renderer-setting checks confirm all full-render branches now receive the sample setting.
 
 Unchanged previews reopen from an on-disk cache without starting Blender. Changes to character inputs, textures, roster context, taunt/settings, Blender/engine metadata or mode invalidate that cache. Cached images are separate copies, so another preview cannot overwrite them. Damaged or unreadable cache entries fall back to rendering. The cache retains at most 64 entries. Full MAKE always uses the original engine.
 
-Automatic full rendering after Preview is off initially. This prevents a full render from occupying the GPU while browsing. Turn **Start MAKE automatically after Preview** back on in Speed… if preferred. Changing quality stops an existing automatic render before it can be reused with the wrong setting.
+Full rendering after Preview stays off so browsing previews leaves the GPU available. MAKE starts when you request it or start a batch.
 
-The small timer below Preview displays the actual request time, with initial model preparation separate. For an old/new comparison, load your wrestler, choose a taunt, click **Speed… → Compare old / new times**. Leave **Also compare full MAKE** checked to measure both operations. The comparison runs one warm-up, then original and faster previews and renders, bypassing preview cache hits. It reports seconds, seconds saved, percentage change and speed ratio; slower results are reported as slower. This takes several renders. Results and comparison files stay under `%LOCALAPPDATA%/GorillaStudio/NameFolders/benchmarks`; ordinary render output and installed game files are untouched. The latest text report is `performance-comparison.txt` in the NameFolders folder.
+The small timer below Preview displays the actual request time, with initial model preparation separate. The supplied screenshot records an original MAKE at 229.5 seconds; a new elapsed time must be measured on the same PC and job. Windows/GPU timings have **not** been measured in this Linux build environment, so no exact seconds saved or speed multiplier is claimed.
 
-These are individual measurements in original-then-fast order, using a shared prepared model. The first full-resolution MAKE can require additional setup; GPU load and run order affect results. Real Windows/GPU timings have **not** been measured in this Linux build environment.
+Output remains **30 fps**. The current GMR writer and Moving Renders plugin explicitly reject 60 fps. Supporting 60 fps requires coordinated exporter, timing and plugin changes; changing only Blender's FPS setting would not produce a compatible game render.
 
 After adding characters, save your updated CharProfileTable.jsfb and Sdb/ENG.sdb, put their extracted models inside a remembered models folder, then click **Refresh data**. It rereads the current roster and names, rescans the model folders, and includes new IDs. For an imported JSON roster, Refresh data reloads that same JSON file during the current session. Renamed characters replace stale saved labels; conflicting saved model choices require selection. Reopening Discovery also rereads its current files.
 
@@ -103,7 +117,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **1,585 portable checks pass** across 28 suites, covering archive index/extraction commands and caching, DDS/BC7 decoding, selection-time picture references, match-card readiness and layout repairs, final GMR keys, shared pictures, roster/model loading, motion import, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- **1,775 portable checks pass** across 31 suites, including alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
@@ -113,6 +127,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 - The original engine finds the prepared image for Avery's actual profile, samples its automatic hair colour, and accepts a finalized GMR with the actual picture hash and all 1,139 installation-map entries. These checks use a synthetic image and structural video fixture; they do not claim an in-game visual test.
 - DDS decoding is compared with independent Pillow pixels for every BC7 mode, transparent alpha and DXT formats, and loads the uploaded real 2048 × 1024 Tripwire DDS. Archive tests exercise the shipped command vectors using fixture indexes and DDS outputs, plus real process cancellation and timeouts on Linux. They do not execute Bakery's Windows binary or prove PAC's missing texture pixels are present in the uploaded files. Match-card checks verify the actual 188-file screen pack and explicit setup result handling. Windows GUI, native game archive extraction, Blender images and match-card gameplay remain unverified.
 - Match-card repairs are checked across all 86 supplied match-card projects: 4,472 missing layers are completed, existing layers are preserved, and repeat setup changes nothing. Independent original-engine checks compare all 101 slots in RAW 24 with the native full-layout recipe and inspect the repaired corpus. All 101 placeholder movies carry the plugin's layout/player encoding; a newly generated movie decodes with FFmpeg. These are file-format checks, not observed match-card gameplay.
+- The unchanged native pipeline and Blender renderer settings execute in **171 structural checks**: full renders receive 8 samples at 1024 × 1024, 30 fps with the full motion. **116 native attire checks** confirm explicit clothes selection and separate model caches across preparation, Preview and MAKE. Bulk tests validate IDs, output isolation, malformed movies, shared picture maps, backups and repeat installs. Actual Windows batch rendering, GPU timings and alternate-attire images remain unverified.
 - The patcher verifies a five-method allowlist: the window constructor, folder-loading state machine, Go state machine, process-launch state machine and automatic-render entry point. All other method bodies, authentication/licensing and managed/native resources are preserved. Engine binaries remain unchanged; faster detail is passed only to each applicable render process.
 
 Detailed results are included in TEST_RESULTS.json inside the ZIPs.
@@ -152,11 +167,16 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/RosterPicturePreviewTests -c Release -- /path/to/new-dds-fixtures
     dotnet run --project tests/MatchCardReadinessTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data
     dotnet run --project tests/MatchCardLayoutsTests -c Release -- /path/to/original/GorillaStudio /path/to/new-layout-fixtures
+    dotnet run --project tests/AlternateAttireTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/BatchRenderPlanTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/BatchRenderInstallerTests -c Release
     python tests/validate_matchcard_layouts.py --help
+    python tests/validate_alternate_attires.py --help
+    python tests/validate_render_speed.py --help
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.
 
-Also ship `Pfim.dll` from the helper build output and the MIT license/notice under `third_party/Pfim`. Pfim 0.11.4 supplies the managed compressed-DDS decoder. The full and small-update ZIPs include both.
+Also ship `Pfim.dll` from the helper build output and the MIT license/notice under `third_party/Pfim`. Copy `runtime/engine/gr_render.py` to the program's `engine/gr_render.py`; the fast full-render forwarding fix requires this entry point alongside the original compiled renderer. The full and small-update ZIPs include these files.
 
 The Python validators in tests use the original engine bytecode with CPython 3.14, NumPy 2.4.3 and Pillow. Run each with --help for arguments. validate_user_data.py performs an actual render attempt; validate_mapped_engine.py observes logical-slot handling and stops deliberately before game extraction. Neither script tests the Windows GUI.

@@ -14,8 +14,10 @@ namespace GorillaStudio.NameFolders
         internal static string StorageDirectory { get; set; }
         public static bool FastPreviewEnabled { get; private set; } = true;
         public static bool FastRenderEnabled { get; private set; } = true;
+        public static bool RosterSpeedEnabled { get; private set; }
         internal static int BusyTransitions;
         internal static void SetPerformanceModes(bool preview, bool make) { FastPreviewEnabled = preview; FastRenderEnabled = make; }
+        internal static void SetRosterSpeedMode(bool enabled) { RosterSpeedEnabled = enabled; }
         internal static void SetPerformanceBusy(object owner, bool busy) { BusyTransitions++; }
     }
 }
@@ -47,9 +49,11 @@ internal static class Program
             True("Character, taunt and roster target are kept", isolated[0] == "character" && isolated[1] == "taunt" && isolated.Contains("slot=4000"));
 
             var full = new FakeOwner();
+            FolderBridge.SetRosterSpeedMode(true);
             string report = await FolderBridge.CompareRenderSpeeds(full, true, value => { });
             Equal("Full comparison runs one warmup and all four measured cases", 5, full.Calls.Count);
             Equal("Each case uses the intended performance mode", "False/False,False/False,True/False,False/False,False/True", string.Join(",", full.Calls.Select(value => value.Modes)));
+            True("The 8-sample roster preset cannot leak into the 32-sample fast benchmark", full.Calls.All(value => !value.RosterSpeed));
             True("Both measured comparisons are reported", report.Contains("Preview: original ") && report.Contains("MAKE: original "));
             True("Work reduction is explicitly separate from wall-clock time", report.Contains("77.8% fewer pixel-samples") && report.Contains("not elapsed-time predictions"));
             True("Comparison never uses ordinary output", full.Calls.All(value => value.Output != "my renders" && value.Output.StartsWith(root)));
@@ -58,6 +62,7 @@ internal static class Program
             True("Native interactive controls are disabled during benchmark", full.Calls.All(value => value.ControlsDisabled));
             True("Native controls and busy state are restored", !full.Busy && full.PreviewButton.IsEnabled && full.MakeButton.IsEnabled && full.BodyGrid.IsEnabled && !full.InstallButton.IsEnabled);
             True("Original mode choices are restored", FolderBridge.FastPreviewEnabled && FolderBridge.FastRenderEnabled);
+            True("A selected roster speed preference is restored after the full comparison", FolderBridge.RosterSpeedEnabled);
             Equal("Background render is stopped once", 1, full.StopCalls);
             True("Persistent text report contains actual measurements", File.ReadAllText(Path.Combine(root, "performance-comparison.txt")).Contains("MAKE: original "));
             True("Structured measurements are saved", Directory.GetFiles(root, "comparison.json", SearchOption.AllDirectories).Any());
@@ -70,10 +75,12 @@ internal static class Program
             True("Preview-only report has no MAKE measurement", previewReport.Contains("Preview: original") && !previewReport.Contains("MAKE: original"));
             True("Progress callback exceptions do not interrupt rendering", !previewReport.Contains("Comparison stopped:"));
             True("User performance flags restore even when disabled", !FolderBridge.FastPreviewEnabled && FolderBridge.FastRenderEnabled);
+            True("Preview-only comparison also isolates and restores roster speed", previews.Calls.All(value => !value.RosterSpeed) && FolderBridge.RosterSpeedEnabled);
 
             var locked = new FakeOwner { IsUnlocked = false };
             await Rejects("Licensing is required before benchmarking", () => FolderBridge.CompareRenderSpeeds(locked, true, null));
             Equal("A locked application starts no process", 0, locked.Calls.Count);
+            True("A rejected comparison preserves the roster speed preference", FolderBridge.RosterSpeedEnabled);
             var busy = new FakeOwner { Busy = true };
             await Rejects("An existing render cannot be overlapped", () => FolderBridge.CompareRenderSpeeds(busy, true, null));
             True("An existing busy state stays set", busy.Busy);
@@ -87,9 +94,12 @@ internal static class Program
             True("A failed engine does not produce a speed factor", failed.Contains("Comparison stopped:") && failed.Contains("No speed-up is calculated") && !failed.Contains("× speed"));
             True("Failure preserves the engine error", failed.Contains("simulated render error"));
             True("Failure restores modes, controls and native busy state", !failure.Busy && failure.BodyGrid.IsEnabled && !FolderBridge.FastPreviewEnabled && FolderBridge.FastRenderEnabled);
+            True("A failed comparison restores roster speed without using it in any launch", FolderBridge.RosterSpeedEnabled && failure.Calls.All(value => !value.RosterSpeed));
+            FolderBridge.SetRosterSpeedMode(false);
             var mismatch = new FakeOwner { DifferentFrameCounts = true };
             string changed = await FolderBridge.CompareRenderSpeeds(mismatch, false, null);
             True("Changing frame counts cannot claim a speed-up", changed.Contains("frame counts changed") && !changed.Contains("× speed"));
+            True("An initially disabled roster speed preference stays disabled after failure", !FolderBridge.RosterSpeedEnabled);
 
             string artifact = Path.Combine(root, "valid.png");
             File.WriteAllBytes(artifact, new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
@@ -113,7 +123,7 @@ internal static class Program
     private static async Task Rejects(string label, Func<Task<string>> action) { try { await action(); } catch { passed++; return; } throw new Exception(label); }
 
     private sealed class FakeControl { public bool IsEnabled { get; set; } = true; public object SelectedItem { get; set; } = "taunt"; }
-    private sealed class Call { public string Modes; public string Output; public string Work; public bool Busy; public bool ControlsDisabled; }
+    private sealed class Call { public string Modes; public string Output; public string Work; public bool Busy; public bool ControlsDisabled; public bool RosterSpeed; }
     private sealed class FakeOwner
     {
         public string Folder = "model";
@@ -145,6 +155,7 @@ internal static class Program
         {
             List<string> args = arguments.ToList();
             Calls.Add(new Call { Modes = FolderBridge.FastPreviewEnabled + "/" + FolderBridge.FastRenderEnabled,
+                RosterSpeed = FolderBridge.RosterSpeedEnabled,
                 Output = args[2], Work = args.Single(value => value.StartsWith("work=")), Busy = Busy,
                 ControlsDisabled = !BodyGrid.IsEnabled && !PreviewButton.IsEnabled && !MakeButton.IsEnabled && !InstallButton.IsEnabled });
             if (line != null) line("STAGE 7/9 Rendering");

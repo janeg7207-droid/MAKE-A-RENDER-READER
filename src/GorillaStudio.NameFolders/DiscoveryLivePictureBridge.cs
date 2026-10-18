@@ -194,7 +194,7 @@ namespace GorillaStudio.NameFolders
 
         private static bool PictureError(Exception error)
         {
-            return error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+            return error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException
                 || error is InvalidOperationException || error is NotSupportedException || error is FormatException
                 || error is OverflowException || error is System.ComponentModel.Win32Exception || error is TimeoutException;
         }

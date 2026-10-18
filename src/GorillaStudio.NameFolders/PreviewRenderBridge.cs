@@ -12,6 +12,7 @@ namespace GorillaStudio.NameFolders
 {
     public static partial class FolderBridge
     {
+        static partial void SelectAttireArguments(object owner, string script, ref string[] arguments);
         // The native RunPy remains responsible for process startup, cancellation,
         // output dispatch and exit handling. Only complete quick previews can skip it.
         public static async Task<ValueTuple<int, List<string>>> RunPreviewProcess(object owner, string script,
@@ -19,6 +20,7 @@ namespace GorillaStudio.NameFolders
         {
             if (owner == null) throw new ArgumentNullException("owner");
             string[] arguments = args == null ? null : args.ToArray();
+            SelectAttireArguments(owner, script, ref arguments);
             bool preview = PreviewCache.IsPreviewRequest(script, arguments);
             bool fast = preview ? FastPreviewEnabled : FastRenderEnabled;
             bool cached = false, frozen = false;

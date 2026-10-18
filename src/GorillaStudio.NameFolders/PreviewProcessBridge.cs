@@ -8,6 +8,7 @@ namespace GorillaStudio.NameFolders
     public static partial class FolderBridge
     {
         static partial void ObservePlaybackSetup(object owner, Process process, string script, IEnumerable<string> args);
+        static partial void ConfigureAlternateAttireProcess(object owner, Process process, string script, IEnumerable<string> args);
 
         // Called immediately before the original engine process starts. The engine
         // appends GORILLA_EXTRA after its renderer arguments, so these last values
@@ -16,6 +17,7 @@ namespace GorillaStudio.NameFolders
         {
             var nativeProcess = process as Process;
             if (nativeProcess == null) return;
+            ConfigureAlternateAttireProcess(owner, nativeProcess, script, args);
             ObservePlaybackSetup(owner, nativeProcess, script, args);
             DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);
             string setting;
@@ -27,7 +29,7 @@ namespace GorillaStudio.NameFolders
             else
             {
                 if (!FastRenderEnabled || !IsFullRenderRequest(script, args)) return;
-                setting = "samples=32";
+                setting = RosterSpeedEnabled ? "samples=8" : "samples=32";
             }
 
             string extra = nativeProcess.StartInfo.EnvironmentVariables["GORILLA_EXTRA"];
