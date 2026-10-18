@@ -23,6 +23,8 @@ namespace GorillaStudio.NameFolders
         private readonly string sourceFolder;
         private readonly bool chooseCharacterFolder;
         private string currentRosterTable;
+        private string currentRosterFile;
+        private readonly Button refreshData = new Button();
         public List<RosterEntry> Entries { get; private set; }
         public RosterEntry SelectedEntry { get; private set; }
         public string SelectedFolder { get; private set; }
@@ -42,6 +44,7 @@ namespace GorillaStudio.NameFolders
             sourceFolder = source;
             this.chooseCharacterFolder = chooseCharacterFolder;
             currentRosterTable = CommonRosterTable(entries);
+            currentRosterFile = currentRosterTable;
             suggestedName = FolderNames.DisplayName(new DirectoryInfo(source).Name);
 
             var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 9 };
@@ -59,12 +62,16 @@ namespace GorillaStudio.NameFolders
             var loadFile = new Button { Text = "Load roster file…", AutoSize = true, Padding = new Padding(8, 2, 8, 2) };
             loadFile.Click += LoadRosterFile;
             importBar.Controls.Add(loadFile);
-            if (currentRosterTable != null)
+            refreshData.Text = "Refresh data";
+            refreshData.AutoSize = true;
+            refreshData.Padding = new Padding(8, 2, 8, 2);
+            refreshData.Enabled = currentRosterFile != null;
+            refreshData.Click += (s, e) =>
             {
-                var rescan = new Button { Text = "Refresh data", AutoSize = true, Padding = new Padding(8, 2, 8, 2) };
-                rescan.Click += (s, e) => { if (currentRosterTable != null) Import(() => RosterSession.Open(DiscoveryProfiles.DataRoot(currentRosterTable), Entries).Entries); };
-                importBar.Controls.Add(rescan);
-            }
+                if (modelSelectionBusy || currentRosterFile == null) return;
+                Import(currentRosterFile);
+            };
+            importBar.Controls.Add(refreshData);
             InitializeModelLibrary(importBar);
             layout.Controls.Add(importBar, 0, 2);
 
@@ -238,19 +245,20 @@ namespace GorillaStudio.NameFolders
                 CheckFileExists = true, Multiselect = false })
             {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                Import(() => RosterImport.LoadFile(dialog.FileName));
+                Import(dialog.FileName);
             }
         }
 
-        private void Import(Func<List<RosterEntry>> load)
+        private void Import(string rosterFile)
         {
             if (modelSelectionBusy) return;
             try
             {
-                List<RosterEntry> next = load();
-                RosterSession.BindImportedModels(next, Entries, currentRosterTable);
+                List<RosterEntry> next = RosterSession.Refresh(rosterFile, Entries, currentRosterTable);
                 Entries = next;
                 currentRosterTable = CommonRosterTable(next);
+                currentRosterFile = Path.GetFullPath(rosterFile);
+                refreshData.Enabled = true;
                 search.Clear();
                 RefreshList(null);
                 ResetModelLibrary();

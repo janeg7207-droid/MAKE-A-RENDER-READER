@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including custom wrestler names and IDs. **Scan models folder…** finds models already in your extracted mod collection and remembers the location. The helper is version **1.4.0**; the original application is Gorilla Studio v1.0.2.
+The updated loader reads the **full Discovery roster from CharProfileTable.jsfb and Sdb/ENG.sdb**, including newly added character IDs and names. **Scan models folder…** finds models already in your extracted mod collection and remembers the location. The helper is version **1.4.1**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -27,6 +27,8 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
 4. Search by name, wrestler ID or model-folder name. **Models in data** filters to local models. Select a wrestler and click **Load selected wrestler**. Unique discovered models load directly; multiple matches open a searchable model list. **Choose model folder…** also opens the model list. Plain names need no numeric prefix, and unresolved models stay visible for you to choose their wrestler slot. **Refresh data** rescans remembered locations.
 5. Continue with the original Preview / Make / Install controls. Windows, .NET Framework 4.8, Blender 5.2 or newer, and the original WWE 2K26/plugin setup are required.
 
+After adding characters, save your updated CharProfileTable.jsfb and Sdb/ENG.sdb, put their extracted models inside a remembered models folder, then click **Refresh data**. It rereads the current roster and names, rescans the model folders, and includes new IDs. For an imported JSON roster, Refresh data reloads that same JSON file during the current session. Renamed characters replace stale saved labels; conflicting saved model choices require selection. Reopening Discovery also rereads its current files.
+
 A roster profile can exist without its model in the selected data. **Model not found · Scan models folder…** means that the name and ID were read, but no matching extracted model has been located. Point the scan at the parent folder containing your actual mod folders once, rather than browsing separately for PAC, AJ Styles and every other character. The supplied Discovery archive itself contains ten extracted character models; the other profiles need their models from your collection or the installed game.
 
 Existing model associations remain authoritative. Library matching prefers exact names; duplicate matches require your choice. It does not use a custom wrestler's logical ID to guess a stock body. Verified installed-game models retain the original extractor. You can explicitly map any discovered model to another profile with **Use folder for another wrestler…**.
@@ -42,7 +44,8 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and all **10 extracted model folders**. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **156 portable checks pass**, including extracted PAC/AJ discovery, nested collections, ambiguous matches, moved model folders, physical-ID safety, and the original importer and slot-selection checks. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment.
+- **166 portable checks pass**, including extracted PAC/AJ discovery, nested collections, ambiguous matches, moved model folders, physical-ID safety, and the original importer and slot-selection checks. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment.
+- Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
 - The original v1.0.2 engine verifies physical 312 → logical 1481 and physical 123 → logical 910. It retains the original model/body source while using the selected profile's render links and gender. The 1481 case selects 148100_CM_PUNK_GM.
@@ -62,6 +65,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/GameModelBridgeTests -c Release
     dotnet run --project tests/ModelLibraryTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/ModelBindingTests -c Release
+    dotnet run --project tests/RosterGrowthTests -c Release -- /path/to/discovery_data
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.

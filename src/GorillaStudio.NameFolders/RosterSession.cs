@@ -26,12 +26,26 @@ namespace GorillaStudio.NameFolders
                 List<RosterEntry> matches = models.Where(e => e.Id == entry.Id).ToList();
                 if (matches.Count != 1) continue; // A JSON slot cannot select between different models by itself.
                 RosterEntry model = matches[0];
+                bool nameBasedModel = string.Equals(model.Source, "Found in models folder", StringComparison.OrdinalIgnoreCase)
+                    || (model.Source != null && model.Source.StartsWith("Chosen", StringComparison.OrdinalIgnoreCase));
+                if (nameBasedModel && string.IsNullOrWhiteSpace(model.StockFolder)
+                    && !string.Equals((entry.Name ?? "").Trim(), (model.Name ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) continue;
                 if (string.IsNullOrWhiteSpace(entry.Folder) && Directory.Exists(model.Folder)) entry.Folder = model.Folder;
                 if (entry.SourceId == 0) entry.SourceId = model.SourceId;
                 if (entry.StockFolder == null) entry.StockFolder = model.StockFolder;
                 if (entry.Source == null) entry.Source = model.Source;
                 entry.IsMod = entry.IsMod || model.IsMod;
             }
+        }
+
+        public static List<RosterEntry> Refresh(string rosterFile, IEnumerable<RosterEntry> saved, string rosterTable = null)
+        {
+            List<RosterEntry> entries = RosterImport.LoadFile(rosterFile);
+            var remembered = saved == null ? new List<RosterEntry>() : saved.Where(e => e != null).ToList();
+            if (string.Equals(Path.GetExtension(rosterFile), ".jsfb", StringComparison.OrdinalIgnoreCase))
+                return MergeDiscovery(entries, Path.GetFullPath(rosterFile), remembered);
+            BindImportedModels(entries, remembered, rosterTable);
+            return entries;
         }
 
         public static RosterSessionData Open(string source, IEnumerable<RosterEntry> saved)
@@ -51,8 +65,15 @@ namespace GorillaStudio.NameFolders
             if (table == null)
                 return new RosterSessionData { Entries = remembered, ChooseCharacterFolder = false, DiscoveryTable = null };
 
-            List<RosterEntry> entries = RosterImport.LoadFile(table);
+            List<RosterEntry> entries = MergeDiscovery(RosterImport.LoadFile(table), table, remembered);
+            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = chooseCharacterFolder, DiscoveryTable = Path.GetFullPath(table) };
+        }
+
+        private static List<RosterEntry> MergeDiscovery(List<RosterEntry> entries, string table, List<RosterEntry> remembered)
+        {
             var identities = new HashSet<string>(entries.Select(Identity), StringComparer.OrdinalIgnoreCase);
+            var freshById = entries.Where(e => e.Id > 0).GroupBy(e => e.Id).ToDictionary(g => g.Key, g => g.ToList());
+            var sameRoster = new List<RosterEntry>();
             foreach (RosterEntry entry in remembered)
             {
                 // Never bring a different mod roster into this Discovery directory.
@@ -62,17 +83,37 @@ namespace GorillaStudio.NameFolders
                 if (entry.SourceId == 0 && entry.Source == null && !string.IsNullOrWhiteSpace(entry.Folder)
                     && entries.Any(e => !string.IsNullOrWhiteSpace(e.Folder)
                         && string.Equals(Path.GetFullPath(e.Folder), Path.GetFullPath(entry.Folder), StringComparison.OrdinalIgnoreCase))) continue;
-                RosterEntry fresh = entries.FirstOrDefault(e => string.Equals(Identity(e), Identity(entry), StringComparison.OrdinalIgnoreCase));
-                if (fresh != null && string.IsNullOrWhiteSpace(fresh.Folder) && Directory.Exists(entry.Folder))
+                sameRoster.Add(entry);
+            }
+            var rememberedBindings = sameRoster.Where(e => Directory.Exists(e.Folder))
+                .GroupBy(Identity, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.GroupBy(BindingIdentity, StringComparer.OrdinalIgnoreCase)
+                    .Select(binding => binding.First()).ToList(), StringComparer.OrdinalIgnoreCase);
+            foreach (RosterEntry entry in sameRoster)
+            {
+                List<RosterEntry> freshMatches;
+                if (freshById.TryGetValue(entry.Id, out freshMatches))
                 {
-                    fresh.Folder = entry.Folder;
-                    fresh.SourceId = entry.SourceId;
-                    fresh.IsMod = entry.IsMod;
-                    fresh.Source = entry.Source;
+                    // Current profiles and SDB names own existing logical IDs. A renamed
+                    // slot must not keep an obsolete row or silently reuse its old model.
+                    List<RosterEntry> bindings;
+                    RosterEntry fresh = freshMatches.Count == 1 ? freshMatches[0] : null;
+                    if (fresh != null && string.Equals(Identity(fresh), Identity(entry), StringComparison.OrdinalIgnoreCase)
+                        && string.IsNullOrWhiteSpace(fresh.Folder)
+                        && rememberedBindings.TryGetValue(Identity(entry), out bindings) && bindings.Count == 1)
+                    {
+                        RosterEntry binding = bindings[0];
+                        fresh.Folder = binding.Folder;
+                        fresh.SourceId = binding.SourceId > 0 ? binding.SourceId
+                            : CharacterFolders.PhysicalId(binding.Folder) ?? fresh.SourceId;
+                        fresh.IsMod = binding.IsMod;
+                        fresh.Source = binding.Source;
+                    }
+                    continue;
                 }
                 if (identities.Add(Identity(entry))) entries.Add(entry);
             }
-            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = chooseCharacterFolder, DiscoveryTable = Path.GetFullPath(table) };
+            return entries;
         }
 
         public static void RememberSelection(RosterEntry entry, string selectedFolder, bool chooseCharacterFolder)
@@ -90,6 +131,11 @@ namespace GorillaStudio.NameFolders
         private static string Identity(RosterEntry entry)
         {
             return entry.Id.ToString(CultureInfo.InvariantCulture) + "\0" + (entry.Name ?? "").Trim();
+        }
+
+        private static string BindingIdentity(RosterEntry entry)
+        {
+            return Path.GetFullPath(entry.Folder) + "\0" + entry.SourceId.ToString(CultureInfo.InvariantCulture);
         }
 
         private static bool SameTable(string remembered, string current)

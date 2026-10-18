@@ -232,6 +232,18 @@ internal static class Program
                 Equal(freshFolder, session.Entries.Single(e => e.Id == 1506).Folder);
                 Equal(1, session.Entries.Count(e => e.Id == 4000));
             });
+            Test("Refreshing current logical IDs preserves distinct discovered model variants", () => {
+                string container = Directory.CreateDirectory(Path.Combine(root, "session-variants")).FullName;
+                string discovery = Directory.CreateDirectory(Path.Combine(container, "Data")).FullName;
+                string first = Directory.CreateDirectory(Path.Combine(discovery, "Characters", "1506_Flammer")).FullName;
+                string second = Directory.CreateDirectory(Path.Combine(container, "BakeMe_Characters", "Characters", "1506_Flammer")).FullName;
+                string table = Profile(discovery);
+                var previous = new RosterEntry { Id = 1506, Name = "Old variant label", RosterTable = table,
+                    Folder = Directory.CreateDirectory(Path.Combine(container, "Previous")).FullName, SourceId = 123, Source = "Manual selection" };
+                var refreshed = RosterSession.Refresh(table, new[] { previous });
+                Equal(2, refreshed.Count); Equal(true, refreshed.All(e => e.Id == 1506 && e.Name == "Flammer" && e.SourceId == 1506));
+                Equal(true, refreshed.Any(e => e.Folder == first)); Equal(true, refreshed.Any(e => e.Folder == second));
+            });
             Test("Remembered model folders persist only in collection mode", () => {
                 string folder = Directory.CreateDirectory(Path.Combine(root, "remembered-model")).FullName;
                 string original = Directory.CreateDirectory(Path.Combine(root, "original-model")).FullName;
@@ -299,6 +311,29 @@ internal static class Program
                     SourceId = 312, StockFolder = "312_CM_Punk", Source = "Character mapping", IsMod = true } }, table);
                 var entry = imported.Single(); Equal(1481, entry.Id); Equal("My Selected Model", entry.Name); Equal(selected, entry.Folder);
                 Equal(123, entry.SourceId); Equal("123_Explicit_Stock", entry.StockFolder); Equal("Explicit JSON selection", entry.Source); Equal(true, entry.IsMod);
+            });
+            Test("An edited JSON wrestler name cannot inherit an unverified model for the previous name", () => {
+                string discovery = DiscoveryFolder("json-renamed-model");
+                string table = Path.Combine(discovery, "Roster", "CharProfileTable.jsfb");
+                string previousFolder = Directory.CreateDirectory(Path.Combine(root, "json-previous-name-model")).FullName;
+                string explicitFolder = Directory.CreateDirectory(Path.Combine(root, "json-new-explicit-model")).FullName;
+                foreach (string source in new[] { "Found in models folder", "Chosen model folder", "Chosen folder" })
+                {
+                    var previous = new RosterEntry { Id = 4000, Name = "Old Wrestler", Folder = previousFolder,
+                        RosterTable = table, SourceId = 1506, Source = source, IsMod = true };
+                    string json = Write("json-renamed-model.json", "[{\"id\":4000,\"name\":\"New Wrestler\"}]");
+                    RosterEntry current = RosterSession.Refresh(json, new[] { previous }, table).Single();
+                    Equal("New Wrestler", current.Name); Equal(table, current.RosterTable); Equal((string)null, current.Folder);
+                    Equal(0, current.SourceId); Equal((string)null, current.Source); Equal(false, current.IsMod);
+                    File.WriteAllText(json, JsonSerializer.Serialize(new[] { new RosterEntry { Id = 4000, Name = "New Wrestler",
+                        Folder = explicitFolder, SourceId = 123, Source = "Explicit JSON selection" } }));
+                    current = RosterSession.Refresh(json, new[] { previous }, table).Single();
+                    Equal(explicitFolder, current.Folder); Equal(123, current.SourceId); Equal("Explicit JSON selection", current.Source);
+                    previous.StockFolder = "1506_Verified_Model";
+                    File.WriteAllText(json, "[{\"id\":4000,\"name\":\"Custom Verified Alias\"}]");
+                    current = RosterSession.Refresh(json, new[] { previous }, table).Single();
+                    Equal(previousFolder, current.Folder); Equal(1506, current.SourceId); Equal(previous.StockFolder, current.StockFolder);
+                }
             });
             SdbChecks();
             SelectionChecks();
@@ -388,6 +423,39 @@ internal static class Program
             Equal((string)null, RosterSession.Open(discovery, new[] { saved }).Entries.Single(e => e.Id == 211).Folder);
             saved.RosterTable = table; saved.Folder = Path.Combine(root, "missing-model");
             Equal((string)null, RosterSession.Open(discovery, new[] { saved }).Entries.Single(e => e.Id == 211).Folder);
+        });
+        Test("A current SDB name replaces a remembered label without retaining its old model", () => {
+            string previousModel = Directory.CreateDirectory(Path.Combine(root, "renamed-slot-previous-model")).FullName;
+            var saved = new RosterEntry { Id = 211, Name = "Previous slot name", Folder = previousModel,
+                RosterTable = table, SourceId = 312, IsMod = true, Source = "Manual selection" };
+            var session = RosterSession.Open(discovery, new[] { saved });
+            Equal(actual.Count, session.Entries.Count);
+            var current = session.Entries.Single(e => e.Id == 211);
+            Equal("DAX HARWOOD", current.Name); Equal((string)null, current.Folder);
+            Equal(false, session.Entries.Any(e => e.Name == saved.Name));
+            saved.Name = "Wrestler 211";
+            current = RosterSession.Open(discovery, new[] { saved }).Entries.Single(e => e.Id == 211);
+            Equal("DAX HARWOOD", current.Name); Equal((string)null, current.Folder);
+        });
+        Test("Conflicting remembered model associations cannot choose a model arbitrarily", () => {
+            string first = Directory.CreateDirectory(Path.Combine(root, "conflicting-dax-first")).FullName;
+            string second = Directory.CreateDirectory(Path.Combine(root, "conflicting-dax-second")).FullName;
+            var saved = new[] {
+                new RosterEntry { Id = 211, Name = "DAX HARWOOD", Folder = first, RosterTable = table, SourceId = 312, IsMod = true },
+                new RosterEntry { Id = 211, Name = "DAX HARWOOD", Folder = second, RosterTable = table, SourceId = 109, IsMod = true }
+            };
+            var current = RosterSession.Open(discovery, saved).Entries.Single(e => e.Id == 211);
+            Equal((string)null, current.Folder);
+            saved[1].Folder = first;
+            current = RosterSession.Open(discovery, saved).Entries.Single(e => e.Id == 211);
+            Equal((string)null, current.Folder); // One folder with conflicting physical IDs is ambiguous too.
+            saved[1].SourceId = 312;
+            current = RosterSession.Open(discovery, saved).Entries.Single(e => e.Id == 211);
+            Equal(first, current.Folder); Equal(312, current.SourceId);
+            saved[0].SourceId = saved[1].SourceId = 0;
+            int baseId = actual.Single(e => e.Id == 211).SourceId;
+            current = RosterSession.Open(discovery, saved).Entries.Single(e => e.Id == 211);
+            Equal(first, current.Folder); Equal(baseId, current.SourceId);
         });
         Test("Fresh mapped model associations override stale remembered metadata", () => {
             var original = actual.Single(e => e.Id == 1481);
