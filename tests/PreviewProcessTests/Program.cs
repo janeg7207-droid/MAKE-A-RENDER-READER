@@ -116,6 +116,26 @@ internal static class Program
             Configure("gorilla_render.py", new[] { "folder", "taunt", "out" }, "res=1024 samples=64"));
         Equal("Original MAKE remains original even with the roster speed preference set", "fps=60 samples=64",
             Configure("gorilla_render.py", new[] { "folder", "taunt", "out", "quick=0" }, "fps=60 samples=64"));
+        foreach (string choice in new[] { "auto", "black", "dark_brown", "blond", "white" })
+        {
+            using (var process = new Process())
+            {
+                process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"] = "stale";
+                string[] hairArguments = { "folder", "taunt", "out", "hair=" + choice };
+                FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", hairArguments);
+                Equal("The selected hair mode reaches the child process: " + choice, choice == "auto" ? "auto" : "selected",
+                    process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"]);
+                Equal("Hair forwarding keeps the original renderer arguments: " + choice, "hair=" + choice, hairArguments[3]);
+            }
+        }
+        using (var process = new Process())
+        {
+            process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"] = "stale";
+            FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", new[] { "folder", "taunt", "out" });
+            Equal("Missing hair options cannot inherit a previous choice", false, process.StartInfo.EnvironmentVariables.ContainsKey("GORILLA_HAIR_CHOICE"));
+            FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", new[] { "hair=auto", "hair=white" });
+            Equal("The final explicit hair setting wins", "selected", process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"]);
+        }
         Console.WriteLine(passed + " preview-process checks passed; no engine process launched.");
     }
 

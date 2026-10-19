@@ -109,6 +109,7 @@ namespace GorillaStudio.NameFolders
                 AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
+                AttachUpdateControls(window);
                 if (!NativeStartupAutomation(window))
                     await RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             };
@@ -120,6 +121,7 @@ namespace GorillaStudio.NameFolders
                 AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
+                AttachUpdateControls(window);
                 if (!NativeStartupAutomation(window))
                     _ = RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             }

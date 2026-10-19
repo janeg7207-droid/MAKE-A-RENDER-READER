@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.5**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.6**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -57,7 +57,13 @@ Loading the wrestler displays a found picture in **Game picture (now)** immediat
 
 The uploaded Discovery copy contains **1,139 picture references**, including **653 absent from the bundled picture names**, but no original roster image files. Picture references alone can link the moving selection render; a static picture display requires the extracted image file. An empty **Game picture (now)** panel is therefore separate from the old false “no picture found” result.
 
-White hair cards are a separate material issue: the original renderer already defaults missing-picture hair to dark brown. Try choosing Dark brown or Black; if the cards stay white, their strand texture or material needs inspection. The new picture loading path does not claim to repair missing hair textures.
+Preview and MAKE now repair hair shaders that stayed white when strand textures used hash filenames or were missing. The repair uses the selected dark/light colours, including blond or white, and preserves available strand transparency and roughness. Auto retains meaningful natural hair colours. A fallback tints identified hair meshes without changing shared body materials, and also runs when a cached Blender model is loaded. Missing strand coverage cannot be reconstructed from colour alone. Dean Ambrose NXT (logical ID 699) is present in the supplied roster, but his model and textures were not uploaded, so his exact appearance still needs a preview check on the user's PC.
+
+## App updates
+
+Click **Update app…** beside Game setup when no preview, render or batch is running. The button checks for a newer release, downloads the small update package, verifies it, installs it and restarts Gorilla Studio. An up-to-date app stays open. The full ZIP installs this button and its updater once; later compatible releases can be installed through the button.
+
+Updates preserve your settings, custom rosters, renders and configured output folder. The updater keeps backups of application files before changing them and restores them if installation fails. Download errors or cancellation leave the app open. Native sign-in and licensing cleanup still run during restart. Close other Gorilla Studio windows before updating, and keep the app in a folder your Windows account can write to.
 
 ## Moving match cards
 
@@ -129,7 +135,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **2,237 portable checks pass** across 36 suites, including complete named-taunt search coverage, folder-load refresh queues, batch output publication, current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- **2,372 portable checks pass** across 38 suites, including verified update downloads, backup/rollback and parent-process handoff, complete named-taunt search coverage, folder-load refresh queues, batch output publication, current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
@@ -139,7 +145,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 - The original engine finds the prepared image for Avery's actual profile, samples its automatic hair colour, and accepts a finalized GMR with the actual picture hash and all 1,139 installation-map entries. These checks use a synthetic image and structural video fixture; they do not claim an in-game visual test.
 - DDS decoding is compared with independent Pillow pixels for every BC7 mode, transparent alpha and DXT formats, and loads the uploaded real 2048 × 1024 Tripwire DDS. Archive tests exercise the shipped command vectors using fixture indexes and DDS outputs, plus real process cancellation and timeouts on Linux. They do not execute Bakery's Windows binary or prove PAC's missing texture pixels are present in the uploaded files. Match-card checks verify the actual 188-file screen pack and explicit setup result handling. Windows GUI, native game archive extraction, Blender images and match-card gameplay remain unverified.
 - Match-card repairs are checked across all 86 supplied match-card projects: 4,472 missing layers are completed, existing layers are preserved, and repeat setup changes nothing. Independent original-engine checks compare all 101 slots in RAW 24 with the native full-layout recipe and inspect the repaired corpus. All 101 placeholder movies carry the plugin's layout/player encoding; a newly generated movie decodes with FFmpeg. These are file-format checks, not observed match-card gameplay.
-- The unchanged native pipeline and Blender renderer settings execute in **171 structural checks**: full renders receive 8 samples at 1024 × 1024, 30 fps with the full motion. **116 native attire checks** confirm explicit clothes selection and separate model caches across preparation, Preview and MAKE. Bulk tests validate IDs, output isolation, malformed movies, shared picture maps, backups and repeat installs. Actual Windows batch rendering, GPU timings and alternate-attire images remain unverified.
+- The unchanged native pipeline and Blender renderer settings execute in **171 structural checks**: full renders receive 8 samples at 1024 × 1024, 30 fps with the full motion. **239 hair-material checks** cover hash-named textures, missing-map fallback, selected and natural colours, material isolation, transparency and cached scenes, including switching a cached manual tint back to Auto. **116 native attire checks** confirm explicit clothes selection and separate model caches across preparation, Preview and MAKE. Bulk tests validate IDs, output isolation, malformed movies, shared picture maps, backups and repeat installs. Actual Windows batch rendering, GPU timings and alternate-attire images remain unverified.
 - The patcher verifies a five-method allowlist: the window constructor, folder-loading state machine, Go state machine, process-launch state machine and automatic-render entry point. All other method bodies, authentication/licensing and managed/native resources are preserved. Engine binaries remain unchanged; faster detail is passed only to each applicable render process.
 
 Detailed results are included in TEST_RESULTS.json inside the ZIPs.
@@ -150,6 +156,9 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
 
     dotnet build src/GorillaStudio.NameFolders/GorillaStudio.NameFolders.csproj -c Release
     dotnet build tools/GorillaStudioPatcher/GorillaStudioPatcher.csproj -c Release
+    dotnet build tools/GorillaStudioUpdater/GorillaStudioUpdater.csproj -c Release
+    dotnet run --project tests/AppUpdateTests -c Release
+    dotnet run --project tests/AppUpdateTransactionTests -c Release -- /path/to/dotnet
     dotnet run --project tests/RosterTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/DiscoveryScannerTests -c Release -- /path/to/discovery_data /path/to/Sdb/ENG.sdb /path/to/original/data/gamepack/stock_index.json
     dotnet run --project tests/GameModelBridgeTests -c Release
@@ -190,10 +199,13 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     python tests/validate_matchcard_layouts.py --help
     python tests/validate_alternate_attires.py --help
     python tests/validate_render_speed.py --help
+    python tests/validate_hair_materials.py --help
     dotnet tools/GorillaStudioPatcher/bin/Release/net8.0/GorillaStudioPatcher.dll /path/to/original/GorillaStudio.exe src/GorillaStudio.NameFolders/bin/Release/net48/GorillaStudio.NameFolders.dll /path/to/new/GorillaStudio.exe
 
 Copy the original release's remaining files and the helper DLL into the new output folder. The patcher requires a new output path and verifies the original executable's supported layout.
 
 Also ship `Pfim.dll` from the helper build output and the MIT license/notice under `third_party/Pfim`. Copy `runtime/engine/gr_render.py` to the program's `engine/gr_render.py`; the fast full-render forwarding fix requires this entry point alongside the original compiled renderer. The full and small-update ZIPs include these files.
+
+Ship `tools/GorillaStudioUpdater/bin/Release/net48/GorillaStudio.Updater.exe` beside the application. The small update contains exactly eleven approved files, including this updater and the renderer entry point. `BUILD_SHA256.json` must include hashes for the app, helper, updater, Pfim, bundled roster and renderer entry point. Publish the artifact commit first, then update `downloads/update.json` with schema 1, the helper version, minimumUpdaterVersion 1, the immutable artifact commit's raw GitHub Update.zip URL, its byte size and SHA-256. This avoids a mutable download changing after a user reads the feed. Run `tests/AppUpdateTests -- --validate <Update.zip> <update.json>` locally and `-- --live <private-cache>` after publication; neither mode executes the downloaded app.
 
 The Python validators in tests use the original engine bytecode with CPython 3.14, NumPy 2.4.3 and Pillow. Run each with --help for arguments. validate_user_data.py performs an actual render attempt; validate_mapped_engine.py observes logical-slot handling and stops deliberately before game extraction. Neither script tests the Windows GUI.

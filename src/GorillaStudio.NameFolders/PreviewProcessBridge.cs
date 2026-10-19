@@ -20,6 +20,16 @@ namespace GorillaStudio.NameFolders
             ConfigureAlternateAttireProcess(owner, nativeProcess, script, args);
             ObservePlaybackSetup(owner, nativeProcess, script, args);
             DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);
+            if (!string.IsNullOrWhiteSpace(script) && string.Equals(Path.GetFileNameWithoutExtension(script.Replace('\\', '/')),
+                "gorilla_render", StringComparison.OrdinalIgnoreCase))
+            {
+                nativeProcess.StartInfo.EnvironmentVariables.Remove("GORILLA_HAIR_CHOICE");
+                if (args != null)
+                    foreach (string argument in args)
+                        if (argument != null && argument.StartsWith("hair=", StringComparison.Ordinal))
+                            nativeProcess.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"] =
+                                string.Equals(argument.Substring(5), "auto", StringComparison.OrdinalIgnoreCase) ? "auto" : "selected";
+            }
             string setting;
             if (PreviewCache.IsPreviewRequest(script, args))
             {
