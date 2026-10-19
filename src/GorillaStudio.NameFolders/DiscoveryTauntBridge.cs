@@ -53,7 +53,7 @@ namespace GorillaStudio.NameFolders
         public static void ConfigureProcess(object owner, Process process, string script, IEnumerable<string> args)
         {
             if (args != null && args.Any(DiscoveryTauntSearch.IsUnavailableKey))
-                throw new InvalidOperationException("This Discovery taunt has no playable animation. Its search result explains which animation is missing or unsupported.");
+                throw new InvalidOperationException("This Discovery taunt is unavailable for rendering. Read its search-result reason for the animation lookup, scan, format, read or cache issue.");
             string root = FolderBridge.DiscoveryEngineRoot;
             if (process == null || string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(script)) return;
             string name = Path.GetFileNameWithoutExtension(script.Replace('\\', '/'));

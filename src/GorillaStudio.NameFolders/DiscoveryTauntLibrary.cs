@@ -15,7 +15,7 @@ using System.Web.Script.Serialization;
 
 namespace GorillaStudio.NameFolders
 {
-    public enum DiscoveryTauntUnavailableKind { MissingAnimation, UnsupportedFormat }
+    public enum DiscoveryTauntUnavailableKind { MissingAnimation, UnsupportedFormat, ScanIncomplete, ReadFailure, CacheFailure }
 
     public sealed class DiscoveryUnavailableTaunt
     {
@@ -39,6 +39,11 @@ namespace GorillaStudio.NameFolders
         public int Available { get; internal set; }
         public int Missing { get; internal set; }
         public int Unsupported { get; internal set; }
+        public int ReadFailures { get; internal set; }
+        public int CacheFailures { get; internal set; }
+        public bool ScanIncomplete { get; internal set; }
+        public bool AnimationRootFound { get; internal set; }
+        public IReadOnlyList<string> SearchRoots { get; internal set; } = new string[0];
         public List<string> Warnings { get; } = new List<string>();
         public List<DiscoveryUnavailableTaunt> Unavailable { get; } = new List<DiscoveryUnavailableTaunt>();
         internal List<Dictionary<string, object>> Taunts { get; set; }
@@ -70,6 +75,9 @@ namespace GorillaStudio.NameFolders
             List<DiscoveryTaunt> definitions = DiscoveryTaunts.Read(table);
             result.Definitions = definitions.Count;
             DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(sourceRoot);
+            result.ScanIncomplete = assets.ScanIncomplete;
+            result.AnimationRootFound = assets.AnimationRootFound;
+            result.SearchRoots = assets.SearchRoots;
             result.Warnings.AddRange(assets.Warnings.Take(8));
             string identity = Hash(Encoding.UTF8.GetBytes(Path.GetFullPath(applicationRoot) + "\n" + sourceRoot + "\n" + Hash(File.ReadAllBytes(baseManifest))));
             string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20));
@@ -110,8 +118,8 @@ namespace GorillaStudio.NameFolders
                     if (matches == null)
                     {
                         result.Missing++;
-                        AddUnavailable(result, definition, DiscoveryTauntUnavailableKind.MissingAnimation,
-                            "Animation file is missing from the loaded Discovery data.");
+                        AddUnavailable(result, definition, assets.ScanIncomplete ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation,
+                            LookupMissReason(definition.Clip, assets, sourceRoot));
                     }
                     else
                     {
@@ -121,6 +129,7 @@ namespace GorillaStudio.NameFolders
                     }
                     continue;
                 }
+                MotionImportStage stage = MotionImportStage.ReadSource;
                 try
                 {
                     byte[] bytes = asset.Read();
@@ -129,9 +138,12 @@ namespace GorillaStudio.NameFolders
                     DecodedDiscoveryMotion motion = null;
                     if (!File.Exists(cached))
                     {
+                        stage = MotionImportStage.Decode;
                         motion = DiscoveryMotionDecoder.Decode(bytes);
+                        stage = MotionImportStage.PrepareCache;
                         DiscoveryMotionNpz.Write(cached, motion);
                     }
+                    stage = MotionImportStage.PrepareCache;
                     int frames = BitConverter.ToInt32(bytes, 0x44);
                     float fps = BitConverter.ToSingle(bytes, 0x0c);
                     string originalClip = Path.Combine(baseData, "gamepack", "decoded", definition.Clip + ".npz");
@@ -142,7 +154,12 @@ namespace GorillaStudio.NameFolders
                         if (File.Exists(stockMarker)) originalMotion = File.ReadAllText(stockMarker) == "yes";
                         else
                         {
-                            if (motion == null) motion = DiscoveryMotionDecoder.Decode(bytes);
+                            if (motion == null)
+                            {
+                                stage = MotionImportStage.Decode;
+                                motion = DiscoveryMotionDecoder.Decode(bytes);
+                                stage = MotionImportStage.PrepareCache;
+                            }
                             originalMotion = DiscoveryMotionNpz.MatchesPoses(originalClip, motion);
                             WriteAtomic(stockMarker, originalMotion ? "yes" : "no");
                         }
@@ -189,16 +206,36 @@ namespace GorillaStudio.NameFolders
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidDataException || error is ArgumentException || error is OverflowException)
                 {
-                    result.Unsupported++;
+                    DiscoveryTauntUnavailableKind kind;
+                    string reason;
+                    if (stage == MotionImportStage.ReadSource)
+                    {
+                        result.ReadFailures++;
+                        kind = DiscoveryTauntUnavailableKind.ReadFailure;
+                        reason = "Animation clip " + definition.Clip + " was indexed in " + asset.Path + ", but could not be read: " + error.Message;
+                    }
+                    else if (stage == MotionImportStage.Decode)
+                    {
+                        result.Unsupported++;
+                        kind = DiscoveryTauntUnavailableKind.UnsupportedFormat;
+                        reason = "Animation clip " + definition.Clip + " was found in " + asset.Path + ", but this app could not decode its animation format: " + error.Message;
+                    }
+                    else
+                    {
+                        result.CacheFailures++;
+                        kind = DiscoveryTauntUnavailableKind.CacheFailure;
+                        reason = "Animation clip " + definition.Clip + " was found in " + asset.Path + ", but its preview cache could not be prepared in " + storageRoot + ": " + error.Message;
+                    }
                     if (result.Warnings.Count < 8) result.Warnings.Add(definition.Name + ": " + error.Message);
                     if (matches != null)
                     {
                         AddNames(matches, definition);
                         foreach (Dictionary<string, object> item in matches)
-                            item["tested_on"] = new[] { "Bundled motion; Discovery version could not be imported" };
+                            item["tested_on"] = new[] { kind == DiscoveryTauntUnavailableKind.ReadFailure ? "Bundled motion; Discovery clip could not be read" :
+                                kind == DiscoveryTauntUnavailableKind.CacheFailure ? "Bundled motion; Discovery preview cache could not be prepared" :
+                                "Bundled motion; Discovery animation format could not be decoded" };
                     }
-                    else AddUnavailable(result, definition, DiscoveryTauntUnavailableKind.UnsupportedFormat,
-                        "This Discovery animation format is not supported yet: " + error.Message);
+                    else AddUnavailable(result, definition, kind, reason);
                 }
             }
             foreach (string stamp in Directory.GetFiles(decoded, "*.npz.sha256"))
@@ -220,6 +257,20 @@ namespace GorillaStudio.NameFolders
             result.Taunts = entries;
             result.Available = entries.Count;
             return result;
+        }
+
+        private enum MotionImportStage { ReadSource, Decode, PrepareCache }
+
+        private static string LookupMissReason(string clip, DiscoveryMotionAssets assets, string sourceRoot)
+        {
+            string roots = assets.SearchRoots.Count == 0 ? sourceRoot : string.Join("; ", assets.SearchRoots);
+            string reason = "Animation clip " + clip + " was not located in the scanned extracted .clip/.clips files under " + roots + ".";
+            if (assets.ScanIncomplete)
+                reason += " The scan was incomplete" + (assets.Warnings.Count == 0 ? " because some files or folders could not be read."
+                    : ": " + assets.Warnings[0].TrimEnd('.') + ".") + " Load Discovery data again to review the scan warnings.";
+            else if (!assets.AnimationRootFound)
+                reason += " No Animation folder was found in that scan.";
+            return reason + " Installed-game CAK archives were not searched.";
         }
 
         private static void AddUnavailable(DiscoveryTauntImport result, DiscoveryTaunt definition,

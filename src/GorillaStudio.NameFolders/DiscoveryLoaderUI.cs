@@ -352,12 +352,18 @@ namespace GorillaStudio.NameFolders
                 string message = import.Definitions == 0
                     ? "No Discovery moves table found; the bundled taunts remain available."
                     : import.Available + " taunts available · " + import.Imported + " added from Discovery";
-                if (import.Missing + import.Unsupported > 0)
-                    message += " · " + import.Missing + " need animation files · " + import.Unsupported + " need another animation format";
+                if (import.Missing > 0) message += " · " + import.Missing + " animations not located";
+                if (import.Unsupported > 0) message += " · " + import.Unsupported + " unsupported animations";
+                if (import.ReadFailures > 0) message += " · " + import.ReadFailures + " animation read errors";
+                if (import.CacheFailures > 0) message += " · " + import.CacheFailures + " preview cache errors";
+                if (import.ScanIncomplete) message += " · scan incomplete (see details)";
                 SetModelStatus(window, message);
                 if (explicitSetup)
                 {
                     string details = message + "\n\nSelect a wrestler, choose a taunt, then click Preview.";
+                    if (import.SearchRoots.Count > 0)
+                        details += "\n\nAnimation search covers the entire Discovery folder:\n" + string.Join("\n", import.SearchRoots)
+                            + "\nInstalled-game archives are not searched for animations.";
                     if (import.Warnings.Count > 0) details += "\n\n" + string.Join("\n", import.Warnings);
                     Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), details,
                         "Discovery data loaded", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Information);

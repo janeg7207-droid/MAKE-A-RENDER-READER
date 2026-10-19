@@ -40,7 +40,11 @@ namespace GorillaStudio.NameFolders
     public sealed class DiscoveryMotionAssets
     {
         private readonly Dictionary<ulong, DiscoveryMotionAsset> assets = new Dictionary<ulong, DiscoveryMotionAsset>();
+        private readonly List<string> searchRoots = new List<string>();
+        public IReadOnlyList<string> SearchRoots { get { return searchRoots.AsReadOnly(); } }
         public List<string> Warnings { get; } = new List<string>();
+        public bool ScanIncomplete { get; private set; }
+        public bool AnimationRootFound { get; private set; }
         public int Count { get { return assets.Count; } }
 
         public DiscoveryMotionAsset Find(string clip)
@@ -60,21 +64,23 @@ namespace GorillaStudio.NameFolders
         public static DiscoveryMotionAssets Read(string discoveryRoot)
         {
             var result = new DiscoveryMotionAssets();
-            string animation = Directory.GetDirectories(discoveryRoot).FirstOrDefault(path =>
-                string.Equals(System.IO.Path.GetFileName(path), "Animation", StringComparison.OrdinalIgnoreCase));
-            if (animation == null) return result;
+            string root = System.IO.Path.GetFullPath(discoveryRoot);
+            result.searchRoots.Add(root);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var pending = new Stack<string>();
-            pending.Push(animation);
+            pending.Push(root);
             var containers = new List<string>();
             var loose = new List<string>();
             while (pending.Count > 0)
             {
                 string directory = pending.Pop();
+                if (string.Equals(System.IO.Path.GetFileName(directory.TrimEnd(System.IO.Path.DirectorySeparatorChar,
+                    System.IO.Path.AltDirectorySeparatorChar)), "Animation", StringComparison.OrdinalIgnoreCase))
+                    result.AnimationRootFound = true;
                 string resolved;
                 try { resolved = DirectoryLinks.Resolve(directory); }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { result.Warnings.Add(error.Message); continue; }
+                { result.Warn(directory, error); continue; }
                 if (!seen.Add(resolved)) continue;
                 try
                 {
@@ -86,14 +92,27 @@ namespace GorillaStudio.NameFolders
                     foreach (string path in Directory.GetDirectories(directory)) pending.Push(path);
                 }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { result.Warnings.Add(error.Message); }
+                { result.Warn(directory, error); }
             }
             foreach (string path in containers.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)) result.AddFile(path, false);
             // Discovery exports edited individual records beside the original
             // containers. The newest loose record takes precedence over stock.
-            foreach (string path in loose.OrderBy(File.GetLastWriteTimeUtc).ThenBy(value => value, StringComparer.OrdinalIgnoreCase))
+            var dated = new List<KeyValuePair<string, DateTime>>();
+            foreach (string path in loose)
+            {
+                try { dated.Add(new KeyValuePair<string, DateTime>(path, File.GetLastWriteTimeUtc(path))); }
+                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+                { result.Warn(path, error); }
+            }
+            foreach (string path in dated.OrderBy(value => value.Value).ThenBy(value => value.Key, StringComparer.OrdinalIgnoreCase).Select(value => value.Key))
                 result.AddFile(path, true);
             return result;
+        }
+
+        private void Warn(string path, Exception error)
+        {
+            ScanIncomplete = true;
+            Warnings.Add(path + ": " + error.Message);
         }
 
         private void AddFile(string path, bool loose)
@@ -130,7 +149,7 @@ namespace GorillaStudio.NameFolders
                 }
             }
             catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidDataException)
-            { Warnings.Add(System.IO.Path.GetFileName(path) + ": " + error.Message); }
+            { Warn(path, error); }
         }
     }
 }

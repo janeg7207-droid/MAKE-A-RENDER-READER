@@ -14,6 +14,7 @@ namespace GorillaStudio.NameFolders
     // place of the Windows junction implementation. Source assets stay intact.
     internal static class DirectoryLinks
     {
+        internal static Action BeforeEnsureJunction;
         internal static string Resolve(string path)
         {
             var directory = new DirectoryInfo(path);
@@ -22,6 +23,9 @@ namespace GorillaStudio.NameFolders
         }
         internal static void EnsureJunction(string link, string target)
         {
+            Action before = BeforeEnsureJunction;
+            BeforeEnsureJunction = null;
+            if (before != null) before();
             if (Directory.Exists(link))
             {
                 if (!string.Equals(Resolve(link), Path.GetFullPath(target), StringComparison.Ordinal))
@@ -111,7 +115,93 @@ internal static class Program
         Equal("Changed animation poses invalidate an existing preview motion", false, DiscoveryMotionNpz.MatchesPoses(npz, decoded));
         CaptureTests(root);
         RefreshTests(root);
+        ScopeTests(root);
+        DiagnosticTests(root);
         SearchTests();
+    }
+
+    private static void ScopeTests(string root)
+    {
+        string data = Directory.CreateDirectory(Path.Combine(root, "nested-motion-scope")).FullName;
+        string nested = Directory.CreateDirectory(Path.Combine(data, "Mods", "Custom", "Animation", "Acts")).FullName;
+        Container(Path.Combine(nested, "Nested.clips"), Motion("60001a000", 30));
+        string overrides = Directory.CreateDirectory(Path.Combine(data, "MoveData", "Overrides")).FullName;
+        File.WriteAllBytes(Path.Combine(overrides, "Exported.clip"), Motion("60002a001", 30));
+        DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(data);
+        Equal("A nested mod Animation folder is searched without a direct-root Animation folder", true, assets.Find("60001a000") != null);
+        Equal("A loose export outside an Animation folder is searched", true, assets.Find("60002a001") != null);
+        Equal("The full data scan records its actual search root", true, assets.SearchRoots.Contains(data));
+        Equal("A nested Animation folder is reported as present", true, assets.AnimationRootFound);
+        Equal("A readable complete data scan is not marked incomplete", false, assets.ScanIncomplete);
+        Equal("Whole-folder search keeps both independent clip identities", 2, assets.Count);
+    }
+
+    private static void DiagnosticTests(string root)
+    {
+        string app = Directory.CreateDirectory(Path.Combine(root, "diagnostic-app")).FullName;
+        string library = Directory.CreateDirectory(Path.Combine(app, "data", "library")).FullName;
+        Directory.CreateDirectory(Path.Combine(app, "data", "gamepack", "decoded"));
+        File.WriteAllText(Path.Combine(library, "taunts.json"), "{\"taunts\":[]}");
+        string data = Directory.CreateDirectory(Path.Combine(root, "diagnostic-data")).FullName;
+        string moves = Directory.CreateDirectory(Path.Combine(data, "MoveData")).FullName;
+        File.WriteAllBytes(Path.Combine(moves, "CAMMoveData.jsfb"), CamTable());
+        string storage = Path.Combine(root, "diagnostic-cache");
+        DiscoveryTauntImport absent = DiscoveryTauntLibrary.Build(app, storage, data);
+        DiscoveryUnavailableTaunt entry = absent.Unavailable.Single();
+        Equal("A complete lookup miss remains distinct from an unreadable scan", DiscoveryTauntUnavailableKind.MissingAnimation, entry.Kind);
+        Equal("A lookup diagnostic names the exact clip", true, entry.Reason.Contains("62541a000"));
+        Equal("A lookup diagnostic names the exact scanned data root", true, entry.Reason.Contains(data));
+        Equal("A lookup diagnostic identifies the extracted file formats searched", true, entry.Reason.Contains(".clip/.clips"));
+        Equal("A lookup diagnostic states that game archives were not searched", true, entry.Reason.Contains("CAK archives were not searched"));
+        Equal("A complete scan without an Animation folder explains that context", true, entry.Reason.Contains("No Animation folder"));
+        Equal("A lookup miss does not claim that the animation file is absent", false, entry.Reason.Contains("file is missing"));
+        Equal("Import results expose the actual searched roots", true, absent.SearchRoots.Contains(data));
+
+        string nested = Directory.CreateDirectory(Path.Combine(data, "Mods", "Nested")).FullName;
+        string malformed = Path.Combine(nested, "Unreadable.clips");
+        File.WriteAllBytes(malformed, new byte[24]);
+        DiscoveryTauntImport incomplete = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("A malformed container marks the search incomplete", true, incomplete.ScanIncomplete);
+        Equal("An incomplete lookup miss has a separate classification", DiscoveryTauntUnavailableKind.ScanIncomplete, incomplete.Unavailable.Single().Kind);
+        Equal("Incomplete-scan guidance refers to the load warnings", true, incomplete.Unavailable.Single().Reason.Contains("scan was incomplete"));
+        Equal("An incomplete-scan tooltip names its first problematic file immediately", true,
+            incomplete.Unavailable.Single().Reason.Contains(malformed) && incomplete.Unavailable.Single().Reason.Contains("invalid record table"));
+        Equal("Unreadable scan data is not mislabeled as an unsupported animation", 0, incomplete.Unsupported);
+        Equal("The source scan warning is retained", true, incomplete.Warnings.Any(warning => warning.Contains("Unreadable.clips")));
+        File.Delete(malformed);
+
+        string raw = Path.Combine(nested, "Exported.clip");
+        File.WriteAllBytes(raw, Motion("62541a000", 30));
+        string cacheBlock = Directory.CreateDirectory(Path.Combine(storage, "motion-cache-v1", Hash(raw).ToLowerInvariant() + ".npz")).FullName;
+        DiscoveryTauntImport cacheFailure = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("A preview-cache write failure has a distinct classification", DiscoveryTauntUnavailableKind.CacheFailure, cacheFailure.Unavailable.Single().Kind);
+        Equal("Preview-cache errors have their own count", 1, cacheFailure.CacheFailures);
+        Equal("A cache error does not claim the animation format is unsupported", 0, cacheFailure.Unsupported);
+        Equal("A cache error does not claim a source clip is missing", 0, cacheFailure.Missing);
+        Equal("A cache diagnostic identifies the source file and writable cache", true,
+            cacheFailure.Unavailable.Single().Reason.Contains(raw) && cacheFailure.Unavailable.Single().Reason.Contains(storage));
+        Directory.Delete(cacheBlock);
+
+        Directory.CreateDirectory(Path.Combine(app, "engine"));
+        DirectoryLinks.BeforeEnsureJunction = () => File.Delete(raw);
+        DiscoveryTauntImport readFailure;
+        try { readFailure = DiscoveryTauntLibrary.Build(app, storage, data); }
+        finally { DirectoryLinks.BeforeEnsureJunction = null; }
+        Equal("A clip removed after indexing has a source-read classification", DiscoveryTauntUnavailableKind.ReadFailure, readFailure.Unavailable.Single().Kind);
+        Equal("Source-read errors have their own count", 1, readFailure.ReadFailures);
+        Equal("A source-read failure does not claim an unsupported format", 0, readFailure.Unsupported);
+        Equal("A source-read diagnostic names the indexed file and exact clip", true,
+            readFailure.Unavailable.Single().Reason.Contains(raw) && readFailure.Unavailable.Single().Reason.Contains("62541a000"));
+        Equal("A source-read failure stays out of the engine manifest", 0, ManifestCount(Path.Combine(readFailure.Library, "taunts.json")));
+
+        byte[] unsupported = Motion("62541a000", 30); Write(unsupported, 0x60, 1u); File.WriteAllBytes(raw, unsupported);
+        DiscoveryTauntImport formatFailure = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("An actual decoder rejection retains the format classification", DiscoveryTauntUnavailableKind.UnsupportedFormat, formatFailure.Unavailable.Single().Kind);
+        Equal("An actual decoder rejection increments only the unsupported count", 1, formatFailure.Unsupported);
+        Equal("A decoder rejection does not increment source-read errors", 0, formatFailure.ReadFailures);
+        Equal("A decoder rejection does not increment cache errors", 0, formatFailure.CacheFailures);
+        Equal("A decoder diagnostic names the found clip and the decoder limitation", true,
+            formatFailure.Unavailable.Single().Reason.Contains("62541a000") && formatFailure.Unavailable.Single().Reason.Contains("additional channel sections"));
     }
 
     private static void RefreshTests(string root)
@@ -305,8 +395,15 @@ internal static class Program
         Equal("All 498 actual unavailable definitions remain searchable", 498, first.Unavailable.Count);
         Equal("Missing and unsupported formats remain distinct", 455, first.Unavailable.Count(item => item.Kind == DiscoveryTauntUnavailableKind.MissingAnimation));
         Equal("Unsupported definitions with no bundled fallback stay unavailable", 43, first.Unavailable.Count(item => item.Kind == DiscoveryTauntUnavailableKind.UnsupportedFormat));
+        Equal("The uploaded full data folder can be scanned completely", false, first.ScanIncomplete);
+        Equal("Actual source clips have no unreported read failures", 0, first.ReadFailures);
+        Equal("Actual imported clips have no preview-cache failures", 0, first.CacheFailures);
+        Equal("Every actual lookup miss reports its exact clip and scanned root without claiming the PC file is absent", true,
+            first.Unavailable.Where(item => item.Kind == DiscoveryTauntUnavailableKind.MissingAnimation).All(item =>
+                item.Reason.Contains(item.Clip) && item.Reason.Contains(Path.GetFullPath(discovery))
+                && item.Reason.Contains("CAK archives were not searched") && !item.Reason.Contains("file is missing")));
         foreach (string clip in new[] { "37367a000", "37248a000" }.Concat(Enumerable.Range(1, 7).Select(variant => "62247a" + variant.ToString("000"))))
-            Equal("The requested absent Confidence/Fighting Spirit/Jeff Hardy move is searchable with a missing-file reason: " + clip,
+            Equal("The requested Confidence/Fighting Spirit/Jeff Hardy lookup miss stays searchable: " + clip,
                 DiscoveryTauntUnavailableKind.MissingAnimation, first.Unavailable.Single(item => item.Clip == clip).Kind);
         string manifest = Path.Combine(first.Library, "taunts.json");
         string decoded = Path.Combine(first.Root, "data", "gamepack", "decoded");
@@ -383,6 +480,7 @@ internal static class Program
         var report = new
         {
             first.Definitions, first.Imported, first.Available, first.Missing, first.Unsupported,
+            first.ReadFailures, first.CacheFailures, first.ScanIncomplete, first.AnimationRootFound, first.SearchRoots,
             first.Warnings, UnavailableCount = first.Unavailable.Count,
             RequestedUnavailable = first.Unavailable.Where(item => item.Name.StartsWith("Confidence", StringComparison.Ordinal) || item.Name.StartsWith("Fighting Spirit", StringComparison.Ordinal) || item.Name.StartsWith("Jeff Hardy", StringComparison.Ordinal))
                 .Select(item => new { item.Id, item.Variant, item.Name, item.Clip, Kind = item.Kind.ToString(), item.Reason, item.Key }),
