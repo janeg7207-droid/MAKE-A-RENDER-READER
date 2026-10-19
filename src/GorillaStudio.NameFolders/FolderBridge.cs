@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -58,28 +59,113 @@ namespace GorillaStudio.NameFolders
             return ChooseRosterModel(source, session, rosterFile);
         }
 
+        // The roster button is already asynchronous. Keep its folder scans, profile
+        // parsing and picture conversion away from the dispatcher that owns the UI.
+        internal static async Task<string> PrepareRosterAsync(string discoveryRoot, string rosterFile, Func<bool> isCurrent = null)
+        {
+            string warning = null;
+            var loaded = await Task.Run(() =>
+            {
+                string bundled = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json");
+                RosterSessionData session = RosterLaunch.Open(discoveryRoot, ReadRosterFile(out warning), rosterFile, bundled);
+                string source = RosterAccess.RootFor(session.DiscoveryTable) ?? RosterAccess.RootFor(discoveryRoot)
+                    ?? AppDomain.CurrentDomain.BaseDirectory;
+                return new RosterModelSession { Source = source, Session = session };
+            });
+            if (isCurrent != null && !isCurrent()) return null;
+            ShowRosterWarning(warning);
+            return await ChooseRosterModelAsync(loaded.Source, loaded.Session, rosterFile, isCurrent);
+        }
+
+        private sealed class RosterModelSession
+        {
+            internal string Source;
+            internal RosterSessionData Session;
+        }
+
+        private sealed class RosterModelChoice
+        {
+            internal string Source;
+            internal string RosterFile;
+            internal RosterEntry Entry;
+            internal List<RosterEntry> Entries;
+            internal bool RememberRoster;
+        }
+
+        private sealed class PreparedRosterModel
+        {
+            internal RosterEntry Entry;
+            internal CharacterFolderPlan Plan;
+            internal Dictionary<ulong, string> Pictures;
+            internal string Alias;
+        }
+
         private static string ChooseRosterModel(string source, RosterSessionData session, string rosterFile = null)
         {
-                using (var picker = new WrestlerPicker(source, session.Entries, session.ChooseCharacterFolder, rosterFile))
-                {
-                    if (picker.ShowDialog() != DialogResult.OK || picker.SelectedEntry == null) return null;
-                    source = DirectoryLinks.Resolve(picker.SelectedFolder);
-                    CharacterFolderPlan plan = CharacterFolders.Plan(source, picker.SelectedEntry);
-                    int physicalId = CharacterFolders.PhysicalId(source) ?? (picker.SelectedEntry.SourceId > 0
-                        ? picker.SelectedEntry.SourceId : picker.SelectedEntry.Id);
-                    DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
-                    Dictionary<ulong, string> pictures = PrepareRenderImages(plan, picker.SelectedEntry.Id);
-                    string alias = PrepareCharacterAlias(plan, attire, pictures);
-                    SaveRoster(picker.Entries);
-                    if (session.ChooseCharacterFolder && !string.IsNullOrWhiteSpace(picker.CurrentRosterFile))
-                        RememberRosterFile(picker.CurrentRosterFile);
-                    lastDiscoveryRoot = plan.DataRoot;
-                    RememberRenderTable(alias, picker.SelectedEntry.RosterTable);
-                    RememberPreparedRender(alias, plan, picker.SelectedEntry, pictures);
-                    RegisterSelection(alias, picker.SelectedEntry);
-                    QueueModelDiscoveryTaunts(alias, plan.DataRoot);
-                    return alias;
-                }
+            RosterModelChoice choice = PickRosterModel(source, session, rosterFile);
+            return choice == null ? null : CommitRosterModel(PrepareRosterModel(choice));
+        }
+
+        private static async Task<string> ChooseRosterModelAsync(string source, RosterSessionData session,
+            string rosterFile, Func<bool> isCurrent)
+        {
+            RosterModelChoice choice = PickRosterModel(source, session, rosterFile);
+            if (choice == null || (isCurrent != null && !isCurrent())) return null;
+            PreparedRosterModel prepared = await Task.Run(() => PrepareRosterModel(choice));
+            if (isCurrent != null && !isCurrent()) return null;
+            return CommitRosterModel(prepared);
+        }
+
+        private static RosterModelChoice PickRosterModel(string source, RosterSessionData session, string rosterFile)
+        {
+            using (var picker = new WrestlerPicker(source, session.Entries, session.ChooseCharacterFolder, rosterFile))
+            {
+                DialogResult result = picker.ShowDialog();
+                if (picker.DataRefreshed) InvalidateTauntContexts();
+                if (result != DialogResult.OK || picker.SelectedEntry == null) return null;
+                // Snapshot before disposing the picker; its canceled background model
+                // scan must not mutate the row or saved roster while files are prepared.
+                return new RosterModelChoice {
+                    Source = picker.SelectedFolder, RosterFile = picker.CurrentRosterFile,
+                    Entry = CopyRosterEntry(picker.SelectedEntry),
+                    Entries = picker.Entries.Select(CopyRosterEntry).ToList(),
+                    RememberRoster = session.ChooseCharacterFolder
+                };
+            }
+        }
+
+        private static RosterEntry CopyRosterEntry(RosterEntry entry)
+        {
+            return new RosterEntry { Id = entry.Id, Name = entry.Name, Folder = entry.Folder,
+                RosterTable = entry.RosterTable, SourceId = entry.SourceId, IsMod = entry.IsMod,
+                Source = entry.Source, StockFolder = entry.StockFolder };
+        }
+
+        private static PreparedRosterModel PrepareRosterModel(RosterModelChoice choice)
+        {
+            string source = DirectoryLinks.Resolve(choice.Source);
+            CharacterFolderPlan plan = CharacterFolders.Plan(source, choice.Entry);
+            int physicalId = CharacterFolders.PhysicalId(source) ?? (choice.Entry.SourceId > 0
+                ? choice.Entry.SourceId : choice.Entry.Id);
+            DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
+            Dictionary<ulong, string> pictures = PrepareRenderImages(plan, choice.Entry.Id);
+            string alias = PrepareCharacterAlias(plan, attire, pictures);
+            SaveRoster(choice.Entries);
+            if (choice.RememberRoster && !string.IsNullOrWhiteSpace(choice.RosterFile))
+                RememberRosterFile(choice.RosterFile);
+            return new PreparedRosterModel { Entry = choice.Entry, Plan = plan, Pictures = pictures, Alias = alias };
+        }
+
+        private static string CommitRosterModel(PreparedRosterModel prepared)
+        {
+            // These registries belong to the dispatcher. RegisterSelection also uses
+            // thread-local state consumed by the original native SetFolder method.
+            lastDiscoveryRoot = prepared.Plan.DataRoot;
+            RememberRenderTable(prepared.Alias, prepared.Entry.RosterTable);
+            RememberPreparedRender(prepared.Alias, prepared.Plan, prepared.Entry, prepared.Pictures);
+            RegisterSelection(prepared.Alias, prepared.Entry);
+            QueueModelDiscoveryTaunts(prepared.Alias, prepared.Plan.DataRoot);
+            return prepared.Alias;
         }
 
         private static string PrepareCharacterAlias(CharacterFolderPlan plan, DirectAttirePlan attire, Dictionary<ulong, string> pictures)
@@ -139,15 +225,30 @@ namespace GorillaStudio.NameFolders
 
         internal static List<RosterEntry> ReadRoster()
         {
+            string warning;
+            List<RosterEntry> entries = ReadRosterFile(out warning);
+            ShowRosterWarning(warning);
+            return entries;
+        }
+
+        private static List<RosterEntry> ReadRosterFile(out string warning)
+        {
+            warning = null;
             string path = Path.Combine(StorageDirectory, "roster.json");
             if (!File.Exists(path)) return new List<RosterEntry>();
             try { return RosterImport.LoadFile(path); }
             catch (Exception error)
             {
-                MessageBox.Show("The saved roster could not be loaded. You can import it again in the picker.\n\n" + error.Message,
-                    "Gorilla Studio — roster", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                warning = error.Message;
                 return new List<RosterEntry>();
             }
+        }
+
+        private static void ShowRosterWarning(string warning)
+        {
+            if (warning != null)
+                MessageBox.Show("The saved roster could not be loaded. You can import it again in the picker.\n\n" + warning,
+                    "Gorilla Studio — roster", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         internal static void SaveRoster(List<RosterEntry> entries)

@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.8**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.9**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -31,7 +31,7 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
 
 ## Alternate attires
 
-After loading a wrestler, use **Attire model** under Gear to choose an extracted alternate MCD. The list reads that character's attire folders, including nested folders, while excluding BaseModel. **Default (automatic)** keeps the normal default choice. The refresh button reads newly added attires. Gear still selects entrance/ring pieces within the chosen model.
+After loading a wrestler, use **Attire model** under Gear to choose an extracted alternate MCD. The list reads that character's attire folders, including nested folders, while excluding BaseModel. **Default (automatic)** keeps the normal default choice. The refresh button reads newly added attires. Choices are scanned in the background on wrestler changes or explicit refresh; selecting an already listed attire reuses the list. Stale scans cannot update another wrestler. Gear still selects entrance/ring pieces within the chosen model.
 
 An attire change clears the previous preview/install result and queues preparation of the selected clothes before Preview or MAKE. The character's body, Discovery mapping and logical roster ID remain the same. A removed selected model produces an error rather than silently changing clothes. Attires that only exist in an unextracted game archive need to be extracted first.
 
@@ -89,7 +89,15 @@ The uploaded data contains **1,584 named taunt variants**. It adds **194 playabl
 
 **Every named Discovery taunt now stays in the search list.** Search accepts names, aliases and exact animation IDs, as well as `confidences`, `fight spirits` and `Undisputed2`. Numeric variants remain distinct: searching Jeff Hardy 2 cannot select Jeff Hardy 1 or 12. An animation that could not be located or imported appears as a disabled row with its reason and exact clip ID; it does not vanish from search or become a broken render entry. Lookup misses show the searched folder and distinguish incomplete scans, source-read failures, decoder limitations and preview-cache errors. The tooltip includes the first scan warning when files could not be read. Unmatched taunts are looked up automatically in CAK archives beneath your configured game and Discovery folders. The reader follows actual indexed .clip/.clips paths and verifies the canonical animation record inside them; it does not substitute a similarly named move. Extracted edits and already playable bundled motions retain priority. Different archived versions of one clip, unreadable sources and incomplete searches remain unavailable with an explanation. An unresolved lookup does not establish that the move is absent from the game. The list shows how many matching entries are unavailable.
 
+Selecting a wrestler no longer imports the full taunt library twice. The loaded library is reused while the game and Discovery sources remain unchanged. Source watchers invalidate reuse after relevant file changes; **Refresh data** and explicit Discovery loads also retry. Unavailable monitoring, replaced source folders and linked external source trees retain conservative rescans. Roster parsing, model planning, picture conversion and compatibility-folder preparation run off the UI thread; the picker and final selection remain on it. Native render controls are guarded during selection. Windows interaction timing has not been measured here.
+
 The first archive motion scan can take time. It runs off the UI thread with progress and **Cancel load**, keeps requested records and verified record catalogs in a private cache, and discards temporary extracted containers. Later refreshes reuse unchanged catalogs, including lookups that found no matching record. Adding or changing an archive invalidates that source's cache. Canceling before the final library update keeps the current list. Game and Discovery source files remain unchanged.
+
+Archive indexing and extraction now allow the original native setup's limits (five and three minutes per operation) instead of prematurely rejecting a slow readable source after 45 or 90 seconds. These are maximum waits, not delays added to successful reads; cancellation remains available.
+
+Use **Animation details…** to read or copy the full diagnostic report when a taunt is unavailable. The report includes the current game and Discovery folders, archive counts, all retained scan warnings and exact clip IDs. Search matches appear first; no tooltip or selection of a disabled taunt is needed. Incomplete archive searches now also mark the overall load status incomplete. Index errors identify the archive's full path.
+
+Identical requested motion records at the same indexed path in multiple CAKs no longer block the entire animation search. Every copy is checked. Different bytes or inconsistent record presence leave that requested clip unresolved; a duplicate path alone does not invalidate unrelated verified clips. Unreadable sources still prevent acceptance when the active motion cannot be established. This change does not supply Jeff Hardy 2–8's animation data: their actual game/mod records must be readable, and their playback on Windows remains unverified here.
 
 Taunts refresh after **Browse folder**, drag-and-drop and roster selection. A folder load waits for model preparation or active rendering before refreshing the latest selected Discovery folder. Adding a missing supported animation and loading that data again turns its unavailable result into a playable entry.
 
@@ -139,7 +147,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **3,283 portable checks pass** across 40 suites, including verified update downloads, backup/rollback and parent-process handoff, complete named-taunt search coverage, folder-load refresh queues, batch output publication, current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. This release ran the five affected/new archive-motion, import, automatic-preview, refresh and preview-process suites (1,239 checks); the 35 unchanged suites retain their preceding passing results. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- **3,546 portable checks pass** across 42 suites, including verified update downloads, backup/rollback and parent-process handoff, complete named-taunt search coverage, folder-load refresh queues, batch output publication, current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. This release ran nine affected/new archive-motion, picture-archive, matchup-archive, import, animation-report, refresh, update, attire and roster-preparation suites (2,029 checks); the 33 unchanged suites retain their preceding passing results. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
@@ -174,6 +182,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/PreviewRenderBridgeTests -c Release
     dotnet run --project tests/RenderBenchmarkTests -c Release
     dotnet run --project tests/RosterLaunchTests -c Release -- /path/to/discovery_data
+    dotnet run --project tests/RosterPreparationTests -c Release
     dotnet run --project tests/RosterModelResolutionTests -c Release
     dotnet run --project tests/MappedModelLibraryTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/AutomaticAttireTests -c Release
@@ -197,6 +206,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/DiscoveryArchiveMatchupsTests -c Release -- /path/to/original/GorillaStudio
     dotnet run --project tests/DiscoveryArchiveMotionsTests -c Release
     dotnet run --project tests/AutomaticTauntPreviewTests -c Release
+    dotnet run --project tests/DiscoveryAnimationReportTests -c Release
     dotnet run --project tests/DiscoveryMatchupSetupTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data
     dotnet run --project tests/AlternateAttireTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/BatchRenderPlanTests -c Release -- /path/to/discovery_data

@@ -187,7 +187,8 @@ internal static class Program
         token.ThrowIfCancellationRequested(); commands.Add(command);
         Equal("Native executable runs from its own cache directory", Path.GetDirectoryName(command.FileName), command.WorkingDirectory);
         Equal("Native executable is copied outside source folders", true, command.FileName.StartsWith(cache));
-        Equal("Every command has a bounded timeout", true, command.TimeoutMilliseconds > 0 && command.TimeoutMilliseconds <= 90000);
+        Equal("Archive timeout matches the native setup for this operation",
+            command.Arguments[0] == "list-files" ? 300000 : 180000, command.TimeoutMilliseconds);
         string[] args = command.Arguments;
         Equal("Archive flag is exact shipped Bakery input option", "--input", args[1]);
         Equal("Archive retains its original filename", true, File.Exists(args[2]) && Path.GetExtension(args[2]) == ".cak");

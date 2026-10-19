@@ -56,6 +56,11 @@ namespace GorillaStudio.NameFolders
         private const long MaximumIndexBytes = 256L * 1024 * 1024;
         private const long MaximumPictureBytes = 128L * 1024 * 1024;
         private const long MaximumFallbackCopyBytes = 512L * 1024 * 1024;
+        // Match the shipped native setup's limits so a large readable archive
+        // is not rejected solely by a shorter bridge timeout. Both operations
+        // remain cancellable and run away from the UI thread.
+        private const int IndexTimeoutMilliseconds = 300000;
+        private const int ExtractTimeoutMilliseconds = 180000;
         private static readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
 
         internal static SemaphoreSlim AssetGate { get { return Gate; } }
@@ -77,7 +82,7 @@ namespace GorillaStudio.NameFolders
         internal static Task<DiscoveryArchiveProcessResult> ExtractAssetAsync(DiscoveryArchiveLookupIndex index, string asset, string output,
             DiscoveryArchiveRunner runner, CancellationToken token)
         {
-            return runner(Command(index.ToolPath, 90000, "unpack-file", "--input", index.ArchivePath,
+            return runner(Command(index.ToolPath, ExtractTimeoutMilliseconds, "unpack-file", "--input", index.ArchivePath,
                 "--file", asset, "--output", output), token);
         }
 
@@ -110,7 +115,7 @@ namespace GorillaStudio.NameFolders
                         string temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".txt");
                         try
                         {
-                            var execution = await runner(Command(executable, 45000, "list-files", "--input", archive.Path,
+                            var execution = await runner(Command(executable, IndexTimeoutMilliseconds, "list-files", "--input", archive.Path,
                                 "--output", temporary, "--extended"), token).ConfigureAwait(false);
                             if (execution == null || execution.ExitCode != 0 || !File.Exists(temporary))
                                 await DefaultIndexFallbackAsync(executable, archive, temporary, directory, progress, runner, token).ConfigureAwait(false);
@@ -124,7 +129,7 @@ namespace GorillaStudio.NameFolders
                         Fingerprint = archive.Fingerprint, IndexPath = index, ToolPath = executable, ToolKey = toolKey });
                 }
                 catch (Exception error) when (IsFileError(error) || error is TimeoutException || error is System.ComponentModel.Win32Exception)
-                { result.Warnings.Add("Could not read " + Path.GetFileName(archive.Path) + ": " + error.Message); }
+                { result.Warnings.Add("Could not read archive " + archive.Path + ": " + error.Message); }
             }
             return result;
         }
@@ -216,7 +221,7 @@ namespace GorillaStudio.NameFolders
                         string temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".txt");
                         try
                         {
-                            var execution = await runner(Command(executable, 45000, "list-files", "--input", archive.Path,
+                            var execution = await runner(Command(executable, IndexTimeoutMilliseconds, "list-files", "--input", archive.Path,
                                 "--output", temporary, "--extended"), token).ConfigureAwait(false);
                             if (execution == null || execution.ExitCode != 0 || !File.Exists(temporary))
                                 await DefaultIndexFallbackAsync(executable, archive, temporary, directory, progress, runner, token).ConfigureAwait(false);
@@ -230,7 +235,7 @@ namespace GorillaStudio.NameFolders
                     ReadMatches(index, archive, required, matches, result.Warnings);
                 }
                 catch (Exception error) when (IsFileError(error) || error is TimeoutException || error is System.ComponentModel.Win32Exception)
-                { result.Warnings.Add("Could not read " + Path.GetFileName(archive.Path) + ": " + error.Message); }
+                { result.Warnings.Add("Could not read archive " + archive.Path + ": " + error.Message); }
             }
 
             foreach (var pair in matches.OrderBy(value => value.Key))
@@ -275,7 +280,7 @@ namespace GorillaStudio.NameFolders
                             try
                             {
                                 Report(progress, "Loading linked roster picture " + Path.GetFileNameWithoutExtension(match.Path) + "…");
-                                var execution = await runner(Command(executable, 90000, "unpack-file", "--input", match.Archive.Path,
+                                var execution = await runner(Command(executable, ExtractTimeoutMilliseconds, "unpack-file", "--input", match.Archive.Path,
                                     "--file", match.Path, "--output", staging), token).ConfigureAwait(false);
                                 string extracted = Path.Combine(staging, Path.ChangeExtension(match.Path.Replace('/', Path.DirectorySeparatorChar), ".dds"));
                                 if (execution == null || execution.ExitCode != 0 || !ValidDds(extracted) || HasReparsePath(extracted, staging))
@@ -443,7 +448,7 @@ namespace GorillaStudio.NameFolders
                     await CopyFallbackArchiveAsync(archive.Path, shadow, progress, token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
                 if (FileStamp(archive.Path) != archive.Fingerprint) throw new IOException("The archive changed while preparing its temporary index input.");
-                var execution = await runner(Command(executable, 45000, "list-files", "--input", shadow, "--extended"), token).ConfigureAwait(false);
+                var execution = await runner(Command(executable, IndexTimeoutMilliseconds, "list-files", "--input", shadow, "--extended"), token).ConfigureAwait(false);
                 string sidecar = Path.Combine(staging, Path.GetFileNameWithoutExtension(shadow) + "_files.txt");
                 if (execution == null || execution.ExitCode != 0 || !File.Exists(sidecar))
                     throw new IOException("The archive reader could not index " + Path.GetFileName(archive.Path) + ". " + ShortOutput(execution));
@@ -460,7 +465,7 @@ namespace GorillaStudio.NameFolders
             long size = new FileInfo(sourcePath).Length;
             if (size > MaximumFallbackCopyBytes)
                 throw new IOException("Bakery requires its default index output for this archive. Its cache must be on the same drive as the game; "
-                    + "a cross-drive copy larger than 512 MiB was not started. You can instead extract its linked TypeA DDS pictures into Discovery data.");
+                    + "a cross-drive copy larger than 512 MiB was not started. Extract the required assets into Discovery data instead (.clip/.clips for animations; DDS for roster pictures).");
             var drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(shadow)));
             if (drive.AvailableFreeSpace < size + 16L * 1024 * 1024)
                 throw new IOException("There is not enough render-cache space for the archive reader's temporary cross-drive copy.");

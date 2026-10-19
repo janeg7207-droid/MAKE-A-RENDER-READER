@@ -47,6 +47,7 @@ namespace GorillaStudio.NameFolders
         public string ArchiveStatus { get; internal set; }
         public bool ScanIncomplete { get; internal set; }
         public bool AnimationRootFound { get; internal set; }
+        public bool HasLinkedSources { get; internal set; }
         public IReadOnlyList<string> SearchRoots { get; internal set; } = new string[0];
         public List<string> Warnings { get; } = new List<string>();
         public List<DiscoveryUnavailableTaunt> Unavailable { get; } = new List<DiscoveryUnavailableTaunt>();
@@ -116,14 +117,16 @@ namespace GorillaStudio.NameFolders
             DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(sourceRoot);
             result.ScanIncomplete = assets.ScanIncomplete;
             result.AnimationRootFound = assets.AnimationRootFound;
+            result.HasLinkedSources = assets.HasLinkedSources || (File.GetAttributes(table) & FileAttributes.ReparsePoint) != 0;
             result.SearchRoots = assets.SearchRoots;
-            result.Warnings.AddRange(assets.Warnings.Take(8));
+            result.Warnings.AddRange(assets.Warnings);
             if (fallbacks != null)
             {
+                result.ScanIncomplete |= fallbacks.Incomplete;
                 result.ArchivesSearched = fallbacks.ArchivesSearched;
                 result.ArchiveCount = fallbacks.ArchiveCount;
                 result.ArchiveStatus = fallbacks.Status;
-                result.Warnings.AddRange(fallbacks.Warnings.Take(8));
+                result.Warnings.AddRange(fallbacks.Warnings);
             }
             string identity = Hash(Encoding.UTF8.GetBytes(Path.GetFullPath(applicationRoot) + "\n" + sourceRoot + "\n" + Hash(File.ReadAllBytes(baseManifest))));
             string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20));
@@ -288,7 +291,7 @@ namespace GorillaStudio.NameFolders
                         kind = DiscoveryTauntUnavailableKind.CacheFailure;
                         reason = "Animation clip " + definition.Clip + " was found in " + asset.Path + ", but its preview cache could not be prepared in " + storageRoot + ": " + error.Message;
                     }
-                    if (result.Warnings.Count < 8) result.Warnings.Add(definition.Name + ": " + error.Message);
+                    result.Warnings.Add(definition.Name + ": " + error.Message);
                     if (matches != null)
                     {
                         AddNames(matches, definition);

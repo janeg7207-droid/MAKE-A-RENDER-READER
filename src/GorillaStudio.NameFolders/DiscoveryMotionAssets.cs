@@ -57,6 +57,7 @@ namespace GorillaStudio.NameFolders
         public List<string> Warnings { get; } = new List<string>();
         public bool ScanIncomplete { get; private set; }
         public bool AnimationRootFound { get; private set; }
+        public bool HasLinkedSources { get; private set; }
         public int Count { get { return assets.Count; } }
 
         public DiscoveryMotionAsset Find(string clip)
@@ -90,7 +91,10 @@ namespace GorillaStudio.NameFolders
                     System.IO.Path.AltDirectorySeparatorChar)), "Animation", StringComparison.OrdinalIgnoreCase))
                     result.AnimationRootFound = true;
                 string resolved;
-                try { resolved = DirectoryLinks.Resolve(directory); }
+                try {
+                    if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) result.HasLinkedSources = true;
+                    resolved = DirectoryLinks.Resolve(directory);
+                }
                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
                 { result.Warn(directory, error); continue; }
                 if (!seen.Add(resolved)) continue;
@@ -98,6 +102,9 @@ namespace GorillaStudio.NameFolders
                 {
                     foreach (string path in Directory.GetFiles(directory))
                     {
+                        if ((string.Equals(System.IO.Path.GetExtension(path), ".clip", StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(System.IO.Path.GetExtension(path), ".clips", StringComparison.OrdinalIgnoreCase))
+                            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) result.HasLinkedSources = true;
                         if (string.Equals(System.IO.Path.GetExtension(path), ".clips", StringComparison.OrdinalIgnoreCase)) containers.Add(path);
                         else if (string.Equals(System.IO.Path.GetExtension(path), ".clip", StringComparison.OrdinalIgnoreCase)) loose.Add(path);
                     }

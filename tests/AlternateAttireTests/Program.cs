@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using GorillaStudio.NameFolders;
 
@@ -83,6 +84,7 @@ internal static class Program
             Equal("An explicitly selected direct MCD is discoverable", "Attire.mcd", AlternateAttires.Read(direct)[0].RelativePath);
             Equal("A direct MCD does not falsely claim the native one-level automatic layout", false, AlternateAttires.Read(direct)[0].IsDefault);
             await PreparationChecks();
+            await CatalogChecks();
             if (args.Length > 0)
             {
                 string actual = args[0];
@@ -124,6 +126,83 @@ internal static class Program
             Console.WriteLine("PASS " + passed + " alternate attire checks");
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static async Task CatalogChecks()
+    {
+        string first = Path.Combine(root, "catalog-first"), second = Path.Combine(root, "catalog-second");
+        FileAt(first, "Default/Attire.mcd"); FileAt(second, "Other/Attire.mcd");
+        int reads = 0;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var release = new ManualResetEventSlim())
+        {
+            var catalog = new AlternateAttireCatalog(folder => {
+                Interlocked.Increment(ref reads);
+                entered.TrySetResult(true); release.Wait(TimeSpan.FromSeconds(5));
+                return AlternateAttires.Read(folder);
+            });
+            Task<AlternateAttireCatalogResult> opening = catalog.ReadAsync(first, false);
+            await Timeout(entered.Task);
+            Equal("A slow attire scan returns without blocking the selection caller", false, opening.IsCompleted);
+            Equal("The UI can observe loading without enumerating the model again", true, catalog.IsLoading);
+            Equal("Repeated requests during one scan share its work", true, ReferenceEquals(opening, catalog.ReadAsync(first, false)));
+            release.Set();
+            AlternateAttireCatalogResult original = await opening;
+            Equal("The current wrestler's scan is accepted", true, catalog.IsCurrent(original));
+            Equal("The async scan lists the real relative MCD", "Default/Attire.mcd", original.Models.Single().RelativePath);
+            for (int selection = 0; selection < 10; selection++) await catalog.ReadAsync(first, false);
+            Equal("Changing choices in the same wrestler does not rescan its folders", 1, reads);
+            FileAt(first, "Added Purple/Attire.mcd");
+            AlternateAttireCatalogResult refreshed = await catalog.ReadAsync(first, true);
+            Equal("Explicit Refresh discovers a newly added attire", 2, refreshed.Models.Count);
+            Equal("Explicit Refresh reads the current source rather than a stale cache", 2, reads);
+            Equal("A refresh makes an earlier result stale before it can update the UI", false, catalog.IsCurrent(original));
+            File.Delete(Path.Combine(first, "Default", "Attire.mcd"));
+            AlternateAttireCatalogResult removed = await catalog.ReadAsync(first, true);
+            Equal("Explicit Refresh removes deleted models from the choices", "Added Purple/Attire.mcd", removed.Models.Single().RelativePath);
+            Throws<FileNotFoundException>("A removed selection still fails validation instead of falling back", () => AlternateAttires.Validate(first, "Default/Attire.mcd"));
+        }
+
+        var firstEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var releaseFirst = new ManualResetEventSlim())
+        {
+            var catalog = new AlternateAttireCatalog(folder => {
+                if (folder == first) { firstEntered.TrySetResult(true); releaseFirst.Wait(TimeSpan.FromSeconds(5)); }
+                return AlternateAttires.Read(folder);
+            });
+            Task<AlternateAttireCatalogResult> old = catalog.ReadAsync(first, false);
+            await Timeout(firstEntered.Task);
+            AlternateAttireCatalogResult latest = await catalog.ReadAsync(second, false);
+            Equal("Switching wrestlers can finish while the old scan is still running", true, catalog.IsCurrent(latest));
+            Equal("The new wrestler cannot inherit the old wrestler's attire choices", "Other/Attire.mcd", latest.Models.Single().RelativePath);
+            releaseFirst.Set();
+            Equal("A late result for the previous wrestler is discarded", null, await old);
+            Equal("The late result cannot replace the latest cached model", "Other/Attire.mcd", (await catalog.ReadAsync(second, false)).Models.Single().RelativePath);
+        }
+
+        int attempts = 0;
+        var retrying = new AlternateAttireCatalog(folder => {
+            if (++attempts == 1) throw new IOException("Temporarily unavailable model folder");
+            return AlternateAttires.Read(folder);
+        });
+        AlternateAttireCatalogResult failed = await retrying.ReadAsync(second, false);
+        Equal("A scan failure remains observable without faulting the UI task", true, failed.Error is IOException);
+        Equal("The failed scan does not leave the Refresh button loading forever", false, retrying.IsLoading);
+        AlternateAttireCatalogResult retried = await retrying.ReadAsync(second, true);
+        Equal("Refresh can recover after the folder becomes readable", "Other/Attire.mcd", retried.Models.Single().RelativePath);
+
+        var closingEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var releaseClosing = new ManualResetEventSlim())
+        {
+            var closing = new AlternateAttireCatalog(folder => {
+                closingEntered.TrySetResult(true); releaseClosing.Wait(TimeSpan.FromSeconds(5));
+                return AlternateAttires.Read(folder);
+            });
+            Task<AlternateAttireCatalogResult> pending = closing.ReadAsync(second, false);
+            await Timeout(closingEntered.Task); closing.Close(); releaseClosing.Set();
+            Equal("Closing the window discards an in-flight attire scan", null, await pending);
+            Equal("A closed catalog cannot launch work again", null, await closing.ReadAsync(first, true));
+        }
     }
 
     private static async Task PreparationChecks()

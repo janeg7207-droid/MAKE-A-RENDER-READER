@@ -268,8 +268,13 @@ internal static class Program
         f.Fallbacks.Issues[clip] = incomplete; f.Fallbacks.Warnings.Add("MotionArea.cak could not be indexed.");
         var unfinished = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
         Equal("An incomplete archive search retains a separate unavailable classification", DiscoveryTauntUnavailableKind.ScanIncomplete, unfinished.Unavailable.Single().Kind);
+        Equal("An incomplete archive search is reflected in the overall load status", true, unfinished.ScanIncomplete);
         Equal("An incomplete archive search preserves its exact resolver reason", true, unfinished.Unavailable.Single().Reason.Contains(incomplete));
         Equal("An incomplete archive search retains its original warning", true, unfinished.Warnings.Contains("MotionArea.cak could not be indexed."));
+        for (int index = 0; index < 12; index++) f.Fallbacks.Warnings.Add("Archive warning " + index);
+        var completeReport = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("Diagnostic reports retain archive warnings beyond the initial eight", true,
+            completeReport.Warnings.Contains("Archive warning 11"));
     }
 
     private static void ScopeTests(string root)
@@ -286,6 +291,14 @@ internal static class Program
         Equal("A nested Animation folder is reported as present", true, assets.AnimationRootFound);
         Equal("A readable complete data scan is not marked incomplete", false, assets.ScanIncomplete);
         Equal("Whole-folder search keeps both independent clip identities", 2, assets.Count);
+        string external = Directory.CreateDirectory(Path.Combine(root, "external-empty-animations")).FullName;
+        string linked = Path.Combine(data, "LinkedAnimation");
+        Directory.CreateSymbolicLink(linked, external);
+        assets = DiscoveryMotionAssets.Read(data);
+        Equal("Even an empty linked source requires conservative future rescans", true, assets.HasLinkedSources);
+        File.WriteAllBytes(Path.Combine(external, "Added.clip"), Motion("60003a000", 30));
+        Equal("A new external linked animation is read on the next scan", true,
+            DiscoveryMotionAssets.Read(data).Find("60003a000") != null);
     }
 
     private static void DiagnosticTests(string root)
@@ -580,6 +593,8 @@ internal static class Program
         Equal("The uploaded full data folder can be scanned completely", false, first.ScanIncomplete);
         Equal("Actual source clips have no unreported read failures", 0, first.ReadFailures);
         Equal("Actual imported clips have no preview-cache failures", 0, first.CacheFailures);
+        Equal("The full uploaded dataset retains every decoder rejection warning", first.Unsupported,
+            first.Warnings.Count(warning => warning.Contains("additional channel sections")));
         Equal("Every actual lookup miss reports its exact clip and scanned root without claiming the PC file is absent", true,
             first.Unavailable.Where(item => item.Kind == DiscoveryTauntUnavailableKind.MissingAnimation).All(item =>
                 item.Reason.Contains(item.Clip) && item.Reason.Contains(Path.GetFullPath(discovery))

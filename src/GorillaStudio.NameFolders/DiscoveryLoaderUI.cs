@@ -22,6 +22,7 @@ namespace GorillaStudio.NameFolders
         private static readonly HashSet<Window> rosterWindowsBusy = new HashSet<Window>();
         private static readonly Dictionary<Window, ModelTauntRefresh> modelTauntRefreshes = new Dictionary<Window, ModelTauntRefresh>();
         private static readonly Dictionary<Window, TauntLoadProgress> tauntLoads = new Dictionary<Window, TauntLoadProgress>();
+        private static readonly Dictionary<Window, DiscoveryTauntContextCache> tauntContexts = new Dictionary<Window, DiscoveryTauntContextCache>();
         private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
         private sealed class ModelTauntRefresh
@@ -29,6 +30,11 @@ namespace GorillaStudio.NameFolders
             internal readonly DiscoveryTauntRefreshGate Gate = new DiscoveryTauntRefreshGate();
             internal DispatcherTimer Timer;
             internal bool Closed;
+        }
+
+        internal static void InvalidateTauntContexts()
+        {
+            foreach (DiscoveryTauntContextCache context in tauntContexts.Values) context.Invalidate();
         }
 
         private sealed class TauntLoadProgress
@@ -192,9 +198,19 @@ namespace GorillaStudio.NameFolders
             access.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             access.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
             access.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            access.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            access.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             Grid.SetColumn(change, 2);
             access.Children.Add(button);
             access.Children.Add(change);
+            var animationDetails = new Button {
+                Content = "Animation details…", Style = reference.Style, FontFamily = reference.FontFamily,
+                FontSize = reference.FontSize, Padding = reference.Padding, Margin = new Thickness(0, 6, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                ToolTip = "Read and copy complete animation lookup warnings and unresolved clip IDs."
+            };
+            animationDetails.Click += (sender, args) => DiscoveryTauntBridge.ShowAnimationDetails(window, RememberedRoot(window));
+            Grid.SetRow(animationDetails, 1); Grid.SetColumnSpan(animationDetails, 3); access.Children.Add(animationDetails);
             Grid.SetRow(access, row);
             Grid.SetColumn(access, 0);
             Grid.SetColumnSpan(access, Math.Max(1, grid.ColumnDefinitions.Count));
@@ -270,22 +286,33 @@ namespace GorillaStudio.NameFolders
                     }
                     // Validate before remembering a new file, so a bad import cannot
                     // replace the working roster used by the primary selector.
-                    RosterImport.LoadFile(rosterFile);
+                    await Task.Run(() => RosterImport.LoadFile(rosterFile));
                     RememberRosterFile(rosterFile);
                 }
-                await RefreshDiscoveryTauntsAsync(window, source, action == 1);
-                string prepared = PrepareRoster(source, rosterFile);
-                if (prepared == null) return;
+                // Opening the picker must not first rescan every motion/archive.
+                // An explicit Discovery load still refreshes immediately.
+                if (action == 1) await RefreshDiscoveryTauntsAsync(window, source, true);
+                if (!window.IsLoaded) return;
+                foreach (string name in new[] { "Busy", "GameBusy" })
+                {
+                    FieldInfo state = type.GetField(name, InstanceMembers);
+                    if (state != null && state.FieldType == typeof(bool) && (bool)state.GetValue(window)) return;
+                }
                 foreach (string name in new[] { "PreviewButton", "MakeButton", "InstallButton" })
                 {
                     var control = type.GetField(name, InstanceMembers)?.GetValue(window) as Button;
                     if (control != null) { loadingControls[control] = control.IsEnabled; control.IsEnabled = false; }
                 }
+                // File work now yields to the dispatcher. Hold the native busy
+                // guard before yielding so a manual render cannot start with the
+                // previous model while this selection is being prepared.
+                if (renderBusy != null && renderBusy.FieldType == typeof(bool))
+                { renderBusy.SetValue(window, true); ownsRenderBusy = true; }
+                string prepared = await PrepareRosterAsync(source, rosterFile, () => window.IsLoaded);
+                if (prepared == null) return;
                 type.GetField("LastGmr", InstanceMembers)?.SetValue(window, null);
                 var previousInstall = type.GetField("InstallButton", InstanceMembers)?.GetValue(window) as Button;
                 if (previousInstall != null) loadingControls[previousInstall] = false;
-                if (renderBusy != null && renderBusy.FieldType == typeof(bool))
-                { renderBusy.SetValue(window, true); ownsRenderBusy = true; }
                 await PrepareSelectedRenderAsync(window, prepared);
                 if (ownsRenderBusy) { renderBusy.SetValue(window, false); ownsRenderBusy = false; }
 
@@ -342,6 +369,20 @@ namespace GorillaStudio.NameFolders
         {
             if (string.IsNullOrWhiteSpace(source) || !window.IsLoaded || tauntLoads.ContainsKey(window)) return;
             Type type = window.GetType();
+            string game = type.GetField("Game", InstanceMembers)?.GetValue(window) as string;
+            DiscoveryTauntContextCache context;
+            if (!tauntContexts.TryGetValue(window, out context) || !context.Matches(game, source))
+            {
+                if (context != null) context.Dispose();
+                context = new DiscoveryTauntContextCache(game, source);
+                tauntContexts[window] = context;
+                window.Closed += (sender, args) => {
+                    DiscoveryTauntContextCache current;
+                    if (tauntContexts.TryGetValue(window, out current)) { current.Dispose(); tauntContexts.Remove(window); }
+                };
+            }
+            if (!explicitSetup && context.CanReuse) return;
+            long refreshRevision = context.BeginRefresh();
             var busyField = type.GetField("Busy", InstanceMembers);
             var gameBusyField = type.GetField("GameBusy", InstanceMembers);
             if ((busyField != null && busyField.FieldType == typeof(bool) && (bool)busyField.GetValue(window))
@@ -382,6 +423,10 @@ namespace GorillaStudio.NameFolders
                         if (load.Cancel != null) load.Cancel.IsEnabled = canCancel && !load.Closed && !load.Cancellation.IsCancellationRequested;
                     });
                 if (load.Closed || !window.IsLoaded) return;
+                // Nested links may point outside both watched trees. Preserve
+                // normal rescans for those sources instead of retaining stale
+                // external animations; ordinary extracted trees can be reused.
+                context.CompleteRefresh(refreshRevision, !import.HasLinkedSources);
                 string message = import.Definitions == 0
                     ? "No Discovery moves table found; the bundled taunts remain available."
                     : import.Available + " taunts available · " + import.Imported + " added from Discovery";
@@ -391,7 +436,7 @@ namespace GorillaStudio.NameFolders
                 if (import.CacheFailures > 0) message += " · " + import.CacheFailures + " preview cache errors";
                 if (import.ArchiveImported > 0) message += " · " + import.ArchiveImported + " recovered from archives";
                 if (import.ArchivesSearched) message += " · " + import.ArchiveCount + " archives checked";
-                if (import.ScanIncomplete) message += " · scan incomplete (see details)";
+                if (import.ScanIncomplete) message += " · lookup incomplete: open Animation details";
                 SetModelStatus(window, message);
                 if (explicitSetup)
                 {
@@ -400,7 +445,11 @@ namespace GorillaStudio.NameFolders
                         details += "\n\nAnimation search covers the entire Discovery folder:\n" + string.Join("\n", import.SearchRoots);
                     if (!string.IsNullOrWhiteSpace(import.ArchiveStatus)) details += "\n\n" + import.ArchiveStatus;
                     else if (import.ArchivesSearched) details += "\n\n" + import.ArchiveCount + " game/Discovery archives searched for unmatched animation clips.";
-                    if (import.Warnings.Count > 0) details += "\n\n" + string.Join("\n", import.Warnings);
+                    if (import.Warnings.Count > 0)
+                    {
+                        details += "\n\n" + string.Join("\n", import.Warnings.GetRange(0, Math.Min(3, import.Warnings.Count)));
+                        details += "\n\nOpen Animation details for all " + import.Warnings.Count + " warnings and full clip diagnostics.";
+                    }
                     Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), details,
                         "Discovery data loaded", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Information);
                 }

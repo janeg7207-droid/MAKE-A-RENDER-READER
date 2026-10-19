@@ -2,6 +2,7 @@
   <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttireCatalog.cs" Link="AlternateAttireCatalog.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
   </ItemGroup>
 </Project>

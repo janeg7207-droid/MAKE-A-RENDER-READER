@@ -29,6 +29,7 @@ namespace GorillaStudio.NameFolders
         public RosterEntry SelectedEntry { get; private set; }
         public string SelectedFolder { get; private set; }
         public string CurrentRosterFile { get { return currentRosterFile; } }
+        public bool DataRefreshed { get; private set; }
 
         public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseCharacterFolder, string rosterFile = null)
         {
@@ -281,6 +282,7 @@ namespace GorillaStudio.NameFolders
                 search.Clear();
                 RefreshList(null);
                 ResetModelLibrary();
+                DataRefreshed = true;
             }
             catch (Exception error)
             {
@@ -338,7 +340,9 @@ namespace GorillaStudio.NameFolders
             }
             using (var picker = new WrestlerPicker(modelFolder, Entries.Where(e => e.Id > 0).ToList(), false))
             {
-                if (picker.ShowDialog(this) != DialogResult.OK) return;
+                DialogResult result = picker.ShowDialog(this);
+                if (picker.DataRefreshed) DataRefreshed = true;
+                if (result != DialogResult.OK) return;
                 RosterEntry target = picker.SelectedEntry;
                 if (!Entries.Contains(target)) Entries.Add(target);
                 target.SourceId = CharacterFolders.PhysicalId(modelFolder) ?? (model.SourceId > 0 ? model.SourceId : target.Id);

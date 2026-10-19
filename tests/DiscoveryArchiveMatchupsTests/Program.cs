@@ -176,7 +176,8 @@ internal static class Program
     {
         token.ThrowIfCancellationRequested(); commands.Add(command);
         Equal("Bakery is run from its cache copy", true, command.FileName.StartsWith(cache));
-        Equal("Every native operation has a bounded timeout", true, command.TimeoutMilliseconds > 0 && command.TimeoutMilliseconds <= 90000);
+        Equal("Archive timeout matches the native setup for this operation",
+            command.Arguments[0] == "list-files" ? 300000 : 180000, command.TimeoutMilliseconds);
         string[] a = command.Arguments;
         Equal("The native source flag is exact", "--input", a[1]);
         if (a[0] == "list-files")

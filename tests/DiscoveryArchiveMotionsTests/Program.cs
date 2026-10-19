@@ -18,7 +18,7 @@ internal static class Program
     private static string root, app, game, data, cache;
     private static int checks, indexCalls, extractionCalls;
     private static bool crashOutput, mutate, cancelExtraction, growingOutput, largeOutput;
-    private static string mutateOtherArchive, mutationTrigger;
+    private static string mutateOtherArchive, mutationTrigger, unreadableArchive;
     private static readonly Dictionary<string, string[]> indexes = new Dictionary<string, string[]>();
     private static readonly Dictionary<string, byte[]> payloads = new Dictionary<string, byte[]>();
     private static readonly List<string> extractedPaths = new List<string>();
@@ -70,10 +70,68 @@ internal static class Program
 
             string second = AddArchive("override.cak", path, Container(actual)); int prior = extractionCalls;
             result = await Find(Clip);
-            Equal("Same indexed path in two CAKs remains ambiguous", 0, result.Assets.Count);
-            Equal("Unknown load order is explained", true, result.Warnings.Any(x => x.Contains("load order")));
-            Equal("Ambiguous paths do not launch extraction", prior, extractionCalls);
+            Equal("Same indexed path with identical requested bytes is recovered", 1, result.Assets.Count);
+            Equal("Duplicate paths alone do not make the lookup incomplete", false, result.Incomplete);
+            Equal("Every duplicate source is verified before accepting its record", prior + 1, extractionCalls);
+            Equal("The verified duplicate retains the actual requested bytes", true, actual.SequenceEqual(result.Assets[Clip].Read()));
+            prior = extractionCalls; await Find(Clip);
+            Equal("Verified identical duplicate sources are reused from their exact caches", prior, extractionCalls);
+
+            byte[] duplicateDifferent = (byte[])actual.Clone(); duplicateDifferent[duplicateDifferent.Length - 1] ^= 1;
+            payloads[second + "|" + path] = Container(duplicateDifferent); File.AppendAllText(second, " different payload");
+            result = await Find(Clip);
+            Equal("Different bytes in same-path CAKs conflict for that clip", 0, result.Assets.Count);
+            Equal("Same-path payload conflict explains unknown load order", true, result.Issues[Clip].Contains("Different motion bytes") && result.Issues[Clip].Contains("load order"));
+            Equal("A fully compared payload conflict is not an incomplete scan", false, result.Incomplete);
+
+            byte[] duplicateOther = (byte[])actual.Clone(); BitConverter.GetBytes(DiscoveryMotionAssets.ClipId(Missing)).CopyTo(duplicateOther, 0);
+            payloads[cak + "|" + path] = Container(actual, duplicateOther); File.AppendAllText(cak, " mixed duplicate records");
+            payloads[second + "|" + path] = Container(duplicateDifferent, duplicateOther); File.AppendAllText(second, " mixed duplicate records");
+            result = await Find(Clip, Missing);
+            Equal("A differing record does not hide another identical requested record", 1, result.Assets.Count);
+            Equal("Only the exact differing clip ID has an issue", Clip, result.Issues.Keys.Single());
+            Equal("The unaffected duplicate record preserves its actual bytes", true, duplicateOther.SequenceEqual(result.Assets[Missing].Read()));
+            result = await Find(Missing);
+            Equal("Differences in unrequested records do not make identical requested bytes ambiguous", true, result.Assets.ContainsKey(Missing) && result.Issues.Count == 0 && !result.Incomplete);
+            prior = extractionCalls; result = await Find(Clip, Missing);
+            Equal("A cached conflict stays confined to its exact clip ID", true, result.Assets.ContainsKey(Missing) && result.Issues.ContainsKey(Clip));
+            Equal("Mixed cached duplicate comparisons do not unpack containers again", prior, extractionCalls);
+
+            payloads[cak + "|" + path] = Container(actual, duplicateOther); File.AppendAllText(cak, " coverage present first");
+            payloads[second + "|" + path] = Container(duplicateOther); File.AppendAllText(second, " coverage absent second");
+            result = await Find(Clip, Missing);
+            Equal("Presence in only one same-path source is not silently treated as active", false, result.Assets.ContainsKey(Clip));
+            Equal("A same-path coverage gap explains the requested ID and missing source", true, result.Issues[Clip].Contains(Clip)
+                && result.Issues[Clip].Contains("absent from override.cak") && result.Issues[Clip].Contains(path));
+            Equal("An identical sibling record survives another record's coverage gap", true, result.Assets.ContainsKey(Missing));
+            Equal("A fully known coverage gap is per-clip rather than an incomplete scan", false, result.Incomplete);
+
+            payloads[cak + "|" + path] = Container(duplicateOther); File.AppendAllText(cak, " coverage absent first");
+            payloads[second + "|" + path] = Container(actual, duplicateOther); File.AppendAllText(second, " coverage present second");
+            result = await Find(Clip, Missing);
+            Equal("Reversing source coverage does not guess which archive wins", false, result.Assets.ContainsKey(Clip));
+            Equal("The reversed coverage issue names the absent archive", true, result.Issues[Clip].Contains("absent from Characters and moves.cak"));
+            Equal("Reversing coverage preserves an identical requested sibling", true, result.Assets.ContainsKey(Missing));
+
+            string independent = "Mods/IndependentMotion.clips";
+            indexes[cak] = new[] { Line(path), Line(independent) };
+            payloads[cak + "|" + independent] = Container(duplicateDifferent); File.AppendAllText(cak, " independent exact source");
+            result = await Find(Clip, Missing);
+            Equal("A distinct indexed path can supply an ID excluded by another path's coverage gap", 2, result.Assets.Count);
+            Equal("Only eligible path groups participate in final payload conflict checks", true, duplicateDifferent.SequenceEqual(result.Assets[Clip].Read()) && result.Issues.Count == 0);
+            indexes[cak] = new[] { Line(path) }; File.AppendAllText(cak, " restore duplicate group");
+            payloads[cak + "|" + path] = Container(actual, duplicateOther);
+
+            payloads[second + "|" + path] = new byte[48]; File.AppendAllText(second, " unreadable duplicate");
+            result = await Find(Clip, Missing);
+            Equal("An unreadable duplicate is not silently discarded in favor of stock", 0, result.Assets.Count);
+            Equal("Unreadable duplicate sources remain explicit incomplete warnings", true, result.Incomplete && result.Warnings.Any(x => x.Contains("motion record table is invalid")));
+            File.AppendAllText(second, " native failure"); unreadableArchive = second;
+            result = await Find(Clip, Missing); unreadableArchive = null;
+            Equal("A native failure in a duplicate source cannot silently select the other archive", 0, result.Assets.Count);
+            Equal("The native duplicate-source failure is retained in warnings", true, result.Incomplete && result.Warnings.Any(x => x.Contains("fixture cannot read this archive")));
             File.Delete(second);
+            payloads[cak + "|" + path] = Container(actual); File.AppendAllText(cak, " restore original");
 
             // Canonical filenames take priority, but never prove their payload ID.
             string canonical = "Custom/NewMoves/" + Missing + ".clip";
@@ -208,8 +266,8 @@ internal static class Program
     {
         token.ThrowIfCancellationRequested();
         Equal("Reader runs from cache", true, command.FileName.StartsWith(cache));
-        Equal("Native operation has bounded timeout", true, command.TimeoutMilliseconds > 0 && command.TimeoutMilliseconds <= 90000);
         string[] args = command.Arguments;
+        Equal("Native operation retains the shipped engine's bounded timeout", args[0] == "list-files" ? 300000 : 180000, command.TimeoutMilliseconds);
         Equal("Actual native input flag is retained", "--input", args[1]);
         if (args[0] == "list-files")
         {
@@ -235,6 +293,7 @@ internal static class Program
             extractionCalls++; extractedPaths.Add(args[4]);
             Equal("Exact native indexed-file extraction command", true, args.Length == 7 && args[0] == "unpack-file" && args[3] == "--file" && args[5] == "--output");
             Equal("Extraction output always stays inside cache", true, args[6].StartsWith(cache));
+            if (args[2] == unreadableArchive) return new DiscoveryArchiveProcessResult { ExitCode = 3, Output = "fixture cannot read this archive" };
             string output = Path.Combine(args[6], args[4].Replace('/', Path.DirectorySeparatorChar));
             if (growingOutput)
             {

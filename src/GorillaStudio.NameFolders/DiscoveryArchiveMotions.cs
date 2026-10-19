@@ -38,6 +38,12 @@ namespace GorillaStudio.NameFolders
             internal DiscoveryMotionAsset Asset;
             internal string Sha;
             internal DiscoveryArchiveLookupIndex Index;
+            internal string AssetPath;
+        }
+        private sealed class SourceCoverage
+        {
+            internal string ArchivePath;
+            internal HashSet<ulong> Ids;
         }
 
         public static Task<DiscoveryMotionFallbacks> FindAsync(string appRoot, string gameRoot, string discoveryRoot,
@@ -75,7 +81,9 @@ namespace GorillaStudio.NameFolders
             var result = new DiscoveryMotionFallbacks();
             if (clips.Length == 0) { result.Status = "No unresolved Discovery motions need archive lookup."; return result; }
             var requested = clips.ToDictionary(clip => clip, DiscoveryMotionAssets.ClipId, StringComparer.OrdinalIgnoreCase);
-            var accepted = new Dictionary<string, Accepted>(StringComparer.OrdinalIgnoreCase);
+            var requestedIds = new HashSet<ulong>(requested.Values);
+            var accepted = new Dictionary<string, List<Accepted>>(StringComparer.OrdinalIgnoreCase);
+            var coverage = new Dictionary<string, List<SourceCoverage>>(StringComparer.OrdinalIgnoreCase);
             var conflicts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var lookup = await DiscoveryArchiveRenders.ReadAssetIndexesAsync(appRoot, gameRoot, discoveryRoot, cache, progress, runner, token).ConfigureAwait(false);
             result.ArchivesSearched = true;
@@ -100,6 +108,7 @@ namespace GorillaStudio.NameFolders
                     bool needExtraction = catalog == null;
                     if (catalog != null)
                     {
+                        RecordCoverage(candidate, catalog, requestedIds, coverage);
                         var catalogById = catalog.ToLookup(entry => entry.Id);
                         foreach (var pair in requested)
                         {
@@ -113,7 +122,7 @@ namespace GorillaStudio.NameFolders
                             if (!distinctEntries && ReadCachedRecord(directory, pair.Key, pair.Value, identity, out asset))
                             {
                                 Retain(asset.Path, asset.Length, retainedPaths, ref retainedBytes);
-                                Accept(pair.Key, asset, FileHash(asset.Path), candidate.Index, accepted, conflicts, result);
+                                Accept(pair.Key, asset, FileHash(asset.Path), candidate, accepted, conflicts);
                             }
                             else needExtraction = true;
                         }
@@ -136,6 +145,7 @@ namespace GorillaStudio.NameFolders
                         long length = new FileInfo(source).Length;
                         if (length > limit) throw new IOException("The extracted motion exceeds the extraction budget.");
                         catalog = Inspect(source, string.Equals(Path.GetExtension(candidate.Path), ".clip", StringComparison.OrdinalIgnoreCase), token);
+                        RecordCoverage(candidate, catalog, requestedIds, coverage);
                         var catalogById = catalog.ToLookup(entry => entry.Id);
                         var local = new Dictionary<string, Tuple<DiscoveryMotionAsset, string>>(StringComparer.OrdinalIgnoreCase);
                         foreach (var pair in requested)
@@ -162,7 +172,7 @@ namespace GorillaStudio.NameFolders
                         if (!DiscoveryArchiveRenders.AssetSourceUnchanged(candidate.Index)) throw new IOException("The archive changed during motion extraction.");
                         SaveCatalog(catalogPath, catalog);
                         foreach (var pair in local)
-                            if (!conflicts.Contains(pair.Key)) Accept(pair.Key, pair.Value.Item1, pair.Value.Item2, candidate.Index, accepted, conflicts, result);
+                            if (!conflicts.Contains(pair.Key)) Accept(pair.Key, pair.Value.Item1, pair.Value.Item2, candidate, accepted, conflicts);
                         committed = true;
                     }
                     finally
@@ -174,6 +184,7 @@ namespace GorillaStudio.NameFolders
                 catch (Exception error) when (Expected(error))
                 { result.Incomplete = true; result.Warnings.Add("Could not read archive motion " + candidate.Path + ": " + error.Message); }
             }
+            ApplyCoverage(requested, accepted, coverage, conflicts, result);
             // Negative catalogs and byte-identical aliases are evidence too. If
             // any indexed source changed after its scan, it may now contain an
             // active override even when the selected positive source is stable.
@@ -196,7 +207,7 @@ namespace GorillaStudio.NameFolders
                 accepted.Clear();
             }
             token.ThrowIfCancellationRequested();
-            foreach (var pair in accepted) result.Assets[pair.Key] = pair.Value.Asset;
+            foreach (var pair in accepted) result.Assets[pair.Key] = pair.Value[0].Asset;
             foreach (string clip in clips)
                 if (!result.Assets.ContainsKey(clip) && !result.Issues.ContainsKey(clip))
                     result.Issues[clip] = lookup.ArchiveCount == 0
@@ -216,6 +227,7 @@ namespace GorillaStudio.NameFolders
             var groups = new Dictionary<string, List<Candidate>>(StringComparer.OrdinalIgnoreCase);
             var numbers = clips.Select(clip => uint.Parse(clip.Substring(0, clip.IndexOf('a')), CultureInfo.InvariantCulture)).ToArray();
             bool candidateLimit = false;
+            int candidateCount = 0;
             foreach (var index in indexes)
             {
                 token.ThrowIfCancellationRequested();
@@ -246,11 +258,15 @@ namespace GorillaStudio.NameFolders
                         List<Candidate> matches;
                         if (!groups.TryGetValue(path, out matches))
                         {
-                            if (groups.Count >= MaximumCandidates) { candidateLimit = true; continue; }
+                            if (candidateCount >= MaximumCandidates) { candidateLimit = true; continue; }
                             groups[path] = matches = new List<Candidate>();
                         }
                         if (!matches.Any(value => string.Equals(value.Index.ArchivePath, index.ArchivePath, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            if (candidateCount >= MaximumCandidates) { candidateLimit = true; continue; }
                             matches.Add(new Candidate { Index = index, Path = path, Priority = priority, AdvertisedBytes = size });
+                            candidateCount++;
+                        }
                     }
                 }
                 catch (Exception error) when (Expected(error))
@@ -259,10 +275,12 @@ namespace GorillaStudio.NameFolders
             var candidates = new List<Candidate>();
             if (candidateLimit)
             { result.Incomplete = true; result.Warnings.Add("The archive motion scan exceeded 4,096 candidate files. Extract the active requested .clip into Discovery data or narrow the configured archive roots."); }
-            foreach (var pair in groups)
-                if (pair.Value.Count == 1) candidates.Add(pair.Value[0]);
-                else
-                { result.Incomplete = true; result.Warnings.Add("Motion path " + pair.Key + " exists in multiple CAKs; their active load order is unknown, so no archive was chosen for this path."); }
+            // Game patches and mods commonly repeat a container's path. Its path
+            // does not establish which requested records differ: inspect every
+            // readable source, then compare the exact record bytes in Accept.
+            // Identical records are safe regardless of which archive wins; only
+            // differing payloads for a requested ID create a per-clip conflict.
+            foreach (var pair in groups) candidates.AddRange(pair.Value);
             return candidates.OrderBy(value => value.Priority).ThenBy(value => value.Path, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(value => value.Index.ArchivePath, StringComparer.OrdinalIgnoreCase).ToList();
         }
@@ -332,13 +350,53 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static void Accept(string clip, DiscoveryMotionAsset asset, string sha, DiscoveryArchiveLookupIndex index,
-            Dictionary<string, Accepted> accepted, HashSet<string> conflicts, DiscoveryMotionFallbacks result)
+        private static void Accept(string clip, DiscoveryMotionAsset asset, string sha, Candidate candidate,
+            Dictionary<string, List<Accepted>> accepted, HashSet<string> conflicts)
         {
             if (conflicts.Contains(clip)) return;
-            Accepted previous;
-            if (accepted.TryGetValue(clip, out previous) && previous.Sha != sha) { Conflict(clip, accepted, conflicts, result); return; }
-            if (previous == null) accepted[clip] = new Accepted { Asset = asset, Sha = sha, Index = index };
+            List<Accepted> matches;
+            if (!accepted.TryGetValue(clip, out matches)) accepted[clip] = matches = new List<Accepted>();
+            if (!matches.Any(value => string.Equals(value.Index.ArchivePath, candidate.Index.ArchivePath, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(value.AssetPath, candidate.Path, StringComparison.OrdinalIgnoreCase)))
+                matches.Add(new Accepted { Asset = asset, Sha = sha, Index = candidate.Index, AssetPath = candidate.Path });
+        }
+
+        private static void RecordCoverage(Candidate candidate, List<Entry> catalog, HashSet<ulong> requestedIds, Dictionary<string, List<SourceCoverage>> coverage)
+        {
+            List<SourceCoverage> sources;
+            if (!coverage.TryGetValue(candidate.Path, out sources)) coverage[candidate.Path] = sources = new List<SourceCoverage>();
+            if (!sources.Any(value => string.Equals(value.ArchivePath, candidate.Index.ArchivePath, StringComparison.OrdinalIgnoreCase)))
+                sources.Add(new SourceCoverage { ArchivePath = candidate.Index.ArchivePath, Ids = new HashSet<ulong>(catalog.Select(entry => entry.Id).Where(requestedIds.Contains)) });
+        }
+
+        private static void ApplyCoverage(Dictionary<string, ulong> requested, Dictionary<string, List<Accepted>> accepted,
+            Dictionary<string, List<SourceCoverage>> coverage, HashSet<string> conflicts, DiscoveryMotionFallbacks result)
+        {
+            var gaps = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var group in coverage.Where(pair => pair.Value.Count > 1))
+                foreach (var clip in requested)
+                {
+                    var present = group.Value.Where(source => source.Ids.Contains(clip.Value)).ToArray();
+                    var absent = group.Value.Where(source => !source.Ids.Contains(clip.Value)).ToArray();
+                    if (present.Length == 0 || absent.Length == 0) continue;
+                    Dictionary<string, string> paths;
+                    if (!gaps.TryGetValue(clip.Key, out paths)) gaps[clip.Key] = paths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    paths[group.Key] = "The requested clip " + clip.Key + " is present in " + string.Join(", ", present.Select(source => Path.GetFileName(source.ArchivePath)))
+                        + " but absent from " + string.Join(", ", absent.Select(source => Path.GetFileName(source.ArchivePath)))
+                        + " for the same indexed motion path " + group.Key + ". The active container replacement/merge order is unknown; export the active clip from Discovery.";
+                }
+            foreach (string clip in accepted.Keys.ToArray())
+            {
+                Dictionary<string, string> paths;
+                if (gaps.TryGetValue(clip, out paths))
+                {
+                    accepted[clip].RemoveAll(value => paths.ContainsKey(value.AssetPath));
+                    if (accepted[clip].Count == 0)
+                    { accepted.Remove(clip); result.Issues[clip] = string.Join(" ", paths.Values); continue; }
+                }
+                if (accepted[clip].Select(value => value.Sha).Distinct(StringComparer.Ordinal).Skip(1).Any())
+                    Conflict(clip, accepted, conflicts, result);
+            }
         }
 
         private static void Retain(string path, int length, HashSet<string> retained, ref long bytes)
@@ -348,7 +406,7 @@ namespace GorillaStudio.NameFolders
             retained.Add(path); bytes += length;
         }
 
-        private static void Conflict(string clip, Dictionary<string, Accepted> accepted, HashSet<string> conflicts, DiscoveryMotionFallbacks result)
+        private static void Conflict(string clip, Dictionary<string, List<Accepted>> accepted, HashSet<string> conflicts, DiscoveryMotionFallbacks result)
         {
             accepted.Remove(clip); conflicts.Add(clip);
             result.Issues[clip] = "Different motion bytes claim this exact clip ID in the searched sources; the active mod load order is unknown. Export the active clip from Discovery instead of choosing an archive by date.";

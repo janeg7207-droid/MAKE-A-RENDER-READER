@@ -35,6 +35,9 @@ namespace GorillaStudio.NameFolders
         private static readonly HashSet<Window> searchHooked = new HashSet<Window>();
         private static readonly Dictionary<Window, long> refreshRequests = new Dictionary<Window, long>();
         private static long nextRefreshRequest;
+        private static readonly Dictionary<Window, DiscoveryAnimationReport> animationReports = new Dictionary<Window, DiscoveryAnimationReport>();
+        private static readonly HashSet<Window> reportWindows = new HashSet<Window>();
+        private static readonly Dictionary<Window, Window> animationDialogs = new Dictionary<Window, Window>();
 
         public static Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot)
         {
@@ -105,7 +108,11 @@ namespace GorillaStudio.NameFolders
                     DiscoveryTauntImport result = await Task.Run(() => DiscoveryTauntLibrary.Build(
                         app, FolderBridge.StorageDirectory, discoveryRoot, fallbacks));
                     RefreshOnDispatcher(window, () => {
-                        if (RefreshContextCurrent(window, request, game, folder)) Apply(window, result);
+                        if (RefreshContextCurrent(window, request, game, folder))
+                        {
+                            RecordAnimationReport(window, game, dataRoot ?? discoveryRoot, result);
+                            Apply(window, result);
+                        }
                     });
                     return result;
                 }
@@ -142,6 +149,118 @@ namespace GorillaStudio.NameFolders
             return window.IsLoaded
                 && string.Equals(game, window.GetType().GetField("Game", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(folder, window.GetType().GetField("Folder", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void RecordAnimationReport(Window window, string game, string root, DiscoveryTauntImport import)
+        {
+            var report = new DiscoveryAnimationReport {
+                HelperVersion = typeof(FolderBridge).Assembly.GetName().Version.ToString(3), CapturedUtc = DateTime.UtcNow,
+                GameRoot = game, DiscoveryRoot = root, HasImport = true,
+                Definitions = import.Definitions, Available = import.Available, Imported = import.Imported,
+                ArchiveImported = import.ArchiveImported, ArchiveCount = import.ArchiveCount,
+                Missing = import.Missing, Unsupported = import.Unsupported, ReadFailures = import.ReadFailures,
+                CacheFailures = import.CacheFailures, ArchivesSearched = import.ArchivesSearched,
+                ArchiveStatus = import.ArchiveStatus, ScanIncomplete = import.ScanIncomplete
+            };
+            report.SearchRoots.AddRange(import.SearchRoots);
+            report.Warnings.AddRange(import.Warnings);
+            foreach (DiscoveryUnavailableTaunt item in import.Unavailable)
+            {
+                var entry = new DiscoveryAnimationReportEntry { Name = item.Name, Id = item.Id, Variant = item.Variant,
+                    Clip = item.Clip, Kind = item.Kind.ToString(), Reason = item.Reason };
+                entry.Names.AddRange(item.Names);
+                report.Unavailable.Add(entry);
+            }
+            SaveAnimationReport(report);
+            animationReports[window] = report;
+            if (reportWindows.Add(window))
+                window.Closed += (sender, args) => {
+                    animationReports.Remove(window); reportWindows.Remove(window); animationDialogs.Remove(window);
+                };
+        }
+
+        private static void SaveAnimationReport(DiscoveryAnimationReport report)
+        {
+            string temporary = null;
+            try
+            {
+                string directory = Path.Combine(FolderBridge.StorageDirectory, "animation-diagnostics");
+                Directory.CreateDirectory(directory);
+                report.SavedPath = Path.Combine(directory, "latest.txt");
+                temporary = report.SavedPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(temporary, report.Format(null), new UTF8Encoding(false));
+                if (File.Exists(report.SavedPath)) File.Replace(temporary, report.SavedPath, null);
+                else File.Move(temporary, report.SavedPath);
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
+            {
+                report.SavedPath = null;
+                report.Warnings.Add("The animation report could not be saved: " + error.Message + ". Copy it from Animation details instead.");
+            }
+            finally
+            {
+                if (temporary != null)
+                    try { if (File.Exists(temporary)) File.Delete(temporary); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        public static void ShowAnimationDetails(object owner, string discoveryRoot)
+        {
+            var window = owner as Window;
+            if (window == null || !window.IsLoaded) return;
+            Window existing;
+            if (animationDialogs.TryGetValue(window, out existing) && existing.IsLoaded) { existing.Activate(); return; }
+            var dialog = new Window {
+                Owner = window, Title = "Animation details", Width = 880, Height = 660, MinWidth = 540, MinHeight = 350,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = new SolidColorBrush(Color.FromRgb(22, 22, 27)), Foreground = Brushes.White,
+                FontFamily = window.FontFamily, FontSize = 13
+            };
+            animationDialogs[window] = dialog;
+            var body = new DockPanel { Margin = new Thickness(14) };
+            var heading = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+            heading.Children.Add(new TextBlock { Text = "Read the complete reason, select text, or copy the report.", TextWrapping = TextWrapping.Wrap });
+            var query = new TextBox { Text = Field<TextBox>(window, "SearchBox")?.Text ?? "", Padding = new Thickness(5),
+                Margin = new Thickness(0, 7, 0, 0), ToolTip = "Show matching unavailable names or clip IDs first; the full report remains below." };
+            heading.Children.Add(query); DockPanel.SetDock(heading, Dock.Top); body.Children.Add(heading);
+            var footer = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+            var buttons = new WrapPanel();
+            Style style = Field<Button>(window, "GameButton")?.Style;
+            var copy = new Button { Content = "Copy report", Style = style, Padding = new Thickness(10, 5, 10, 5), Margin = new Thickness(0, 0, 8, 0) };
+            var refresh = new Button { Content = "Reload report", Style = style, Padding = copy.Padding, Margin = copy.Margin };
+            var close = new Button { Content = "Close", Style = style, Padding = copy.Padding };
+            buttons.Children.Add(copy); buttons.Children.Add(refresh); buttons.Children.Add(close); footer.Children.Add(buttons);
+            var status = new TextBlock { TextWrapping = TextWrapping.Wrap, Foreground = Brushes.LightGray, Margin = new Thickness(0, 7, 0, 0) };
+            footer.Children.Add(status); DockPanel.SetDock(footer, Dock.Bottom); body.Children.Add(footer);
+            var text = new TextBox {
+                IsReadOnly = true, IsReadOnlyCaretVisible = true, AcceptsReturn = true, AcceptsTab = true,
+                TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(9),
+                Background = new SolidColorBrush(Color.FromRgb(16, 16, 20)), Foreground = Brushes.White,
+                FontFamily = new FontFamily("Consolas"), FontSize = 12
+            };
+            body.Children.Add(text);
+            Action render = () => {
+                DiscoveryAnimationReport report;
+                if (!animationReports.TryGetValue(window, out report))
+                    report = new DiscoveryAnimationReport { HelperVersion = typeof(FolderBridge).Assembly.GetName().Version.ToString(3),
+                        GameRoot = window.GetType().GetField("Game", Members)?.GetValue(window) as string, DiscoveryRoot = discoveryRoot };
+                text.Text = report.Format(query.Text);
+                text.ScrollToHome();
+                status.Text = report.SavedPath == null ? "The text can be selected and copied with Ctrl+C."
+                    : "Full report saved to " + report.SavedPath;
+            };
+            query.TextChanged += (sender, args) => render();
+            refresh.Click += (sender, args) => render();
+            close.Click += (sender, args) => dialog.Close();
+            copy.Click += (sender, args) => {
+                try { Clipboard.SetText(text.Text); status.Text = "Report copied."; }
+                catch (System.Runtime.InteropServices.ExternalException) { status.Text = "The clipboard is busy. Select the report text and press Ctrl+C, or try Copy report again."; }
+            };
+            dialog.Closed += (sender, args) => animationDialogs.Remove(window);
+            render(); dialog.Content = body; dialog.Show();
         }
 
         public static void ConfigureProcess(object owner, Process process, string script, IEnumerable<string> args)
@@ -222,7 +341,8 @@ namespace GorillaStudio.NameFolders
                 object item = Activator.CreateInstance(itemType);
                 itemType.GetProperty("Key").SetValue(item, entry.Key, null);
                 itemType.GetProperty("Name").SetValue(item, entry.Name, null);
-                itemType.GetProperty("Note").SetValue(item, entry.Reason + " · " + entry.Clip, null);
+                itemType.GetProperty("Note").SetValue(item, DiscoveryAnimationReport.ShortReason(entry.Kind.ToString(), entry.Reason)
+                    + " · " + entry.Clip + " · Animation details…", null);
                 itemType.GetField("Find").SetValue(item, DiscoveryTauntSearch.BuildText(entry.Name, entry.Names, new[] { "Unavailable" }, entry.Clip));
                 replacement.Add(item);
             }
