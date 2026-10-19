@@ -111,6 +111,7 @@ internal static class Program
         Equal("Changed animation poses invalidate an existing preview motion", false, DiscoveryMotionNpz.MatchesPoses(npz, decoded));
         CaptureTests(root);
         RefreshTests(root);
+        SearchTests();
     }
 
     private static void RefreshTests(string root)
@@ -157,6 +158,7 @@ internal static class Program
         Equal("An unsupported replacement is reported clearly", 1, rejected.Unsupported);
         Equal("An unsupported replacement restores the original animation", originalHash, Hash(target));
         Equal("An unsupported replacement cannot leave a stale preview cache key", "original", ManifestKey(manifest));
+        Equal("An unsupported Discovery replacement with a bundled fallback remains playable", 0, rejected.Unavailable.Count);
 
         File.WriteAllBytes(raw, edited);
         DiscoveryTauntLibrary.Build(app, storage, data);
@@ -165,6 +167,56 @@ internal static class Program
         DiscoveryTauntImport removed = DiscoveryTauntLibrary.Build(app, storage, data);
         Equal("Removing a Discovery definition refreshes its definition count", 0, removed.Definitions);
         Equal("Removing a Discovery definition clears its stale animation override", originalHash, Hash(target));
+
+        File.Delete(raw);
+        byte[] newMissing = CamTable(); Write(newMissing, 136, 60000u); Write(newMissing, 140, 2u);
+        File.WriteAllBytes(table, newMissing);
+        DiscoveryTauntImport missing = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("A new definition with no motion stays in the searchable unavailable catalog", 1, missing.Unavailable.Count);
+        var unavailable = missing.Unavailable.Single();
+        Equal("Unavailable definitions preserve their complete variant identity", "60000a002", unavailable.Clip);
+        Equal("Missing body clips have an explicit missing-animation reason", DiscoveryTauntUnavailableKind.MissingAnimation, unavailable.Kind);
+        Equal("Unavailable keys are reserved for the UI", "discovery_unavailable_60000a002", unavailable.Key);
+        Equal("Unavailable records do not become renderable engine entries", 1, ManifestCount(manifest));
+        string unchanged = Hash(manifest);
+        byte[] renamed = (byte[])newMissing.Clone();
+        byte[] renamedText = System.Text.Encoding.UTF8.GetBytes("New Missing"); Write(renamed, 160, (uint)renamedText.Length);
+        Array.Clear(renamed, 164, 44); Array.Copy(renamedText, 0, renamed, 164, renamedText.Length); File.WriteAllBytes(table, renamed);
+        DiscoveryTauntImport renamedImport = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("Refreshing rereads a renamed missing definition", "New Missing", renamedImport.Unavailable.Single().Name);
+        Equal("UI-only missing name updates leave the playable manifest unchanged", unchanged, Hash(manifest));
+        byte[] unsupportedMissing = Motion("60000a002", 30); Write(unsupportedMissing, 0x60, 1u); File.WriteAllBytes(raw, unsupportedMissing);
+        DiscoveryTauntImport unsupportedImport = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("An unsupported new motion stays searchable with an explicit format reason", DiscoveryTauntUnavailableKind.UnsupportedFormat, unsupportedImport.Unavailable.Single().Kind);
+        Equal("Unsupported UI-only motion also stays out of the engine manifest", 1, ManifestCount(manifest));
+        File.WriteAllBytes(raw, Motion("60000a002", 30));
+        DiscoveryTauntImport nowPlayable = DiscoveryTauntLibrary.Build(app, storage, data);
+        Equal("Adding the actual missing motion removes its unavailable entry", 0, nowPlayable.Unavailable.Count);
+        Equal("A newly available motion becomes a real second renderable entry", 2, ManifestCount(manifest));
+    }
+
+    private static int ManifestCount(string path)
+    {
+        using (JsonDocument document = JsonDocument.Parse(File.ReadAllText(path)))
+            return document.RootElement.GetProperty("taunts").GetArrayLength();
+    }
+
+    private static void SearchTests()
+    {
+        string text = DiscoveryTauntSearch.BuildText("Undisputed 2", new[] { "Some alias" }, new[] { "knee" }, "62541a000");
+        foreach (string query in new[] { "undisputed 2", "Undisputed2", "UNDISPUTED-2", "undisputed_2", "62541", "62541a000", "some alias", "knee" })
+            Equal("Search supports name, separators and exact IDs: " + query, true, DiscoveryTauntSearch.Matches(text, query));
+        Equal("Numeric variant 2 does not match taunt 12", false, DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Undisputed 12", null, null, "62551a000"), "undisputed2"));
+        Equal("A numeric ID substring does not become a different move", false, DiscoveryTauntSearch.Matches(text, "2541"));
+        Equal("Confidences finds the exact Confidence family", true, DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Confidence 1", null, null, "37367a000"), "confidences"));
+        Equal("Fight spirits finds Fighting Spirit", true, DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Fighting Spirit 2", null, null, "37248a000"), "fight spirits"));
+        Equal("Existing alpha substring searching is retained", true, DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Angelo Dawkins 1", null, null, "60001a000"), "kin"));
+        Equal("Jeff Hardy taunts can be searched as a family", true, DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Jeff Hardy 1", null, null, "62247a000"), "Jeff Hardy taunts"));
+        Equal("An empty query keeps every row", true, DiscoveryTauntSearch.Matches(text, "  "));
+        Equal("Unavailable identity is recognized before any engine process", true, DiscoveryTauntSearch.IsUnavailableKey("discovery_unavailable_62247a001"));
+        Equal("A real playable Discovery key is never disabled", false, DiscoveryTauntSearch.IsUnavailableKey("discovery62541a000_abcd"));
+        Equal("The unavailable prefix requires its reserved separator", false, DiscoveryTauntSearch.IsUnavailableKey("discovery_unavailable"));
+        Equal("A missing key is safe", false, DiscoveryTauntSearch.IsUnavailableKey(null));
     }
 
     private static string ManifestKey(string path)
@@ -250,11 +302,33 @@ internal static class Program
         Equal("The actual Discovery CAM table supplies taunt definitions", true, first.Definitions > 1000);
         Equal("Actual missing taunts are imported from their raw motion assets", true, first.Imported > 0);
         Equal("Imported taunts extend the original renderable library", true, first.Available > 894);
+        Equal("All 498 actual unavailable definitions remain searchable", 498, first.Unavailable.Count);
+        Equal("Missing and unsupported formats remain distinct", 455, first.Unavailable.Count(item => item.Kind == DiscoveryTauntUnavailableKind.MissingAnimation));
+        Equal("Unsupported definitions with no bundled fallback stay unavailable", 43, first.Unavailable.Count(item => item.Kind == DiscoveryTauntUnavailableKind.UnsupportedFormat));
+        foreach (string clip in new[] { "37367a000", "37248a000" }.Concat(Enumerable.Range(1, 7).Select(variant => "62247a" + variant.ToString("000"))))
+            Equal("The requested absent Confidence/Fighting Spirit/Jeff Hardy move is searchable with a missing-file reason: " + clip,
+                DiscoveryTauntUnavailableKind.MissingAnimation, first.Unavailable.Single(item => item.Clip == clip).Kind);
         string manifest = Path.Combine(first.Library, "taunts.json");
         string decoded = Path.Combine(first.Root, "data", "gamepack", "decoded");
         using (JsonDocument json = JsonDocument.Parse(File.ReadAllText(manifest)))
         {
             JsonElement[] entries = json.RootElement.GetProperty("taunts").EnumerateArray().ToArray();
+            List<DiscoveryTaunt> allDefinitions = DiscoveryTaunts.Read(table);
+            Equal("Every one of the 1,584 valid Discovery variants has a playable or unavailable search row", true,
+                allDefinitions.All(definition => entries.Any(entry => entry.GetProperty("clip").GetString() == definition.Clip)
+                    || first.Unavailable.Any(item => item.Clip == definition.Clip)));
+            Equal("Every Discovery name and alias remains searchable on its own exact variant", true,
+                allDefinitions.All(definition => definition.Names.All(name =>
+                    entries.Any(entry => entry.GetProperty("clip").GetString() == definition.Clip
+                        && (entry.GetProperty("name").GetString() == name
+                            || entry.TryGetProperty("also", out JsonElement aliases) && aliases.EnumerateArray().Any(alias => alias.GetString() == name)))
+                    || first.Unavailable.Any(item => item.Clip == definition.Clip && item.Names.Contains(name)))));
+            Equal("UI-only unavailable identities never enter the engine manifest", true, entries.All(entry => !DiscoveryTauntSearch.IsUnavailableKey(entry.GetProperty("key").GetString())));
+            foreach (string name in new[] { "Confidence 2", "Fighting Spirit 1", "Fighting Spirit 3", "Fighting Spirit 4", "Jeff Hardy 1", "Chad Gable 1", "Chad Gable 2", "Chad Gable 3" })
+                Equal("Available requested taunt remains a playable engine entry: " + name, true, entries.Any(entry => entry.GetProperty("name").GetString() == name));
+            JsonElement jeff = entries.Single(entry => entry.GetProperty("name").GetString() == "Jeff Hardy 1");
+            Equal("Jeff Hardy 1 cannot claim to play a separate missing Hardy variant", false,
+                DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText("Jeff Hardy 1", jeff.GetProperty("also").EnumerateArray().Select(item => item.GetString()), null, jeff.GetProperty("clip").GetString()), "Jeff Hardy 2"));
             JsonElement undisputed = entries.Single(entry => entry.GetProperty("clip").GetString() == "62541a000");
             Equal("Undisputed 2 is listed by its actual Discovery name", "Undisputed 2", undisputed.GetProperty("name").GetString());
             Equal("Undisputed 2 uses its own versioned motion clip", true, undisputed.GetProperty("key").GetString().StartsWith("discovery62541a000_", StringComparison.Ordinal));
@@ -309,7 +383,10 @@ internal static class Program
         var report = new
         {
             first.Definitions, first.Imported, first.Available, first.Missing, first.Unsupported,
-            first.Warnings, ColdBuildMilliseconds = coldMs, CachedBuildMilliseconds = watch.ElapsedMilliseconds,
+            first.Warnings, UnavailableCount = first.Unavailable.Count,
+            RequestedUnavailable = first.Unavailable.Where(item => item.Name.StartsWith("Confidence", StringComparison.Ordinal) || item.Name.StartsWith("Fighting Spirit", StringComparison.Ordinal) || item.Name.StartsWith("Jeff Hardy", StringComparison.Ordinal))
+                .Select(item => new { item.Id, item.Variant, item.Name, item.Clip, Kind = item.Kind.ToString(), item.Reason, item.Key }),
+            ColdBuildMilliseconds = coldMs, CachedBuildMilliseconds = watch.ElapsedMilliseconds,
             OriginalFilesUnchanged = true, Undisputed2Decoded = true,
             Undisputed2Npz = npzPath, Manifest = manifest, ChecksPassed = passed,
             WindowsGuiExecuted = false, BlenderRenderCompleted = false

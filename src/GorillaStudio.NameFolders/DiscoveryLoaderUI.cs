@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 
 namespace GorillaStudio.NameFolders
@@ -17,7 +18,80 @@ namespace GorillaStudio.NameFolders
         private static string lastDiscoveryRoot;
         private static readonly HashSet<Window> attachedWindows = new HashSet<Window>();
         private static readonly HashSet<Window> rosterWindowsBusy = new HashSet<Window>();
+        private static readonly Dictionary<Window, ModelTauntRefresh> modelTauntRefreshes = new Dictionary<Window, ModelTauntRefresh>();
         private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        private sealed class ModelTauntRefresh
+        {
+            internal readonly DiscoveryTauntRefreshGate Gate = new DiscoveryTauntRefreshGate();
+            internal DispatcherTimer Timer;
+            internal bool Closed;
+        }
+
+        private static void QueueModelDiscoveryTaunts(string alias, string discoveryRoot)
+        {
+            var window = gameModelWindow == null ? null : gameModelWindow.Target as Window;
+            // OpenRosterAsync already refreshes the selected context before its
+            // native folder load. Browse/drop and legacy name-folder loading do
+            // not pass through that method and need this deferred refresh.
+            if (window == null || rosterWindowsBusy.Contains(window)) return;
+            string root = RosterAccess.RootFor(discoveryRoot);
+            if (root == null) return;
+            ModelTauntRefresh state;
+            if (!modelTauntRefreshes.TryGetValue(window, out state))
+            {
+                state = new ModelTauntRefresh();
+                var timer = new DispatcherTimer(DispatcherPriority.Background, window.Dispatcher)
+                {
+                    Interval = TimeSpan.FromMilliseconds(250)
+                };
+                state.Timer = timer;
+                timer.Tick += async (sender, args) => await DrainModelTauntRefreshAsync(window, state);
+                modelTauntRefreshes.Add(window, state);
+                window.Closed += (sender, args) =>
+                {
+                    state.Closed = true;
+                    state.Timer.Stop();
+                    state.Gate.CancelPending();
+                    modelTauntRefreshes.Remove(window);
+                };
+            }
+            state.Gate.Enqueue(root, alias);
+            state.Timer.Start();
+        }
+
+        private static async Task DrainModelTauntRefreshAsync(Window window, ModelTauntRefresh state)
+        {
+            if (state.Closed) { state.Timer.Stop(); return; }
+            if (!window.IsLoaded) return;
+            Type type = window.GetType();
+            string folder = type.GetField("Folder", InstanceMembers)?.GetValue(window) as string;
+            var preparation = type.GetField("PrepTask", InstanceMembers)?.GetValue(window) as Task;
+            bool blocked = pendingRosterSelection != null || rosterWindowsBusy.Contains(window)
+                || (preparation != null && !preparation.IsCompleted);
+            foreach (string name in new[] { "Busy", "GameBusy" })
+            {
+                FieldInfo field = type.GetField(name, InstanceMembers);
+                if (field != null && field.FieldType == typeof(bool) && (bool)field.GetValue(window)) blocked = true;
+            }
+            DiscoveryTauntRefreshRequest request = state.Gate.TryBegin(folder, blocked);
+            if (request == null)
+            {
+                if (!state.Gate.HasWork) state.Timer.Stop();
+                return;
+            }
+            state.Timer.Stop();
+            try
+            {
+                RememberRoot(window, request.Root);
+                await RefreshDiscoveryTauntsAsync(window, request.Root, false);
+            }
+            finally
+            {
+                state.Gate.Complete(request);
+                if (!state.Closed && state.Gate.HasWork) state.Timer.Start();
+            }
+        }
 
         // Called after the original window has initialized; its resources and existing controls are retained.
         public static void Initialize(object instance)
@@ -130,6 +204,15 @@ namespace GorillaStudio.NameFolders
             {
                 var busy = type.GetField(name, InstanceMembers);
                 if (busy != null && busy.GetValue(window) is bool && (bool)busy.GetValue(window)) return;
+            }
+            // An explicit roster/data action owns the next context, including
+            // when its model picker is canceled. Do not let an older Browse
+            // request switch the engine back after this action has refreshed it.
+            ModelTauntRefresh queued;
+            if (modelTauntRefreshes.TryGetValue(window, out queued))
+            {
+                queued.Gate.CancelPending();
+                queued.Timer.Stop();
             }
             rosterWindowsBusy.Add(window);
             bool selectEnabled = select.IsEnabled, buttonEnabled = button.IsEnabled, changeEnabled = change.IsEnabled;

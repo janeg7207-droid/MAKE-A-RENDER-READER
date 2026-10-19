@@ -20,6 +20,12 @@ namespace GorillaStudio.NameFolders
         {
             if (owner == null) throw new ArgumentNullException("owner");
             string[] arguments = args == null ? null : args.ToArray();
+            if (arguments != null && arguments.Any(DiscoveryTauntSearch.IsUnavailableKey))
+            {
+                string message = "This taunt has no playable animation. Check its search result for the missing file or unsupported format.";
+                if (onLine != null) onLine(message);
+                return new ValueTuple<int, List<string>>(1, new List<string> { message });
+            }
             SelectAttireArguments(owner, script, ref arguments);
             bool preview = PreviewCache.IsPreviewRequest(script, arguments);
             bool fast = preview ? FastPreviewEnabled : FastRenderEnabled;

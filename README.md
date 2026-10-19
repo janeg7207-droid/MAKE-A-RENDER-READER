@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.4**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.6.5**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -39,7 +39,9 @@ An attire change clears the previous preview/install result and queues preparati
 
 Choose the taunt and your hair, gear, ending and screen settings, then open **Batch MAKE…**. Search/select the wrestlers and click **MAKE selected** once. Jobs render one at a time with fast rendering always on. Missing or ambiguous models are reported; select their model once in the normal roster before retrying. Each wrestler uses its default attire, with the current wrestler's explicit attire retained if included.
 
-**Stop after current** finishes the active wrestler and keeps completed files. Each job has its own output folder, and `batch-results.json` records results and skipped models. **Use selected result** restores a completed file for installation without rendering it again. **Install completed** installs the completed group with the game closed, keeps backups and runs game setup once. Bake in Discovery if setup reports changes, then restart WWE.
+Completed `.gmr` files are saved directly in your usual configured **Output folder**, which defaults to `Documents\Gorilla Studio\Renders`. Existing files are kept; another render with the same filename receives a unique name. **Open output folder** opens that same normal destination. Each job retains its working files and installation picture map separately under `%LOCALAPPDATA%/GorillaStudio/NameFolders/batches`; `batch-results.json` records the published file and its working source.
+
+**Stop after current** finishes the active wrestler and keeps completed files. **Use selected result** restores a completed file for installation without rendering it again. **Install completed** installs the completed group with the game closed, keeps backups and runs game setup once. Bake in Discovery if setup reports changes, then restart WWE.
 
 ## Roster pictures and character loading
 
@@ -79,9 +81,13 @@ Keep the **entire extracted Discovery data folder together**, including MoveData
 
 The uploaded data contains **1,584 named taunt variants**. It adds **194 playable motions**, for **1,088 available taunts** with the original library retained. This includes **Undisputed 2**, animation `62541a000`: 281 frames at 60 fps, about 4.68 seconds. The original library had excluded it through a pose-screening heuristic. Variations such as LA Parka 1, 2 and 3 keep their distinct animation files and renderer keys.
 
+**Every named Discovery taunt now stays in the search list.** Search accepts names, aliases and exact animation IDs, as well as `confidences`, `fight spirits` and `Undisputed2`. Numeric variants remain distinct: searching Jeff Hardy 2 cannot select Jeff Hardy 1 or 12. A missing or unsupported animation appears as a disabled row with its reason and clip ID; it does not vanish from search or become a broken render entry. The list shows how many matching entries are unavailable.
+
+Taunts refresh after **Browse folder**, drag-and-drop and roster selection. A folder load waits for model preparation or active rendering before refreshing the latest selected Discovery folder. Adding a missing supported animation and loading that data again turns its unavailable result into a playable entry.
+
 Select your wrestler, search for **Undisputed 2**, then click **Preview**. The first successful Preview also supplies that taunt's small browser preview using the actual rendered images. Later browsing reuses it, without another render. The selected wrestler's main Preview uses their loaded model and attire. Changed motions receive new cache keys so old animation or preview files cannot silently replace current Discovery data.
 
-The supplied files lack matching body motion assets for **455 variants**. **45** more use older additional channel sections that this experimental decoder does not yet support. These entries are reported rather than added as playable animations; existing bundled versions remain available where present. The importer never substitutes another taunt. Discovery setup reports available, missing and unsupported counts. It rereads the current folder when selecting the roster, so newly added supported animations are picked up.
+The supplied files lack matching body motion assets for **455 variants**. **45** more use older additional channel sections that this experimental decoder does not yet support. Existing bundled versions remain playable where present; **498** definitions have no playable fallback and stay visible as unavailable. For the requested families, Confidence 2, Fighting Spirit 1/3/4 and Jeff Hardy 1 use bundled motion. Confidence 1, Fighting Spirit 2 and Jeff Hardy 2–8 have no matching motion in the uploaded files or the bundled decoded library. Their distinct names and variants remain searchable. The importer never substitutes another taunt. Discovery setup reports available, missing and unsupported counts and rereads current files when loading the roster or a character folder.
 
 Generated animation data, working captures and previews live in a writable folder under `%LOCALAPPDATA%/GorillaStudio/NameFolders`, alongside the preview cache. The original Discovery files and application assets remain intact. Unchanged refreshes reuse decoded motion and keep the selected taunt.
 
@@ -123,7 +129,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **2,114 portable checks pass** across 34 suites, including current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
+- **2,237 portable checks pass** across 36 suites, including complete named-taunt search coverage, folder-load refresh queues, batch output publication, current Discovery matchup references, exact project lookup, new and changed arena records, read-only checks, alternate attire discovery/preparation queues, bulk planning and installation, archive reads, DDS/BC7 decoding, match-card setup, logical IDs, model loading, preview caching and render settings. Detailed counts are included in TEST_RESULTS.json. Binding 1,457 profiles against 5,000 indexed model folders takes about 20 ms in the build environment; this is separate from rendering performance.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
@@ -161,6 +167,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/DiscoveryTauntsTests -c Release -- /path/to/discovery_data/MoveData/CAMMoveData.jsfb
     dotnet run --project tests/DiscoveryMotionTests -c Release
     dotnet run --project tests/DiscoveryTauntLibraryTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data /path/to/disposable-import-output
+    dotnet run --project tests/DiscoveryTauntRefreshTests -c Release
     dotnet run --project tests/DiscoveryRenderLinksTests -c Release -- /path/to/discovery_data/Roster/CharProfileTable.jsfb
     dotnet run --project tests/DiscoveryRenderImagesTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/DiscoveryRenderOverlayTests -c Release -- /path/to/discovery_data/Roster/CharProfileTable.jsfb /path/to/new-image-fixture
@@ -179,6 +186,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/AlternateAttireTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/BatchRenderPlanTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/BatchRenderInstallerTests -c Release
+    dotnet run --project tests/BatchRenderOutputTests -c Release
     python tests/validate_matchcard_layouts.py --help
     python tests/validate_alternate_attires.py --help
     python tests/validate_render_speed.py --help

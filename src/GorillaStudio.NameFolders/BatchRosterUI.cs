@@ -105,11 +105,12 @@ namespace GorillaStudio.NameFolders
             Grid.SetRow(statusScroll, 4); grid.Children.Add(statusScroll);
             var actions = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var open = new Button { Content = "Open output folder", IsEnabled = false, Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 7, 0) };
+            var details = new Button { Content = "Batch details", IsEnabled = false, Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 7, 0) };
             var installAll = new Button { Content = "Install completed", IsEnabled = false, Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 7, 0) };
             var use = new Button { Content = "Use selected result", IsEnabled = false, Padding = new Thickness(9, 6, 9, 6), Margin = new Thickness(0, 0, 7, 0) };
             var start = new Button { Content = "MAKE selected", IsEnabled = false, Padding = new Thickness(12, 6, 12, 6), Margin = new Thickness(0, 0, 7, 0) };
             var stop = new Button { Content = "Close", Padding = new Thickness(9, 6, 9, 6) };
-            actions.Children.Add(open); actions.Children.Add(installAll); actions.Children.Add(use); actions.Children.Add(start); actions.Children.Add(stop);
+            actions.Children.Add(open); actions.Children.Add(details); actions.Children.Add(installAll); actions.Children.Add(use); actions.Children.Add(start); actions.Children.Add(stop);
             Grid.SetRow(actions, 5); grid.Children.Add(actions);
             bool running = false, cancel = false, loaded = false, showingResults = false;
             var rows = new List<BatchRosterRow>();
@@ -117,6 +118,7 @@ namespace GorillaStudio.NameFolders
             var completed = new List<BatchRenderJob>();
             var allJobs = new List<BatchRenderJob>();
             string table = null, runDirectory = null;
+            string normalOutputDirectory = type.GetField("Output", InstanceMembers)?.GetValue(owner) as string;
             Action refresh = () =>
             {
                 if (showingResults) return;
@@ -138,7 +140,8 @@ namespace GorillaStudio.NameFolders
             clear.Click += (sender, args) => { foreach (var row in rows) row.Selected = false; refresh(); };
             list.SelectionChanged += (sender, args) => use.IsEnabled = !running && list.SelectedItem is ListBoxItem item && item.Tag is BatchRenderJob job && completed.Contains(job);
             stop.Click += (sender, args) => { if (running) { cancel = true; stop.IsEnabled = false; status.Text = "Stopping after the current wrestler finishes. Completed files are kept."; } else dialog.Close(); };
-            open.Click += (sender, args) => { if (Directory.Exists(runDirectory)) Process.Start(new ProcessStartInfo { FileName = runDirectory, UseShellExecute = true }); };
+            open.Click += (sender, args) => { if (Directory.Exists(normalOutputDirectory)) Process.Start(new ProcessStartInfo { FileName = normalOutputDirectory, UseShellExecute = true }); };
+            details.Click += (sender, args) => { if (Directory.Exists(runDirectory)) Process.Start(new ProcessStartInfo { FileName = runDirectory, UseShellExecute = true }); };
             installAll.Click += async (sender, args) =>
             {
                 if (running || BatchNativeBusy(owner) || completed.Count == 0 || !(bool)unlocked.Invoke(owner, null)) return;
@@ -190,7 +193,7 @@ namespace GorillaStudio.NameFolders
                     if (install != null) install.IsEnabled = type.GetField("Game", InstanceMembers)?.GetValue(owner) is string game && Directory.Exists(game);
                     var resultInfo = type.GetField("ResultInfo", InstanceMembers)?.GetValue(owner) as TextBlock;
                     if (resultInfo != null) resultInfo.Text = job.Entry.Name + " · wrestler " + job.Entry.Id.ToString(CultureInfo.InvariantCulture)
-                        + "\nCompleted batch render: " + Path.GetFileName(job.RenderPath) + "\nReady to install without rendering again.";
+                        + "\nCompleted batch render: " + (job.PublishedRenderPath ?? job.RenderPath) + "\nReady to install without rendering again.";
                     SetModelStatus(owner, "Batch result ready: " + job.Entry.Name + ". Use Install into the game.");
                     status.Text = "Loaded the completed result for " + job.Entry.Name + ". Close this window, then press Install into the game.";
                 }
@@ -211,6 +214,7 @@ namespace GorillaStudio.NameFolders
                 foreach (Window other in owned.Keys) other.IsEnabled = false;
                 var output = type.GetField("Output", InstanceMembers);
                 string previousOutput = output?.GetValue(owner) as string;
+                normalOutputDirectory = previousOutput;
                 string previousFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
                 string previousAttire = SelectedAlternateAttire(owner, previousFolder);
                 var busy = type.GetField("Busy", InstanceMembers);
@@ -232,7 +236,7 @@ namespace GorillaStudio.NameFolders
                     var plan = await Task.Run(() => BatchRenderPlan.Create(chosen, inventory, table));
                     if (plan.Jobs.Count == 0) { status.Text = string.Join("\n", plan.Skipped.Take(8)); return; }
                     if (output == null || string.IsNullOrWhiteSpace(previousOutput)) throw new InvalidOperationException("The original render output folder is unavailable.");
-                    runDirectory = Path.Combine(previousOutput, "Batch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+                    runDirectory = Path.Combine(StorageDirectory, "batches", "Batch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
                     Directory.CreateDirectory(runDirectory);
                     allJobs.AddRange(plan.Jobs);
                     for (int index = 0; index < plan.Jobs.Count; index++)
@@ -269,24 +273,34 @@ namespace GorillaStudio.NameFolders
                             string reason;
                             if (!BatchRenderPlan.VerifyCompleted(renderPath, job.Entry.Id, job.OutputDirectory, out reason)) throw new InvalidDataException(reason);
                             job.RenderPath = renderPath; job.Status = "Complete"; completed.Add(job);
+                            try
+                            {
+                                status.Text = currentLabel + "\nSaving the completed file to your usual output folder…";
+                                await Task.Run(() => BatchRenderPlan.PublishCompleted(job, normalOutputDirectory));
+                                var resultInfo = type.GetField("ResultInfo", InstanceMembers)?.GetValue(owner) as TextBlock;
+                                if (resultInfo != null) resultInfo.Text += "\nSaved to: " + job.PublishedRenderPath;
+                            }
+                            catch (Exception error) { job.Status = "Complete; output copy failed: " + BatchError(error).Message; }
                         }
                         catch (Exception error) { timer.Stop(); job.Status = "Failed: " + BatchError(error).Message; }
                         finally
                         {
                             pendingRosterSelection = null; preparedForLoad = null;
                             if (busy != null) busy.SetValue(owner, false);
-                            WriteBatchManifest(runDirectory, tauntName, tauntKey, currentArgs, allJobs, plan.Skipped, cancel);
+                            WriteBatchManifest(runDirectory, normalOutputDirectory, tauntName, tauntKey, currentArgs, allJobs, plan.Skipped, cancel);
                         }
                     }
                     foreach (BatchRenderJob job in plan.Jobs.Where(job => job.Status == "Ready" || job.Status == "Load from installed game")) job.Status = "Not started";
-                    WriteBatchManifest(runDirectory, tauntName, tauntKey, currentArgs, allJobs, plan.Skipped, cancel);
+                    WriteBatchManifest(runDirectory, normalOutputDirectory, tauntName, tauntKey, currentArgs, allJobs, plan.Skipped, cancel);
                     showingResults = true; list.Items.Clear(); list.IsEnabled = true;
                     foreach (BatchRenderJob job in allJobs)
                         list.Items.Add(new ListBoxItem { Content = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + job.Entry.Name + " · " + job.Status, Tag = job, Foreground = Brushes.White });
                     foreach (string skipped in plan.Skipped) list.Items.Add(new ListBoxItem { Content = "Skipped · " + skipped, Foreground = Brushes.LightGray });
                     status.Text = completed.Count.ToString(CultureInfo.InvariantCulture) + " completed · " + allJobs.Count(job => job.Status.StartsWith("Failed", StringComparison.Ordinal)).ToString(CultureInfo.InvariantCulture)
                         + " failed · " + plan.Skipped.Count.ToString(CultureInfo.InvariantCulture) + " skipped" + (cancel ? " · stopped after current wrestler" : "")
-                        + ".\nOpen the output folder for the files and batch-results.json. Use a completed result to install it without rendering again.";
+                        + ".\n" + completed.Count(job => job.PublishedRenderPath != null).ToString(CultureInfo.InvariantCulture) + " saved to: " + normalOutputDirectory
+                        + (completed.Any(job => job.PublishedRenderPath == null) ? "\nSome output copies failed; their completed workspace files are kept and can still be installed." : "")
+                        + "\nOpen output folder for your GMR files. Batch details opens the manifest and separate workspaces.";
                 }
                 catch (Exception error) { status.Text = "Batch stopped: " + BatchError(error).Message; }
                 finally
@@ -298,7 +312,8 @@ namespace GorillaStudio.NameFolders
                     SetPerformanceBusy(owner, false);
                     if (ownerContent != null) ownerContent.IsEnabled = ownerEnabled;
                     foreach (var other in owned) if (other.Key.IsLoaded) other.Key.IsEnabled = other.Value;
-                    open.IsEnabled = Directory.Exists(runDirectory);
+                    open.IsEnabled = Directory.Exists(normalOutputDirectory);
+                    details.IsEnabled = Directory.Exists(runDirectory);
                     installAll.IsEnabled = completed.Count > 0;
                     if (!showingResults) { searchRow.IsEnabled = true; list.IsEnabled = true; refresh(); }
                     if (allJobs.Count > 0)
@@ -390,16 +405,16 @@ namespace GorillaStudio.NameFolders
             finally { preparedForLoad = null; pendingRosterSelection = null; if (busy != null) busy.SetValue(owner, false); }
         }
 
-        private static void WriteBatchManifest(string directory, string taunt, string key, IEnumerable<string> arguments,
+        private static void WriteBatchManifest(string directory, string outputDirectory, string taunt, string key, IEnumerable<string> arguments,
             IEnumerable<BatchRenderJob> jobs, IEnumerable<string> skipped, bool stopped)
         {
             string temporary = Path.Combine(directory, ".batch-results-" + Guid.NewGuid().ToString("N") + ".tmp");
             try
             {
-                var document = new { version = 1, createdUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), taunt, tauntKey = key,
+                var document = new { version = 2, createdUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), outputDirectory, workspaceDirectory = directory, taunt, tauntKey = key,
                     settings = arguments?.Skip(3).Where(argument => argument != null && !argument.StartsWith("slot=", StringComparison.Ordinal)).ToArray(),
                     stopped, jobs = jobs.Select(job => new { id = job.Entry.Id, name = job.Entry.Name, model = job.Entry.Folder,
-                        attire = job.AttireRelativePath, job.Status, outputDirectory = job.OutputDirectory, gmr = job.RenderPath }).ToArray(), skipped = skipped.ToArray() };
+                        attire = job.AttireRelativePath, job.Status, workspaceDirectory = job.OutputDirectory, gmr = job.RenderPath, publishedGmr = job.PublishedRenderPath }).ToArray(), skipped = skipped.ToArray() };
                 File.WriteAllText(temporary, new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.Serialize(document), new UTF8Encoding(false));
                 string destination = Path.Combine(directory, "batch-results.json");
                 if (File.Exists(destination)) File.Replace(temporary, destination, null); else File.Move(temporary, destination);

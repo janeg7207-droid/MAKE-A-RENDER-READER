@@ -7,10 +7,13 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -28,6 +31,7 @@ namespace GorillaStudio.NameFolders
         private static readonly SemaphoreSlim RefreshLock = new SemaphoreSlim(1, 1);
         private static readonly HashSet<Window> hooked = new HashSet<Window>();
         private static readonly Dictionary<Window, string> applied = new Dictionary<Window, string>();
+        private static readonly HashSet<Window> searchHooked = new HashSet<Window>();
 
         public static async Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot)
         {
@@ -38,8 +42,9 @@ namespace GorillaStudio.NameFolders
                     AppDomain.CurrentDomain.BaseDirectory, FolderBridge.StorageDirectory, discoveryRoot));
                 var window = owner as Window;
                 if (window == null) throw new ArgumentException("Choose an open Gorilla Studio window.", nameof(owner));
-                if (window.Dispatcher.CheckAccess()) Apply(window, result);
-                else window.Dispatcher.Invoke(new Action(() => Apply(window, result)));
+                if (window.Dispatcher.CheckAccess()) { if (window.IsLoaded) Apply(window, result); }
+                else if (!window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
+                    window.Dispatcher.Invoke(new Action(() => { if (window.IsLoaded) Apply(window, result); }));
                 return result;
             }
             finally { RefreshLock.Release(); }
@@ -47,6 +52,8 @@ namespace GorillaStudio.NameFolders
 
         public static void ConfigureProcess(object owner, Process process, string script, IEnumerable<string> args)
         {
+            if (args != null && args.Any(DiscoveryTauntSearch.IsUnavailableKey))
+                throw new InvalidOperationException("This Discovery taunt has no playable animation. Its search result explains which animation is missing or unsupported.");
             string root = FolderBridge.DiscoveryEngineRoot;
             if (process == null || string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(script)) return;
             string name = Path.GetFileNameWithoutExtension(script.Replace('\\', '/'));
@@ -85,11 +92,14 @@ namespace GorillaStudio.NameFolders
                 throw new InvalidOperationException("This Gorilla Studio version does not expose its taunt library.");
             string signature;
             using (var sha = SHA256.Create())
-                signature = (import.Root ?? "") + "\n" + BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(Path.Combine(import.Library, "taunts.json"))));
+                signature = (import.Root ?? "") + "\n" + BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(Path.Combine(import.Library, "taunts.json"))))
+                    + "\n" + BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(string.Join("\n", import.Unavailable.Select(entry =>
+                        entry.Key + "\t" + entry.Name + "\t" + string.Join("|", entry.Names) + "\t" + entry.Reason)))));
             string previous;
             if (applied.TryGetValue(window, out previous) && previous == signature &&
                 string.Equals(FolderBridge.DiscoveryEngineRoot, import.Root, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(library.GetValue(window) as string, import.Library, StringComparison.OrdinalIgnoreCase)) return;
+            AttachTauntSearch(window, list);
             Type itemType = allField.FieldType.GetGenericArguments()[0];
             object selected = list.SelectedItem;
             string key = selected == null ? null : Convert.ToString(itemType.GetProperty("Key").GetValue(selected, null));
@@ -107,12 +117,22 @@ namespace GorillaStudio.NameFolders
                 itemType.GetProperty("Name").SetValue(item, name, null);
                 itemType.GetProperty("Note").SetValue(item, note, null);
                 itemType.GetField("Seconds").SetValue(item, seconds);
-                itemType.GetField("Find").SetValue(item, (name + " " + string.Join(" ", aliases) + " " + string.Join(" ", tags)).ToLowerInvariant());
+                itemType.GetField("Find").SetValue(item, DiscoveryTauntSearch.BuildText(name, aliases, tags, Text(entry, "clip")));
                 string preview = Text(entry, "preview");
                 itemType.GetField("PreviewPath").SetValue(item, string.IsNullOrEmpty(preview) ? null :
                     Path.Combine(import.Library, preview.Replace('/', Path.DirectorySeparatorChar)));
                 replacement.Add(item);
             }
+            foreach (DiscoveryUnavailableTaunt entry in import.Unavailable)
+            {
+                object item = Activator.CreateInstance(itemType);
+                itemType.GetProperty("Key").SetValue(item, entry.Key, null);
+                itemType.GetProperty("Name").SetValue(item, entry.Name, null);
+                itemType.GetProperty("Note").SetValue(item, entry.Reason + " · " + entry.Clip, null);
+                itemType.GetField("Find").SetValue(item, DiscoveryTauntSearch.BuildText(entry.Name, entry.Names, new[] { "Unavailable" }, entry.Clip));
+                replacement.Add(item);
+            }
+            replacement = replacement.OrderBy(item => Convert.ToString(itemType.GetProperty("Name").GetValue(item, null)), StringComparer.OrdinalIgnoreCase).ToList();
             // Complete the new list before switching the engine's data root.
             FolderBridge.DiscoveryEngineRoot = import.Root;
             library.SetValue(window, import.Library);
@@ -121,22 +141,65 @@ namespace GorillaStudio.NameFolders
             all.Clear();
             foreach (object item in replacement) all.Add(item);
             list.ItemsSource = all;
-            MethodInfo search = type.GetMethod("OnSearch", Members);
-            if (search != null) search.Invoke(window, new object[] { null, null });
-            else
-            {
-                var count = Field<TextBlock>(window, "TauntCount");
-                if (count != null) count.Text = all.Count.ToString(CultureInfo.InvariantCulture) + " taunts";
-            }
+            ApplyTauntSearch(window);
             if (key != null)
                 list.SelectedItem = replacement.FirstOrDefault(item => string.Equals(
                     Convert.ToString(itemType.GetProperty("Key").GetValue(item, null)), key, StringComparison.Ordinal));
             if (hooked.Add(window))
             {
                 list.SelectionChanged += (sender, args) => ShowPreviewHint(window);
-                window.Closed += (sender, args) => { hooked.Remove(window); applied.Remove(window); };
+                window.Closed += (sender, args) => { hooked.Remove(window); applied.Remove(window); searchHooked.Remove(window); };
             }
             ShowPreviewHint(window);
+        }
+
+        private sealed class UnavailableTauntConverter : IValueConverter
+        {
+            public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+            { return DiscoveryTauntSearch.IsUnavailableKey(value as string); }
+            public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+            { throw new NotSupportedException(); }
+        }
+
+        private static void AttachTauntSearch(Window window, ListBox list)
+        {
+            if (!searchHooked.Add(window)) return;
+            var search = Field<TextBox>(window, "SearchBox");
+            MethodInfo original = window.GetType().GetMethod("OnSearch", Members);
+            if (search != null)
+            {
+                if (original != null)
+                    search.RemoveHandler(TextBoxBase.TextChangedEvent,
+                        (TextChangedEventHandler)Delegate.CreateDelegate(typeof(TextChangedEventHandler), window, original));
+                search.TextChanged += (sender, args) => ApplyTauntSearch(window);
+                search.ToolTip = "Search taunt names, variants or animation IDs. Unavailable animations show their reason.";
+            }
+            var style = new Style(typeof(ListBoxItem), list.ItemContainerStyle);
+            var unavailable = new DataTrigger { Binding = new Binding("Key") { Converter = new UnavailableTauntConverter() }, Value = true };
+            unavailable.Setters.Add(new Setter(UIElement.IsEnabledProperty, false));
+            unavailable.Setters.Add(new Setter(UIElement.FocusableProperty, false));
+            unavailable.Setters.Add(new Setter(UIElement.OpacityProperty, 0.65));
+            unavailable.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding("Note")));
+            unavailable.Setters.Add(new Setter(ToolTipService.ShowOnDisabledProperty, true));
+            style.Triggers.Add(unavailable); list.ItemContainerStyle = style;
+        }
+
+        private static void ApplyTauntSearch(Window window)
+        {
+            var all = window.GetType().GetField("AllTaunts", Members)?.GetValue(window) as IList;
+            var list = Field<ListBox>(window, "TauntList");
+            if (all == null || list == null) return;
+            string query = Field<TextBox>(window, "SearchBox")?.Text ?? "";
+            var rows = all.Cast<object>().Where(item => DiscoveryTauntSearch.Matches(
+                Convert.ToString(item.GetType().GetField("Find").GetValue(item), CultureInfo.InvariantCulture), query)).ToList();
+            list.ItemsSource = rows;
+            var count = Field<TextBlock>(window, "TauntCount");
+            int unavailable = rows.Count(item => DiscoveryTauntSearch.IsUnavailableKey(Convert.ToString(item.GetType().GetProperty("Key").GetValue(item, null))));
+            if (count != null) count.Text = (rows.Count == all.Count ? all.Count.ToString(CultureInfo.InvariantCulture)
+                : rows.Count.ToString(CultureInfo.InvariantCulture) + " of " + all.Count.ToString(CultureInfo.InvariantCulture))
+                + " taunts" + (unavailable > 0 ? " · " + unavailable.ToString(CultureInfo.InvariantCulture) + " unavailable" : "");
+            var hint = Field<TextBlock>(window, "SearchHint");
+            if (hint != null) hint.Visibility = string.IsNullOrWhiteSpace(query) ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private static void ShowPreviewHint(Window window)
@@ -145,6 +208,19 @@ namespace GorillaStudio.NameFolders
             object selected = list == null ? null : list.SelectedItem;
             if (selected == null) return;
             string key = Convert.ToString(selected.GetType().GetProperty("Key").GetValue(selected, null));
+            if (DiscoveryTauntSearch.IsUnavailableKey(key))
+            {
+                Field<DispatcherTimer>(window, "PreviewTimer")?.Stop();
+                var image = Field<Image>(window, "TauntPreview");
+                if (image != null) image.Source = null;
+                var unavailable = Field<TextBlock>(window, "PreviewMaking");
+                if (unavailable != null)
+                {
+                    unavailable.Text = Convert.ToString(selected.GetType().GetProperty("Note").GetValue(selected, null));
+                    unavailable.Visibility = Visibility.Visible;
+                }
+                return;
+            }
             if (!key.StartsWith("discovery", StringComparison.Ordinal) && !key.Contains("_discovery_")) return;
             if (ShowDiscoveryPreview(window, key)) return;
             var making = Field<TextBlock>(window, "PreviewMaking");

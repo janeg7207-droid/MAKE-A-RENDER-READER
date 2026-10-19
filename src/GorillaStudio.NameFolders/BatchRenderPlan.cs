@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace GorillaStudio.NameFolders
 {
@@ -14,6 +18,7 @@ namespace GorillaStudio.NameFolders
         public string Status { get; internal set; }
         public string OutputDirectory { get; internal set; }
         public string RenderPath { get; internal set; }
+        public string PublishedRenderPath { get; internal set; }
         public string AttireRelativePath { get; internal set; }
     }
 
@@ -87,6 +92,114 @@ namespace GorillaStudio.NameFolders
         {
             return new RosterEntry { Id = entry.Id, Name = entry.Name, Folder = entry.Folder, RosterTable = entry.RosterTable,
                 SourceId = entry.SourceId, IsMod = entry.IsMod, Source = entry.Source, StockFolder = entry.StockFolder };
+        }
+
+        /// <summary>Copies a verified job into the ordinary output folder without replacing an existing render.</summary>
+        public static string PublishCompleted(BatchRenderJob job, string outputDirectory)
+        {
+            return PublishCompleted(job, outputDirectory, CancellationToken.None);
+        }
+
+        public static string PublishCompleted(BatchRenderJob job, string outputDirectory, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            if (job == null || job.Entry == null) throw new ArgumentException("A completed batch job is required.", "job");
+            string reason;
+            if (!VerifyCompleted(job.RenderPath, job.Entry.Id, job.OutputDirectory, out reason)) throw new InvalidDataException(reason);
+            if (string.IsNullOrWhiteSpace(outputDirectory)) throw new ArgumentException("The ordinary render output folder is unavailable.", "outputDirectory");
+            string root = Path.GetFullPath(outputDirectory);
+            string source = Path.GetFullPath(job.RenderPath), name = Path.GetFileName(source);
+            string prefix = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "_";
+            if (!name.StartsWith(prefix, StringComparison.Ordinal) || !string.Equals(Path.GetExtension(name), ".gmr", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The completed render filename does not match its logical wrestler ID.");
+            string temporary = null;
+            try
+            {
+                Directory.CreateDirectory(root);
+                using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var sha = SHA256.Create())
+                {
+                    byte[] sourceHash = sha.ComputeHash(input);
+                    cancellation.ThrowIfCancellationRequested();
+                    if (!string.IsNullOrWhiteSpace(job.PublishedRenderPath)
+                        && SameOutputFolder(Path.GetDirectoryName(Path.GetFullPath(job.PublishedRenderPath)), root)
+                        && File.Exists(job.PublishedRenderPath) && FileHash(job.PublishedRenderPath).SequenceEqual(sourceHash)
+                        && VerifyCompleted(job.PublishedRenderPath, job.Entry.Id, root, out reason)) return job.PublishedRenderPath;
+                    temporary = Path.Combine(root, ".gorilla-batch-" + Guid.NewGuid().ToString("N") + ".tmp");
+                    input.Position = 0;
+                    using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] buffer = new byte[81920];
+                        int count;
+                        while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
+                        {
+                            cancellation.ThrowIfCancellationRequested();
+                            output.Write(buffer, 0, count);
+                        }
+                        output.Flush(true);
+                    }
+                    input.Position = 0;
+                    if (!sha.ComputeHash(input).SequenceEqual(sourceHash) || !FileHash(temporary).SequenceEqual(sourceHash)
+                        || !VerifyCompleted(temporary, job.Entry.Id, root, out reason))
+                        throw new IOException("The completed render changed while it was being saved. Its workspace files were kept.");
+                    for (int attempt = 0; attempt < 20; attempt++)
+                    {
+                        cancellation.ThrowIfCancellationRequested();
+                        string destination = Path.Combine(root, attempt == 0 ? name : Path.GetFileNameWithoutExtension(name)
+                            + "_batch-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".gmr");
+                        if (File.Exists(destination) || Directory.Exists(destination)) continue;
+                        if (!CommitNewOutput(temporary, destination)) continue;
+                        temporary = null;
+                        job.PublishedRenderPath = destination;
+                        return destination;
+                    }
+                    throw new IOException("A unique output filename could not be created. The completed render remains in its batch workspace.");
+                }
+            }
+            finally
+            {
+                if (temporary != null)
+                    try { File.Delete(temporary); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        private static bool SameOutputFolder(string first, string second)
+        {
+            return string.Equals(first?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                second?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+
+        // File.Move on some Unix runtimes checks existence before rename, allowing
+        // another publisher to win that gap and be replaced. Both native operations
+        // below fail atomically when the destination exists. Staging is in the same
+        // output directory, so Windows redirected/UNC paths need no hard links.
+        private static bool CommitNewOutput(string source, string destination)
+        {
+            if (Path.DirectorySeparatorChar == '\\')
+            {
+                if (MoveNewWindows(source, destination)) return true;
+                int error = Marshal.GetLastWin32Error();
+                if (error == 80 || error == 183) return false;
+                throw new IOException("The completed output could not be saved without replacing an existing file.", new Win32Exception(error));
+            }
+            if (LinkNewUnix(source, destination) == 0) { File.Delete(source); return true; }
+            int unixError = Marshal.GetLastWin32Error();
+            if (unixError == 17) return false;
+            throw new IOException("The completed output could not be saved without replacing an existing file.", new Win32Exception(unixError));
+        }
+
+        [DllImport("kernel32.dll", EntryPoint = "MoveFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool MoveNewWindows(string source, string destination);
+
+        [DllImport("libc", EntryPoint = "link", CharSet = CharSet.Ansi, SetLastError = true)]
+        private static extern int LinkNewUnix(string source, string destination);
+
+        private static byte[] FileHash(string path)
+        {
+            using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (var sha = SHA256.Create()) return sha.ComputeHash(input);
         }
 
         /// <summary>A job is complete only when its isolated output contains a valid GMR for its logical slot.</summary>

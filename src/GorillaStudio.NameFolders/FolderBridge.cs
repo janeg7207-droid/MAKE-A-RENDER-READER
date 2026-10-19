@@ -77,6 +77,7 @@ namespace GorillaStudio.NameFolders
                     RememberRenderTable(alias, picker.SelectedEntry.RosterTable);
                     RememberPreparedRender(alias, plan, picker.SelectedEntry, pictures);
                     RegisterSelection(alias, picker.SelectedEntry);
+                    QueueModelDiscoveryTaunts(alias, plan.DataRoot);
                     return alias;
                 }
         }

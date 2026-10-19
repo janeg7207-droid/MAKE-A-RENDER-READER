@@ -28,11 +28,29 @@ internal static class Program
             await JunctionAndOutputIsolation();
             await DiscoveryOverlayInvalidation();
             await CapturedTauntThumbnails();
+            await UnavailableTauntDoesNotStart();
             Console.WriteLine(checks + " preview process bridge checks passed.");
             return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static async Task UnavailableTauntDoesNotStart()
+    {
+        FakeOwner owner = Create("unavailable");
+        foreach (string mode in new[] { "quick=1", "end=loop", "prepare=taunt" })
+        {
+            var callbacks = new List<string>();
+            var result = await FolderBridge.RunPreviewProcess(owner, owner.Script,
+                new[] { owner.Folder, "discovery_unavailable_62247a001", owner.Output, mode }, callbacks.Add,
+                process => { throw new Exception("Unavailable motion must not start a native process"); });
+            Equal(1, result.Item1);
+            Equal(0, owner.Calls);
+            Equal(true, result.Item2.Single().Contains("no playable animation"));
+            Equal(result.Item2.Single(), callbacks.Single());
+            Equal(false, owner.Busy);
+        }
     }
 
     private static async Task CacheAndCallbacks()

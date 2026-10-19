@@ -7,6 +7,7 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMotionDecoder.cs" Link="DiscoveryMotionDecoder.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMotionNpz.cs" Link="DiscoveryMotionNpz.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryTauntLibrary.cs" Link="DiscoveryTauntLibrary.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryTauntSearch.cs" Link="DiscoveryTauntSearch.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryTauntPreviewCapture.cs" Link="DiscoveryTauntPreviewCapture.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
   </ItemGroup>

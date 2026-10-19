@@ -15,6 +15,21 @@ using System.Web.Script.Serialization;
 
 namespace GorillaStudio.NameFolders
 {
+    public enum DiscoveryTauntUnavailableKind { MissingAnimation, UnsupportedFormat }
+
+    public sealed class DiscoveryUnavailableTaunt
+    {
+        public int Id { get; internal set; }
+        public int Variant { get; internal set; }
+        public string Clip { get; internal set; }
+        public string Name { get; internal set; }
+        public List<string> Names { get; internal set; }
+        public DiscoveryTauntUnavailableKind Kind { get; internal set; }
+        public string Reason { get; internal set; }
+        // UI-only identity: never put this key in the engine taunts.json manifest.
+        public string Key { get { return "discovery_unavailable_" + Clip; } }
+    }
+
     public sealed class DiscoveryTauntImport
     {
         public string Root { get; internal set; }
@@ -25,6 +40,7 @@ namespace GorillaStudio.NameFolders
         public int Missing { get; internal set; }
         public int Unsupported { get; internal set; }
         public List<string> Warnings { get; } = new List<string>();
+        public List<DiscoveryUnavailableTaunt> Unavailable { get; } = new List<DiscoveryUnavailableTaunt>();
         internal List<Dictionary<string, object>> Taunts { get; set; }
     }
 
@@ -91,7 +107,12 @@ namespace GorillaStudio.NameFolders
                 DiscoveryMotionAsset asset = assets.Find(definition.Clip);
                 if (asset == null)
                 {
-                    if (matches == null) result.Missing++;
+                    if (matches == null)
+                    {
+                        result.Missing++;
+                        AddUnavailable(result, definition, DiscoveryTauntUnavailableKind.MissingAnimation,
+                            "Animation file is missing from the loaded Discovery data.");
+                    }
                     else
                     {
                         AddNames(matches, definition);
@@ -176,6 +197,8 @@ namespace GorillaStudio.NameFolders
                         foreach (Dictionary<string, object> item in matches)
                             item["tested_on"] = new[] { "Bundled motion; Discovery version could not be imported" };
                     }
+                    else AddUnavailable(result, definition, DiscoveryTauntUnavailableKind.UnsupportedFormat,
+                        "This Discovery animation format is not supported yet: " + error.Message);
                 }
             }
             foreach (string stamp in Directory.GetFiles(decoded, "*.npz.sha256"))
@@ -197,6 +220,15 @@ namespace GorillaStudio.NameFolders
             result.Taunts = entries;
             result.Available = entries.Count;
             return result;
+        }
+
+        private static void AddUnavailable(DiscoveryTauntImport result, DiscoveryTaunt definition,
+            DiscoveryTauntUnavailableKind kind, string reason)
+        {
+            result.Unavailable.Add(new DiscoveryUnavailableTaunt {
+                Id = definition.Id, Variant = definition.Variant, Clip = definition.Clip,
+                Name = definition.Name, Names = new List<string>(definition.Names), Kind = kind, Reason = reason
+            });
         }
 
         private static void AddNames(IEnumerable<Dictionary<string, object>> items, DiscoveryTaunt definition)
