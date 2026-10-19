@@ -315,6 +315,7 @@ namespace GorillaStudio.NameFolders
         }
         private static void RememberRenderTable(string alias, string table) { State.Commit(); }
         private static void RememberPreparedRender(string alias, CharacterFolderPlan plan, RosterEntry entry, Dictionary<ulong, string> pictures) { State.Commit(); }
+        private static void RememberDirectAttireSource(string alias, string source) { }
         private static void RegisterSelection(string alias, RosterEntry entry) { State.Commit(); State.Registered = entry; }
         private static void QueueModelDiscoveryTaunts(string alias, string root) { State.Commit(); }
         internal static void InvalidateTauntContexts() { State.Invalidations++; State.InvalidationThread = Thread.CurrentThread.ManagedThreadId; }

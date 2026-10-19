@@ -11,6 +11,12 @@ using System.Threading;
 
 namespace GorillaStudio.NameFolders
 {
+    public sealed class BatchAttireSelection
+    {
+        public string RelativePath { get; set; }
+        public string DisplayName { get; set; }
+    }
+
     public sealed class BatchRenderJob
     {
         public RosterEntry Entry { get; internal set; }
@@ -20,6 +26,10 @@ namespace GorillaStudio.NameFolders
         public string RenderPath { get; internal set; }
         public string PublishedRenderPath { get; internal set; }
         public string AttireRelativePath { get; internal set; }
+        public string AttireSourceRelativePath { get; internal set; }
+        public string AttireName { get; internal set; }
+        public bool HasExplicitAttire { get; internal set; }
+        public int VariantIndex { get; internal set; }
     }
 
     /// <summary>Snapshots selected logical slots and resolves models without asking per-job questions.</summary>
@@ -94,6 +104,56 @@ namespace GorillaStudio.NameFolders
                 SourceId = entry.SourceId, IsMod = entry.IsMod, Source = entry.Source, StockFolder = entry.StockFolder };
         }
 
+        public static BatchRenderPlan WithAttires(BatchRenderPlan original, IDictionary<int, List<BatchAttireSelection>> selections)
+        {
+            if (original == null) throw new ArgumentNullException("original");
+            var plan = new BatchRenderPlan(); plan.Skipped.AddRange(original.Skipped);
+            foreach (BatchRenderJob source in original.Jobs)
+            {
+                List<BatchAttireSelection> selected;
+                if (selections == null || !selections.TryGetValue(source.Entry.Id, out selected) || selected == null || selected.Count == 0)
+                {
+                    plan.Jobs.Add(new BatchRenderJob { Entry = Copy(source.Entry), ExtractFromGame = source.ExtractFromGame, Status = source.ExtractFromGame ? "Load from installed game" : "Ready" });
+                    continue;
+                }
+                if (source.ExtractFromGame || !Directory.Exists(source.Entry.Folder))
+                    throw new InvalidOperationException("Load " + source.Entry.Name + " once from the normal roster before choosing its attires.");
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (BatchAttireSelection choice in selected)
+                {
+                    if (choice == null || string.IsNullOrWhiteSpace(choice.RelativePath)) throw new ArgumentException("Choose an actual attire model for " + source.Entry.Name + ".");
+                    string relative = AlternateAttires.Validate(source.Entry.Folder, choice.RelativePath);
+                    if (!seen.Add(relative)) continue;
+                    plan.Jobs.Add(new BatchRenderJob { Entry = Copy(source.Entry), Status = "Ready", HasExplicitAttire = true,
+                        AttireSourceRelativePath = relative, AttireName = string.IsNullOrWhiteSpace(choice.DisplayName) ? relative : choice.DisplayName,
+                        VariantIndex = seen.Count });
+                }
+            }
+            return plan;
+        }
+
+        public static string AliasAttirePath(BatchRenderJob job, bool directModelWrapped)
+        {
+            if (job == null) throw new ArgumentNullException("job");
+            if (!job.HasExplicitAttire) return null;
+            string relative = AlternateAttires.Validate(job.Entry.Folder, job.AttireSourceRelativePath);
+            return directModelWrapped ? "Default_Attire/" + relative : relative;
+        }
+
+        public static string WorkspaceName(BatchRenderJob job)
+        {
+            if (job == null || job.Entry == null) throw new ArgumentException("A wrestler job is required.", "job");
+            return job.Entry.Id.ToString(CultureInfo.InvariantCulture) + (job.HasExplicitAttire
+                ? "_attire" + job.VariantIndex.ToString("00", CultureInfo.InvariantCulture) + "_" + AttireFileLabel(job.AttireName) : "");
+        }
+
+        private static string AttireFileLabel(string text)
+        {
+            string label = new string((text ?? "Attire").Select(character => char.IsLetterOrDigit(character) ? character : '_').ToArray()).Trim('_');
+            if (label.Length == 0) label = "Attire";
+            return label.Substring(0, Math.Min(48, label.Length));
+        }
+
         /// <summary>Copies a verified job into the ordinary output folder without replacing an existing render.</summary>
         public static string PublishCompleted(BatchRenderJob job, string outputDirectory)
         {
@@ -109,6 +169,8 @@ namespace GorillaStudio.NameFolders
             if (string.IsNullOrWhiteSpace(outputDirectory)) throw new ArgumentException("The ordinary render output folder is unavailable.", "outputDirectory");
             string root = Path.GetFullPath(outputDirectory);
             string source = Path.GetFullPath(job.RenderPath), name = Path.GetFileName(source);
+            if (job.HasExplicitAttire) name = Path.GetFileNameWithoutExtension(name) + "_attire" + job.VariantIndex.ToString("00", CultureInfo.InvariantCulture)
+                + "_" + AttireFileLabel(job.AttireName) + ".gmr";
             string prefix = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "_";
             if (!name.StartsWith(prefix, StringComparison.Ordinal) || !string.Equals(Path.GetExtension(name), ".gmr", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("The completed render filename does not match its logical wrestler ID.");

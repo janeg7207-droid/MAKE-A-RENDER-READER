@@ -74,10 +74,8 @@ namespace GorillaStudio.NameFolders
             controls.Timer.Tick += (sender, args) =>
             {
                 string folder = AttireField(window, "Folder") as string;
-                bool busy = AttireBusy(window);
-                controls.Choice.IsEnabled = !busy && !controls.Catalog.IsLoading && controls.Choice.Items.Count > 1;
-                controls.Refresh.IsEnabled = !busy && !controls.Catalog.IsLoading && !string.IsNullOrWhiteSpace(folder);
                 if (!SameAttireFolder(folder, controls.Folder)) FillAttires(window, controls, true);
+                UpdateAttireAvailability(window, controls);
             };
             controls.Timer.Start();
             window.Closed += (sender, args) => {
@@ -89,7 +87,24 @@ namespace GorillaStudio.NameFolders
         internal static void RefreshAlternateAttireSelection(object owner)
         {
             AttireControls controls;
-            if (attireWindows.TryGetValue(owner, out controls)) FillAttires(owner, controls, true);
+            if (!attireWindows.TryGetValue(owner, out controls) || controls.Closed) return;
+            // Called as soon as the selected wrestler finishes loading. Reuse a
+            // catalog that already belongs to this folder; only the explicit ↻
+            // button forces another scan after model files are added or removed.
+            FillAttires(owner, controls, false);
+            UpdateAttireAvailability(owner, controls);
+        }
+
+        internal static void RememberDirectAttireSource(string alias, string source)
+        { AlternateAttires.RememberWrappedSource(alias, source); }
+
+        private static void UpdateAttireAvailability(object owner, AttireControls controls)
+        {
+            string folder = AttireField(owner, "Folder") as string;
+            bool ready = !controls.Closed && !AttireBusy(owner) && !controls.Catalog.IsLoading
+                && !string.IsNullOrWhiteSpace(folder) && SameAttireFolder(folder, controls.Folder);
+            controls.Choice.IsEnabled = ready && controls.Choice.Items.Count > 1;
+            controls.Refresh.IsEnabled = ready;
         }
 
         internal static string SelectedAlternateAttire(object owner, string folder)
@@ -222,8 +237,7 @@ namespace GorillaStudio.NameFolders
             if (result.Error != null)
             {
                 controls.Note.Text = result.Error.Message;
-                controls.Choice.IsEnabled = !AttireBusy(owner) && controls.Choice.Items.Count > 1;
-                controls.Refresh.IsEnabled = !AttireBusy(owner) && !string.IsNullOrWhiteSpace(folder);
+                UpdateAttireAvailability(owner, controls);
                 return;
             }
             controls.Updating = true;
@@ -248,8 +262,7 @@ namespace GorillaStudio.NameFolders
                 else controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires."
                     : models.Count == 0 ? "No extracted attire models in this character folder."
                     : models.Count + (models.Count == 1 ? " model available" : " models available") + " · Refresh after adding one";
-                controls.Choice.IsEnabled = !AttireBusy(owner) && models.Count > 0;
-                controls.Refresh.IsEnabled = !AttireBusy(owner) && !string.IsNullOrWhiteSpace(folder);
+                UpdateAttireAvailability(owner, controls);
             }
             catch (Exception error) when (AttireError(error)) { controls.Note.Text = error.Message; }
             finally { controls.Updating = false; }

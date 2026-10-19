@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,14 +23,28 @@ namespace GorillaStudio.NameFolders
     /// </summary>
     public static class AlternateAttires
     {
+        private static readonly ConcurrentDictionary<string, string> wrappedSources =
+            new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Only the compatibility-alias factory registers these pairs. A direct
+        // source owns its descendants; neighbouring character folders are never
+        // searched or inferred as additional attires.
+        internal static void RememberWrappedSource(string alias, string source)
+        {
+            wrappedSources[CatalogPath(alias)] = CatalogPath(source);
+        }
+
         public static List<AlternateAttire> Read(string characterFolder)
         {
             if (string.IsNullOrWhiteSpace(characterFolder) || !Directory.Exists(characterFolder))
                 return new List<AlternateAttire>();
-            string root = Path.GetFullPath(characterFolder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string root = CatalogPath(characterFolder), source;
+            bool wrapped = wrappedSources.TryGetValue(root, out source);
+            if (wrapped && !Directory.Exists(source)) return new List<AlternateAttire>();
             var models = new List<string>();
             int entries = 0;
-            Scan(root, "", 0, models, ref entries);
+            Scan(wrapped ? source : root, "", 0, models, ref entries);
+            if (wrapped) models = models.Select(path => "Default_Attire/" + path).ToList();
             string nativeDefault = models.Where(path => path.Split('/').Length == 2)
                 .OrderBy(path => DefaultRank(path)).ThenBy(path => AttireRank(path)).ThenBy(path => path, StringComparer.Ordinal)
                 .FirstOrDefault();
@@ -37,6 +52,11 @@ namespace GorillaStudio.NameFolders
                 .ThenBy(path => DefaultRank(path)).ThenBy(path => AttireRank(path)).ThenBy(path => path, StringComparer.Ordinal)
                 .Select(path => new AlternateAttire { RelativePath = path, IsDefault = path == nativeDefault,
                     DisplayName = Display(path) + (path == nativeDefault ? " (default)" : "") }).ToList();
+        }
+
+        private static string CatalogPath(string folder)
+        {
+            return Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
 
         private static void Scan(string root, string relative, int depth, List<string> models, ref int entries)

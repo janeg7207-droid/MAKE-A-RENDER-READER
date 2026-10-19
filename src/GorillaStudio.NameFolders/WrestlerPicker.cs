@@ -25,6 +25,8 @@ namespace GorillaStudio.NameFolders
         private string currentRosterTable;
         private string currentRosterFile;
         private readonly Button refreshData = new Button();
+        private int sortColumn = 1;
+        private bool sortDescending;
         public List<RosterEntry> Entries { get; private set; }
         public RosterEntry SelectedEntry { get; private set; }
         public string SelectedFolder { get; private set; }
@@ -102,6 +104,16 @@ namespace GorillaStudio.NameFolders
             wrestlers.Columns.Add("Wrestler ID", 110);
             wrestlers.Columns.Add("Wrestler name", 300);
             wrestlers.Columns.Add("Model / source", 520);
+            UpdateSortHeaders();
+            wrestlers.ColumnClick += (sender, args) =>
+            {
+                if (modelSelectionBusy || args.Column > 1) return;
+                RosterEntry selected = wrestlers.SelectedItems.Count == 1 ? wrestlers.SelectedItems[0].Tag as RosterEntry : null;
+                if (sortColumn == args.Column) sortDescending = !sortDescending;
+                else { sortColumn = args.Column; sortDescending = false; }
+                UpdateSortHeaders();
+                RefreshList(selected);
+            };
             wrestlers.ShowItemToolTips = true;
             wrestlers.SelectedIndexChanged += (s, e) => UpdateButtons();
             wrestlers.DoubleClick += (s, e) => ConfirmSelection();
@@ -230,7 +242,7 @@ namespace GorillaStudio.NameFolders
             string query = search.Text.Replace('_', ' ').Trim();
             wrestlers.BeginUpdate();
             wrestlers.Items.Clear();
-            foreach (RosterEntry entry in Entries.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ThenBy(e => e.Id))
+            foreach (RosterEntry entry in OrderedEntries())
             {
                 bool hasModel = HasIndexedModel(entry.Folder);
                 if ((filter.SelectedIndex == 3 && entry.Id > 0) || (filter.SelectedIndex != 3 && entry.Id < 1)) continue;
@@ -255,6 +267,29 @@ namespace GorillaStudio.NameFolders
             status.Text = Entries.Count == 0 ? "Load a roster, or enter a wrestler's game ID and name below."
                 : string.Format(CultureInfo.InvariantCulture, "{0} wrestlers · {1} ready locally · {2} shown", Entries.Count(e => e.Id > 0), Entries.Count(e => e.Id > 0 && HasIndexedModel(e.Folder)), wrestlers.Items.Count);
             if (wrestlers.SelectedItems.Count > 0) wrestlers.SelectedItems[0].EnsureVisible();
+        }
+
+        private IEnumerable<RosterEntry> OrderedEntries()
+        {
+            if (sortColumn == 0)
+                return sortDescending ? Entries.OrderByDescending(entry => entry.Id).ThenBy(entry => AlphabeticalName(entry.Name), StringComparer.InvariantCultureIgnoreCase)
+                    : Entries.OrderBy(entry => entry.Id).ThenBy(entry => AlphabeticalName(entry.Name), StringComparer.InvariantCultureIgnoreCase);
+            return sortDescending ? Entries.OrderByDescending(entry => AlphabeticalName(entry.Name), StringComparer.InvariantCultureIgnoreCase).ThenBy(entry => entry.Id)
+                : Entries.OrderBy(entry => AlphabeticalName(entry.Name), StringComparer.InvariantCultureIgnoreCase).ThenBy(entry => entry.Id);
+        }
+
+        private static string AlphabeticalName(string name)
+        {
+            string value = (name ?? "").Replace('_', ' ').Trim();
+            int first = 0;
+            while (first < value.Length && !char.IsLetterOrDigit(value[first])) first++;
+            return value.Substring(first);
+        }
+
+        private void UpdateSortHeaders()
+        {
+            wrestlers.Columns[0].Text = "Wrestler ID" + (sortColumn == 0 ? (sortDescending ? " ▼" : " ▲") : "");
+            wrestlers.Columns[1].Text = "Wrestler name" + (sortColumn == 1 ? (sortDescending ? " ▼" : " ▲") : "");
         }
 
         private void LoadRosterFile(object sender, EventArgs args)

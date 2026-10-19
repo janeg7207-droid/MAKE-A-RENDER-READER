@@ -361,6 +361,7 @@ namespace GorillaStudio.NameFolders
                 foreach (var state in loadingControls) state.Key.IsEnabled = state.Value;
                 pendingRosterSelection = null;
                 rosterWindowsBusy.Remove(window);
+                if (window.IsLoaded) RefreshAlternateAttireSelection(window);
                 QueueSelectedPicture(window);
             }
         }

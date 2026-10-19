@@ -119,6 +119,14 @@ def main() -> None:
               (alias / relative).samefile(direct))
         equal("The compatibility body resolves to the explicitly supplied body", True,
               (alias / "BaseModel" / "baseModel.mcd").samefile(body))
+        nested = direct.parent / "Costumes" / "Red" / "Attire.mcd"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"disposable nested attire-selection fixture")
+        requested = "Default_Attire/Costumes/Red/Attire.mcd"
+        equal("The native engine honors an explicit nested attire through the wrapper",
+              requested, find_attire(str(alias), requested))
+        equal("The explicit nested wrapper attire resolves to its original source", True,
+              (alias / requested).samefile(nested))
 
     actual = []
     characters = discovery / "Characters"

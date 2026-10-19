@@ -192,6 +192,7 @@ namespace GorillaStudio.NameFolders
                 if ((File.GetAttributes(alias) & FileAttributes.ReparsePoint) != 0)
                     throw new IOException("A different model link already occupies this compatibility folder.");
                 DirectoryLinks.EnsureJunction(Path.Combine(alias, "Default_Attire"), plan.SourceFolder);
+                RememberDirectAttireSource(alias, plan.SourceFolder);
                 if (attire.BaseModelFolder != null) DirectoryLinks.EnsureJunction(Path.Combine(alias, "BaseModel"), attire.BaseModelFolder);
             }
             else DirectoryLinks.EnsureJunction(alias, plan.SourceFolder);

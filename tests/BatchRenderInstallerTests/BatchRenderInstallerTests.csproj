@@ -15,6 +15,7 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/RosterModelResolution.cs" Link="RosterModelResolution.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/BatchRenderPlan.cs" Link="BatchRenderPlan.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/BatchRenderInstaller.cs" Link="BatchRenderInstaller.cs" />
   </ItemGroup>
 </Project>

@@ -24,6 +24,7 @@ namespace GorillaStudio.NameFolders
         {
             internal RosterEntry Entry;
             internal bool Selected;
+            internal List<BatchAttireSelection> Attires;
         }
 
         private static void AttachBatchControls(Window owner)
@@ -72,14 +73,14 @@ namespace GorillaStudio.NameFolders
             var currentArgs = build.Invoke(owner, new[] { taunt, (object)false }) as IEnumerable<string>;
             if (currentArgs == null) { SetModelStatus(owner, "Tick Roster selection, Match card, or both before starting a batch."); return; }
 
-            var dialog = new Window { Owner = owner, Title = "Batch MAKE", Width = 820, Height = 690, MinWidth = 600, MinHeight = 470,
+            var dialog = new Window { Owner = owner, Title = "Batch MAKE", Width = 880, Height = 690, MinWidth = 660, MinHeight = 470,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = new SolidColorBrush(Color.FromRgb(22, 22, 27)),
                 Foreground = Brushes.White, FontFamily = owner.FontFamily, FontSize = 13 };
             batchWindows[owner] = dialog;
             var grid = new Grid { Margin = new Thickness(18) };
             for (int i = 0; i < 6; i++) grid.RowDefinitions.Add(new RowDefinition { Height = i == 3 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
             dialog.Content = grid;
-            var explanation = new TextBlock { Text = "Choose wrestlers, then start once. Each uses the current taunt, hair, gear, ending and screen settings. Jobs run one at a time; existing model choices and default attire are used.",
+            var explanation = new TextBlock { Text = "Choose wrestlers, then use Choose attires… to render two or more outfits with the same taunt and settings. Each checked attire gets its own file. Jobs run one at a time.",
                 TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 9) };
             grid.Children.Add(explanation);
             var settings = new TextBlock { Text = "Taunt: " + tauntName + " · Always fast MAKE · Completed files are saved; installation is separate.",
@@ -119,6 +120,7 @@ namespace GorillaStudio.NameFolders
             var allJobs = new List<BatchRenderJob>();
             string table = null, runDirectory = null;
             string normalOutputDirectory = type.GetField("Output", InstanceMembers)?.GetValue(owner) as string;
+            Func<BatchRosterRow, Task> chooseAttires = null;
             Action refresh = () =>
             {
                 if (showingResults) return;
@@ -127,24 +129,76 @@ namespace GorillaStudio.NameFolders
                 foreach (BatchRosterRow row in rows.Where(row => query.Length == 0 || row.Entry.Name.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0
                     || row.Entry.Id.ToString(CultureInfo.InvariantCulture).Contains(query)))
                 {
-                    var check = new CheckBox { Content = row.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + row.Entry.Name,
+                    var rowGrid = new Grid();
+                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                    rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                    string attireText = row.Attires == null ? "Current/default attire" : row.Attires.Count.ToString(CultureInfo.InvariantCulture) + " attire(s): " + string.Join(", ", row.Attires.Select(attire => attire.DisplayName));
+                    var label = new StackPanel();
+                    label.Children.Add(new TextBlock { Text = row.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + row.Entry.Name });
+                    label.Children.Add(new TextBlock { Text = attireText, FontSize = 11, Foreground = Brushes.LightGray, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = attireText });
+                    var check = new CheckBox { Content = label,
                         IsChecked = row.Selected, Tag = row, Foreground = Brushes.White, Margin = new Thickness(5, 4, 5, 4) };
                     check.Checked += (sender, args) => { row.Selected = true; start.IsEnabled = loaded && !running && rows.Any(item => item.Selected); };
                     check.Unchecked += (sender, args) => { row.Selected = false; start.IsEnabled = loaded && !running && rows.Any(item => item.Selected); };
-                    list.Items.Add(check);
+                    var outfits = new Button { Content = "Choose attires…", Padding = new Thickness(7, 3, 7, 3), Margin = new Thickness(8, 4, 5, 4), VerticalAlignment = VerticalAlignment.Center };
+                    outfits.Click += async (sender, args) => { if (chooseAttires != null) await chooseAttires(row); };
+                    rowGrid.Children.Add(check); Grid.SetColumn(outfits, 1); rowGrid.Children.Add(outfits);
+                    list.Items.Add(new ListBoxItem { Content = rowGrid, Tag = row, HorizontalContentAlignment = HorizontalAlignment.Stretch });
                 }
                 start.IsEnabled = loaded && !running && rows.Any(row => row.Selected);
             };
             search.TextChanged += (sender, args) => refresh();
-            selectAll.Click += (sender, args) => { foreach (CheckBox check in list.Items.OfType<CheckBox>()) check.IsChecked = true; };
+            selectAll.Click += (sender, args) => { foreach (var item in list.Items.OfType<ListBoxItem>()) if (item.Tag is BatchRosterRow row) row.Selected = true; refresh(); };
             clear.Click += (sender, args) => { foreach (var row in rows) row.Selected = false; refresh(); };
             list.SelectionChanged += (sender, args) => use.IsEnabled = !running && list.SelectedItem is ListBoxItem item && item.Tag is BatchRenderJob job && completed.Contains(job);
             stop.Click += (sender, args) => { if (running) { cancel = true; stop.IsEnabled = false; status.Text = "Stopping after the current wrestler finishes. Completed files are kept."; } else dialog.Close(); };
             open.Click += (sender, args) => { if (Directory.Exists(normalOutputDirectory)) Process.Start(new ProcessStartInfo { FileName = normalOutputDirectory, UseShellExecute = true }); };
             details.Click += (sender, args) => { if (Directory.Exists(runDirectory)) Process.Start(new ProcessStartInfo { FileName = runDirectory, UseShellExecute = true }); };
+            chooseAttires = async row =>
+            {
+                if (running || !loaded || BatchNativeBusy(owner)) return;
+                running = true; cancel = false; searchRow.IsEnabled = false; list.IsEnabled = false; start.IsEnabled = false; stop.IsEnabled = false;
+                try
+                {
+                    status.Text = "Reading attire models for " + row.Entry.Name + "…";
+                    BatchRenderPlan resolved = await Task.Run(() => BatchRenderPlan.Create(new[] { row.Entry }, inventory, table));
+                    if (resolved.Jobs.Count != 1) throw new InvalidOperationException(string.Join("\n", resolved.Skipped));
+                    BatchRenderJob model = resolved.Jobs[0];
+                    if (model.ExtractFromGame)
+                    {
+                        model.Entry.Folder = await RequestGameModelAsync(model.Entry, model.Entry.StockFolder, message => status.Text = message);
+                        if (!Directory.Exists(model.Entry.Folder)) throw new IOException("The game model was not extracted.");
+                    }
+                    List<AlternateAttire> available = await Task.Run(() => AlternateAttires.Read(model.Entry.Folder));
+                    if (cancel) return;
+                    if (available.Count == 0) throw new InvalidOperationException("No extracted attire models were found for " + row.Entry.Name + ".");
+                    row.Entry = BatchRenderPlan.Copy(model.Entry);
+                    List<BatchAttireSelection> current = row.Attires;
+                    if (current == null)
+                    {
+                        string loadedFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
+                        string loadedId = type.GetField("TargetSlot", InstanceMembers)?.GetValue(owner) as string;
+                        string selected = SelectedAlternateAttire(owner, loadedFolder);
+                        if (selected != null && loadedId == row.Entry.Id.ToString(CultureInfo.InvariantCulture))
+                        {
+                            bool wrapped = AutomaticAttire.Plan(row.Entry.Folder, CharacterFolders.PhysicalId(row.Entry.Folder) ?? (row.Entry.SourceId > 0 ? row.Entry.SourceId : row.Entry.Id)).WrapDirectModel;
+                            string sourcePath = wrapped && selected.StartsWith("Default_Attire/", StringComparison.OrdinalIgnoreCase) ? selected.Substring("Default_Attire/".Length) : selected;
+                            AlternateAttire same = available.FirstOrDefault(attire => string.Equals(attire.RelativePath, sourcePath, StringComparison.OrdinalIgnoreCase));
+                            if (same != null) current = new List<BatchAttireSelection> { new BatchAttireSelection { RelativePath = same.RelativePath, DisplayName = same.DisplayName } };
+                        }
+                    }
+                    List<BatchAttireSelection> chosen = ChooseBatchAttires(dialog, row.Entry, available, current);
+                    if (chosen != null) { row.Attires = chosen; row.Selected = true; }
+                    status.Text = "Attire choices stay with each wrestler. MAKE selected renders one file per chosen attire using " + tauntName + ".";
+                }
+                catch (Exception error) { status.Text = BatchError(error).Message; }
+                finally { running = false; searchRow.IsEnabled = true; list.IsEnabled = true; stop.IsEnabled = true; refresh(); if (cancel) dialog.Close(); }
+            };
             installAll.Click += async (sender, args) =>
             {
                 if (running || BatchNativeBusy(owner) || completed.Count == 0 || !(bool)unlocked.Invoke(owner, null)) return;
+                if (completed.GroupBy(job => job.Entry.Id).Any(group => group.Count() > 1))
+                { status.Text = "Several completed outfits use the same wrestler slot. Select the outfit you want, use Use selected result, then Install into the game. Only one moving render can be active for each wrestler ID."; return; }
                 if (Process.GetProcessesByName("WWE2K26_x64").Length > 0) { status.Text = "Close WWE 2K26 before installing the completed batch."; return; }
                 string game = type.GetField("Game", InstanceMembers)?.GetValue(owner) as string;
                 if (!Directory.Exists(game)) { status.Text = "Choose your WWE 2K26 game folder in Gorilla Studio before installing this batch."; return; }
@@ -185,7 +239,7 @@ namespace GorillaStudio.NameFolders
                 if (ownerContent != null) ownerContent.IsEnabled = false;
                 try
                 {
-                    await BatchLoadCharacterAsync(owner, job.Entry, setFolder, null, null);
+                    await BatchLoadCharacterAsync(owner, job.Entry, setFolder, null, null, job, true);
                     string resultFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
                     SetAlternateAttireSelection(owner, resultFolder, job.AttireRelativePath);
                     type.GetField("LastGmr", InstanceMembers)?.SetValue(owner, job.RenderPath);
@@ -193,12 +247,12 @@ namespace GorillaStudio.NameFolders
                     if (install != null) install.IsEnabled = type.GetField("Game", InstanceMembers)?.GetValue(owner) is string game && Directory.Exists(game);
                     var resultInfo = type.GetField("ResultInfo", InstanceMembers)?.GetValue(owner) as TextBlock;
                     if (resultInfo != null) resultInfo.Text = job.Entry.Name + " · wrestler " + job.Entry.Id.ToString(CultureInfo.InvariantCulture)
-                        + "\nCompleted batch render: " + (job.PublishedRenderPath ?? job.RenderPath) + "\nReady to install without rendering again.";
+                        + "\nAttire: " + (job.AttireName ?? "Current/default") + "\nCompleted batch render: " + (job.PublishedRenderPath ?? job.RenderPath) + "\nReady to install without rendering again.";
                     SetModelStatus(owner, "Batch result ready: " + job.Entry.Name + ". Use Install into the game.");
                     status.Text = "Loaded the completed result for " + job.Entry.Name + ". Close this window, then press Install into the game.";
                 }
                 catch (Exception error) { status.Text = BatchError(error).Message; }
-                finally { running = false; if (ownerContent != null) ownerContent.IsEnabled = ownerEnabled; use.IsEnabled = true; installAll.IsEnabled = completed.Count > 0; stop.IsEnabled = true; }
+                finally { running = false; if (ownerContent != null) ownerContent.IsEnabled = ownerEnabled; use.IsEnabled = true; installAll.IsEnabled = CanInstallBatchTogether(completed); stop.IsEnabled = true; }
             };
             start.Click += async (sender, args) =>
             {
@@ -233,7 +287,9 @@ namespace GorillaStudio.NameFolders
                     if (preparation != null) try { await preparation; } catch { }
                     SetPerformanceBusy(owner, true);
                     var chosen = rows.Where(row => row.Selected).Select(row => BatchRenderPlan.Copy(row.Entry)).ToList();
-                    var plan = await Task.Run(() => BatchRenderPlan.Create(chosen, inventory, table));
+                    var choices = rows.Where(row => row.Selected && row.Attires != null).GroupBy(row => row.Entry.Id)
+                        .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.First().Attires);
+                    var plan = await Task.Run(() => BatchRenderPlan.WithAttires(BatchRenderPlan.Create(chosen, inventory, table), choices));
                     if (plan.Jobs.Count == 0) { status.Text = string.Join("\n", plan.Skipped.Take(8)); return; }
                     if (output == null || string.IsNullOrWhiteSpace(previousOutput)) throw new InvalidOperationException("The original render output folder is unavailable.");
                     runDirectory = Path.Combine(StorageDirectory, "batches", "Batch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -243,10 +299,10 @@ namespace GorillaStudio.NameFolders
                     {
                         if (cancel) break;
                         BatchRenderJob job = plan.Jobs[index];
-                        currentLabel = (index + 1).ToString(CultureInfo.InvariantCulture) + " / " + plan.Jobs.Count.ToString(CultureInfo.InvariantCulture) + " · " + job.Entry.Name;
-                        status.Text = currentLabel + "\nLoading model and default attire…";
+                        currentLabel = (index + 1).ToString(CultureInfo.InvariantCulture) + " / " + plan.Jobs.Count.ToString(CultureInfo.InvariantCulture) + " · " + job.Entry.Name + (job.AttireName == null ? "" : " · " + job.AttireName);
+                        status.Text = currentLabel + "\nLoading model and selected attire…";
                         job.Status = "Running";
-                        job.OutputDirectory = Path.Combine(runDirectory, job.Entry.Id.ToString(CultureInfo.InvariantCulture));
+                        job.OutputDirectory = Path.Combine(runDirectory, BatchRenderPlan.WorkspaceName(job));
                         if (Directory.Exists(job.OutputDirectory)) throw new IOException("The isolated batch output directory already exists.");
                         Directory.CreateDirectory(job.OutputDirectory);
                         output.SetValue(owner, job.OutputDirectory);
@@ -260,7 +316,7 @@ namespace GorillaStudio.NameFolders
                                 job.Entry.Folder = await RequestGameModelAsync(job.Entry, job.Entry.StockFolder, message => status.Text = currentLabel + "\n" + message);
                                 if (!Directory.Exists(job.Entry.Folder)) throw new IOException("The game model was not extracted.");
                             }
-                            await BatchLoadCharacterAsync(owner, job.Entry, setFolder, previousFolder, previousAttire);
+                            await BatchLoadCharacterAsync(owner, job.Entry, setFolder, previousFolder, previousAttire, job);
                             string jobFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
                             job.AttireRelativePath = SelectedAlternateAttire(owner, jobFolder);
                             if (!ReferenceEquals(taunts.SelectedItem, taunt)) { cancel = true; throw new InvalidOperationException("The selected taunt changed; the batch stopped before rendering another taunt."); }
@@ -294,13 +350,14 @@ namespace GorillaStudio.NameFolders
                     WriteBatchManifest(runDirectory, normalOutputDirectory, tauntName, tauntKey, currentArgs, allJobs, plan.Skipped, cancel);
                     showingResults = true; list.Items.Clear(); list.IsEnabled = true;
                     foreach (BatchRenderJob job in allJobs)
-                        list.Items.Add(new ListBoxItem { Content = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + job.Entry.Name + " · " + job.Status, Tag = job, Foreground = Brushes.White });
+                        list.Items.Add(new ListBoxItem { Content = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + job.Entry.Name + " · " + (job.AttireName ?? "Current/default") + " · " + job.Status, Tag = job, Foreground = Brushes.White });
                     foreach (string skipped in plan.Skipped) list.Items.Add(new ListBoxItem { Content = "Skipped · " + skipped, Foreground = Brushes.LightGray });
                     status.Text = completed.Count.ToString(CultureInfo.InvariantCulture) + " completed · " + allJobs.Count(job => job.Status.StartsWith("Failed", StringComparison.Ordinal)).ToString(CultureInfo.InvariantCulture)
                         + " failed · " + plan.Skipped.Count.ToString(CultureInfo.InvariantCulture) + " skipped" + (cancel ? " · stopped after current wrestler" : "")
                         + ".\n" + completed.Count(job => job.PublishedRenderPath != null).ToString(CultureInfo.InvariantCulture) + " saved to: " + normalOutputDirectory
                         + (completed.Any(job => job.PublishedRenderPath == null) ? "\nSome output copies failed; their completed workspace files are kept and can still be installed." : "")
-                        + "\nOpen output folder for your GMR files. Batch details opens the manifest and separate workspaces.";
+                        + "\nOpen output folder for your GMR files. Batch details opens the manifest and separate workspaces."
+                        + (completed.GroupBy(job => job.Entry.Id).Any(group => group.Count() > 1) ? "\nSeveral outfits use the same wrestler ID. Select one completed outfit and use Use selected result to install that version." : "");
                 }
                 catch (Exception error) { status.Text = "Batch stopped: " + BatchError(error).Message; }
                 finally
@@ -314,7 +371,8 @@ namespace GorillaStudio.NameFolders
                     foreach (var other in owned) if (other.Key.IsLoaded) other.Key.IsEnabled = other.Value;
                     open.IsEnabled = Directory.Exists(normalOutputDirectory);
                     details.IsEnabled = Directory.Exists(runDirectory);
-                    installAll.IsEnabled = completed.Count > 0;
+                    installAll.IsEnabled = CanInstallBatchTogether(completed);
+                    installAll.ToolTip = installAll.IsEnabled ? "Install the completed group." : "Choose one completed outfit with Use selected result; only one moving render can be active for each wrestler ID.";
                     if (!showingResults) { searchRow.IsEnabled = true; list.IsEnabled = true; refresh(); }
                     if (allJobs.Count > 0)
                     {
@@ -340,6 +398,9 @@ namespace GorillaStudio.NameFolders
                     table = session.DiscoveryTable;
                     rows = session.Entries.Where(entry => entry.Id > 0 && entry.Id <= 65535 && !string.IsNullOrWhiteSpace(entry.Name))
                         .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.Id).Select(entry => new BatchRosterRow { Entry = entry }).ToList();
+                    string currentId = type.GetField("TargetSlot", InstanceMembers)?.GetValue(owner) as string;
+                    var currentRows = rows.Where(row => row.Entry.Id.ToString(CultureInfo.InvariantCulture) == currentId).ToList();
+                    if (currentRows.Count == 1) currentRows[0].Selected = true;
                     inventory = await Task.Run(() => BatchModelInventory(session, root));
                     loaded = true; status.Text = rows.Count.ToString(CultureInfo.InvariantCulture) + " roster entries · " + inventory.Count.ToString(CultureInfo.InvariantCulture) + " model folders indexed. Select wrestlers above.";
                     refresh();
@@ -377,7 +438,7 @@ namespace GorillaStudio.NameFolders
             return models.Values.ToList();
         }
 
-        private static async Task BatchLoadCharacterAsync(Window owner, RosterEntry entry, MethodInfo setFolder, string previousFolder, string previousAttire)
+        private static async Task BatchLoadCharacterAsync(Window owner, RosterEntry entry, MethodInfo setFolder, string previousFolder, string previousAttire, BatchRenderJob job = null, bool restoreResult = false)
         {
             string source = DirectoryLinks.Resolve(entry.Folder);
             CharacterFolderPlan plan = CharacterFolders.Plan(source, entry);
@@ -398,7 +459,10 @@ namespace GorillaStudio.NameFolders
                 var task = setFolder.Invoke(owner, new object[] { alias }) as Task;
                 if (task != null) await task;
                 ApplySelection(owner);
-                SetAlternateAttireSelection(owner, alias, string.Equals(alias, previousFolder, StringComparison.OrdinalIgnoreCase) ? previousAttire : null);
+                string selectedAttire = restoreResult && job != null ? job.AttireRelativePath
+                    : job != null && job.HasExplicitAttire ? BatchRenderPlan.AliasAttirePath(job, attire.WrapDirectModel)
+                    : string.Equals(alias, previousFolder, StringComparison.OrdinalIgnoreCase) ? previousAttire : null;
+                SetAlternateAttireSelection(owner, alias, selectedAttire);
                 string target = owner.GetType().GetField("TargetSlot", InstanceMembers)?.GetValue(owner) as string;
                 if (target != entry.Id.ToString(CultureInfo.InvariantCulture)) throw new InvalidOperationException("The selected logical wrestler slot could not be applied.");
             }
@@ -414,7 +478,8 @@ namespace GorillaStudio.NameFolders
                 var document = new { version = 2, createdUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), outputDirectory, workspaceDirectory = directory, taunt, tauntKey = key,
                     settings = arguments?.Skip(3).Where(argument => argument != null && !argument.StartsWith("slot=", StringComparison.Ordinal)).ToArray(),
                     stopped, jobs = jobs.Select(job => new { id = job.Entry.Id, name = job.Entry.Name, model = job.Entry.Folder,
-                        attire = job.AttireRelativePath, job.Status, workspaceDirectory = job.OutputDirectory, gmr = job.RenderPath, publishedGmr = job.PublishedRenderPath }).ToArray(), skipped = skipped.ToArray() };
+                        attire = job.AttireRelativePath, sourceAttire = job.AttireSourceRelativePath, attireName = job.AttireName, job.VariantIndex,
+                        job.Status, workspaceDirectory = job.OutputDirectory, gmr = job.RenderPath, publishedGmr = job.PublishedRenderPath }).ToArray(), skipped = skipped.ToArray() };
                 File.WriteAllText(temporary, new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.Serialize(document), new UTF8Encoding(false));
                 string destination = Path.Combine(directory, "batch-results.json");
                 if (File.Exists(destination)) File.Replace(temporary, destination, null); else File.Move(temporary, destination);

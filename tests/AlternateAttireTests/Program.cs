@@ -85,6 +85,7 @@ internal static class Program
             Equal("A direct MCD does not falsely claim the native one-level automatic layout", false, AlternateAttires.Read(direct)[0].IsDefault);
             await PreparationChecks();
             await CatalogChecks();
+            WrappedCatalogChecks();
             if (args.Length > 0)
             {
                 string actual = args[0];
@@ -126,6 +127,36 @@ internal static class Program
             Console.WriteLine("PASS " + passed + " alternate attire checks");
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static void WrappedCatalogChecks()
+    {
+        string source = Path.Combine(root, "direct-nested", "215_PAC");
+        FileAt(source, "Attire.mcd");
+        FileAt(source, "Costumes/Red/Attire.mcd");
+        FileAt(Path.Combine(root, "direct-nested", "368_Other_Wrestler"), "Attire.mcd");
+        string alias = Path.Combine(root, "wrapper", "Characters", "215_PAC");
+        Directory.CreateDirectory(alias);
+        Directory.CreateSymbolicLink(Path.Combine(alias, "Default_Attire"), source);
+        Equal("Ordinary linked attire folders retain the existing bounded-link policy", 1, AlternateAttires.Read(alias).Count);
+        AlternateAttires.RememberWrappedSource(alias, source);
+        List<AlternateAttire> wrapped = AlternateAttires.Read(alias);
+        Equal("A factory-proven wrapper exposes nested attire models from its actual source", 2, wrapped.Count);
+        Equal("The wrapper retains the same native direct automatic default", "Default_Attire/Attire.mcd", wrapped[0].RelativePath);
+        Equal("Exactly the native automatic model is marked default in the wrapper", 1, wrapped.Count(item => item.IsDefault));
+        string relative = "Default_Attire/Costumes/Red/Attire.mcd";
+        Equal("Nested choices point through the existing wrapper link exactly once", true, wrapped.Any(item => item.RelativePath == relative));
+        Equal("A wrapped nested attire resolves to a real model before preparation", relative, AlternateAttires.Validate(alias, relative));
+        string[] render = AlternateAttires.Apply("gorilla_render.py", new[] { alias, "roman3", "output", "quick=1", "slot=1481" }, relative);
+        Equal("Native preview receives the precise nested wrapped model", "attire=" + relative, render.Last());
+        Equal("Choosing a wrapped attire preserves the selected wrestler installation slot", "slot=1481", render[4]);
+        Equal("A wrapper never discovers a neighbouring wrestler's model", false, wrapped.Any(item => item.RelativePath.Contains("Other_Wrestler")));
+        Equal("Reading the original source keeps its source-relative paths for batch jobs", true,
+            AlternateAttires.Read(source).Any(item => item.RelativePath == "Costumes/Red/Attire.mcd"));
+        FileAt(source, "Costumes/Blue/Attire.mcd");
+        Equal("Refreshing a wrapper includes newly added nested attires", 3, AlternateAttires.Read(alias).Count);
+        File.Delete(Path.Combine(source, "Costumes", "Red", "Attire.mcd"));
+        Throws<FileNotFoundException>("A removed wrapped model cannot silently fall back to automatic clothes", () => AlternateAttires.Validate(alias, relative));
     }
 
     private static async Task CatalogChecks()
