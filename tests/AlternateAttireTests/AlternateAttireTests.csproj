@@ -3,6 +3,8 @@
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttireCatalog.cs" Link="AlternateAttireCatalog.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireOptions.cs" Link="DiscoveryAttireOptions.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/AttireSourceState.cs" Link="AttireSourceState.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
   </ItemGroup>
 </Project>

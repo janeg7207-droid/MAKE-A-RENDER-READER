@@ -86,6 +86,8 @@ internal static class Program
             await PreparationChecks();
             await CatalogChecks();
             WrappedCatalogChecks();
+            DiscoveryOptionsChecks();
+            SourceFailureChecks();
             if (args.Length > 0)
             {
                 string actual = args[0];
@@ -127,6 +129,76 @@ internal static class Program
             Console.WriteLine("PASS " + passed + " alternate attire checks");
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static void SourceFailureChecks()
+    {
+        var state = new AttireSourceState();
+        var independent = new AttireSourceState();
+        Equal("A new source context can render", true, state.CanRender);
+        state.RestoreFailed("Native restoration failed.");
+        Equal("A double load/restore failure latches the source context closed", false, state.CanRender);
+        foreach (string option in new[] { "prepare=model", "prepare=taunt", "quick=1", "end=loop", "attire=Default/Attire.mcd" })
+            Throws<InvalidOperationException>("A failed source cannot enter rendering even with " + option, () => {
+                state.RequireRender("gorilla_render.py");
+                AlternateAttires.Apply("gorilla_render.py", new[] { root, "taunt", "output", option }, null);
+            });
+        state.RequireRender("roster_lookup.py");
+        Equal("The source failure does not block roster lookup needed for recovery", false, state.CanRender);
+        Equal("Another owner remains usable", true, independent.CanRender);
+        string alias = Path.Combine(root, "626_Demon_Finn");
+        Equal("A different loaded folder cannot clear a source failure", false, state.ConfirmLoaded(alias, Path.Combine(root, "576_Finn"), 626, "626"));
+        Equal("A different logical slot cannot clear a source failure", false, state.ConfirmLoaded(alias, alias, 626, "576"));
+        Equal("A malformed logical slot cannot clear a source failure", false, state.ConfirmLoaded(alias, alias, 0, "0"));
+        Equal("Unverified recovery leaves the failure latched", false, state.CanRender);
+        Equal("A completed native load of the matching alias and logical slot clears the latch", true, state.ConfirmLoaded(alias, alias, 626, "626"));
+        state.RequireRender("gorilla_render.py");
+        Equal("The verified model can render after recovery", true, state.CanRender);
+    }
+
+    private static void DiscoveryOptionsChecks()
+    {
+        string first = Path.Combine(root, "626_Demon_Finn"), second = Path.Combine(root, "Carnage", "626_Demon_Finn");
+        FileAt(first, "Default/Attire.mcd"); FileAt(first, "Inactive5/Attire.mcd"); FileAt(second, "Default/Attire.mcd");
+        var mapped = new[] {
+            new AlternateAttire { SourceFolder = first, SourceRelativePath = "Default/Attire.mcd", RelativePath = "Default/Attire.mcd", DisplayName = "Demon default", DiscoveryKey = "626:101:626:0", IsDefault = true },
+            new AlternateAttire { SourceFolder = second, SourceRelativePath = "Default/Attire.mcd", DisplayName = "CARNAGE", DiscoveryKey = "626:102:626:1" }
+        };
+        var original = AlternateAttires.Read(first);
+        var choices = DiscoveryAttireOptions.Combine(first, first, original, mapped, true);
+        Equal("Two complete sources for the same logical wrestler remain separate choices", 2, choices.Count);
+        Equal("Discovery's costume label is retained", "CARNAGE", choices[1].DisplayName);
+        Equal("An inactive local MCD cannot bypass the active Discovery catalog", false, choices.Any(item => item.RelativePath == "Inactive5/Attire.mcd"));
+        Equal("Mapped source paths remain relative to their own complete character", "Default/Attire.mcd", choices[1].SourceRelativePath);
+        Equal("An external source is not passed as an attire override under the old root", null, choices[1].RelativePath);
+        var afterSwitch = mapped.Select(item => new AlternateAttire { SourceFolder = item.SourceFolder, SourceRelativePath = item.SourceRelativePath,
+            RelativePath = item.SourceFolder == second ? item.SourceRelativePath : null, DisplayName = item.DisplayName, DiscoveryKey = item.DiscoveryKey }).ToArray();
+        Equal("Switching the loaded source preserves the complete two-source catalog", 2,
+            DiscoveryAttireOptions.Combine(second, second, AlternateAttires.Read(second), afterSwitch, true).Count);
+        Equal("Manual local attire behavior is retained without an authoritative catalog", 2,
+            DiscoveryAttireOptions.Combine(first, first, original, null).Count);
+        Equal("Mapped and local references to one exact MCD do not create duplicate manual entries", 3,
+            DiscoveryAttireOptions.Combine(first, first, original, mapped).Count);
+        var sharedModel = new[] {
+            new AlternateAttire { SourceFolder = first, SourceRelativePath = "Default/Attire.mcd", DiscoveryKey = "927:1:927:0", DisplayName = "First active costume" },
+            new AlternateAttire { SourceFolder = first, SourceRelativePath = "Default/Attire.mcd", DiscoveryKey = "927:2:927:6", DisplayName = "Second active costume" }
+        };
+        Equal("Distinct active costume keys sharing an MCD keep both labels", 2,
+            DiscoveryAttireOptions.Combine(first, first, original, sharedModel, true).Count);
+        Equal("An exact repeated active reference is deduplicated", 2,
+            DiscoveryAttireOptions.Combine(first, first, original, sharedModel.Concat(new[] { sharedModel[0] }), true).Count);
+        Equal("Physical source roots distinguish otherwise identical costume paths", false,
+            DiscoveryAttireOptions.Key(first, "Default/Attire.mcd") == DiscoveryAttireOptions.Key(second, "Default/Attire.mcd"));
+        string alias = Path.Combine(root, "mapped-wrapper"); Directory.CreateDirectory(alias);
+        AlternateAttires.RememberWrappedSource(alias, first);
+        Equal("A mapped source path acquires one compatibility wrapper prefix", "Default_Attire/Default/Attire.mcd",
+            AlternateAttires.AliasRelativePath(alias, "Default/Attire.mcd"));
+        Equal("Wrapper conversion preserves the original source-relative MCD identity", "Default/Attire.mcd",
+            AlternateAttires.SourceRelativePath(alias, "Default_Attire/Default/Attire.mcd"));
+        string[] selected = AlternateAttires.Apply("gorilla_render.py", new[] { second, "taunt", "output", "quick=1", "slot=626" }, "Default/Attire.mcd");
+        Equal("A switched preview uses the new whole-source root", second, selected[0]);
+        Equal("A switched preview retains logical Demon Finn ID", true, selected.Contains("slot=626"));
+        Equal("A switched preview uses a safe in-source costume path", "attire=Default/Attire.mcd", selected.Last());
     }
 
     private static void WrappedCatalogChecks()

@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.7.1**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.7.2**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -19,6 +19,7 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
        discovery_data/
          Roster/CharProfileTable.jsfb
          Characters/CharacterMapping.jsfb
+         Characters/CostumesTable.jsfb
          Characters/<your character folders>/
          Sdb/ENG.sdb
          MoveData/CAMMoveData.jsfb
@@ -31,13 +32,17 @@ The full program ZIP uses Git LFS. Use the download link above, or install Git L
 
 ## Alternate attires
 
-After loading a wrestler, use **Attire model** under Gear to choose an extracted alternate MCD. The list reads that character's attire folders, including nested folders, while excluding BaseModel. **Default (automatic)** keeps the normal default choice. The chooser updates as soon as wrestler selection finishes. The refresh button reads newly added attires. Choices are scanned in the background on wrestler changes or explicit refresh; selecting an already listed attire reuses the list. Stale scans cannot update another wrestler. Gear still selects entrance/ring pieces within the chosen model.
+After loading a wrestler, use **Attire model** under Gear to choose an extracted attire. Discovery choices follow the selected profile's active costume keys through **CharProfileTable.jsfb → CostumesTable.jsfb → CharacterMapping.jsfb**, then match each exact MCD path hash across your indexed model folders. Labels come from ENG.sdb. For **“DEMON” FINN BÁLOR, logical ID 626**, the active choices are his original default and **CARNAGE**; regular Finn's slot 576 and the inactive index-five costume are excluded.
 
-An attire change clears the previous preview/install result and queues preparation of the selected clothes before Preview or MAKE. The character's body, Discovery mapping and logical roster ID remain the same. A removed selected model produces an error rather than silently changing clothes. Direct-MCD compatibility folders also show nested attires belonging to their proven original source. Neighbouring characters are not added as clothes. Attires that only exist in an unextracted game archive need to be extracted first.
+An attire can live in another mod folder. Selecting it loads that complete model source, including its body and textures, while preserving the selected logical wrestler slot and roster picture links. The full attire list stays available after the switch. A change clears the previous preview/install result and prepares the exact selected MCD before Preview or MAKE. Distinct active costumes remain separate choices even when they share one MCD. Gear still selects entrance/ring pieces within the chosen model.
+
+The list reports active and available counts, with explanations for missing mapped models. **↻** rereads mappings and attire files inside already indexed character source folders. After adding a new character/model folder, use the roster's **Refresh data** to rescan remembered locations; use **Set model library…** first for a new collection location. Reads run in the background, and selecting an already listed attire reuses the catalog. A removed selected model produces an error instead of silently changing clothes. Characters without resolved Discovery attire mappings retain their local-folder choices and **Default (automatic)**. Models that exist only in an archive must be extracted first.
 
 ## Make several wrestlers with one taunt
 
 Choose the taunt and your hair, gear, ending and screen settings, then open **Batch MAKE…**. Search/select the wrestlers and click **MAKE selected** once. Jobs render one at a time with fast rendering always on. Missing or ambiguous models are reported; select their model once in the normal roster before retrying. Each wrestler uses its default attire, with the current wrestler's explicit attire retained if included. To make two or more outfits with one taunt, use **Choose attires…** beside that wrestler, tick the outfits, then **MAKE selected**. Each checked attire becomes a separate job using the same taunt and settings. Its normal output filename includes an attire label, and each job keeps its own workspace. Your current wrestler is preselected when available.
+
+**Choose attires…** includes active Discovery outfits from separate model sources, so both Demon Finn's default and CARNAGE can be checked together. Each job verifies its current costume key, model path and physical source again before loading, while keeping the logical wrestler ID. Distinct costumes sharing an MCD keep separate jobs and output files.
 
 Completed `.gmr` files are saved directly in your usual configured **Output folder**, which defaults to `Documents\Gorilla Studio\Renders`. Existing files are kept; another render with the same filename receives a unique name. **Open output folder** opens that same normal destination. Each job retains its working files and installation picture map separately under `%LOCALAPPDATA%/GorillaStudio/NameFolders/batches`; `batch-results.json` records the published file and its working source.
 
@@ -157,7 +162,8 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **6,450 portable checks** are recorded across 48 suites/modes. This release ran 11 affected/new suites and verified-pack modes (4,263 checks); the 37 unchanged suites retain their prior passing versions. The new checks cover all 617 recovered records with the actual production reader/decoder, extracted-edit priority, unsupported diagnostics, source revision rejection, PNG alpha/cropping/collision handling, failed preview outcomes and real batch process-tree shutdown. Detailed counts and limits are in TEST_RESULTS.json.
+- **6,583 portable checks** are recorded across 50 suites/modes. This release ran 12 affected/new suites (896 checks); the 38 unchanged suites retain prior passing versions. The new checks cover exact active costume mappings, separate model sources, default selection, stale source rejection, batch attire preservation and source-load recovery. The original engine also passes 35 default-attire checks. Detailed counts and limits are in TEST_RESULTS.json.
+- Actual Discovery tables confirm Demon Finn 626's two active costume mappings, their default and CARNAGE labels, and exclusion of regular Finn 576 and inactive variant five. Fixtures cover separate complete model sources, exact costume identity, stale mappings and batch output isolation. The supplied ten extracted model folders do not include either Demon model; their actual Windows loading and rendered images remain unverified.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
 - A copied real character in a plain-name folder remains visible before assignment, then loads and reopens with an explicit added roster entry. Original MCD bytes stay unchanged.
@@ -196,6 +202,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/RosterModelResolutionTests -c Release
     dotnet run --project tests/MappedModelLibraryTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/AutomaticAttireTests -c Release
+    dotnet run --project tests/DiscoveryAttireCatalogTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/DiscoveryTauntsTests -c Release -- /path/to/discovery_data/MoveData/CAMMoveData.jsfb
     dotnet run --project tests/DiscoveryMotionTests -c Release
     dotnet run --project tests/DiscoveryTauntLibraryTests -c Release -- /path/to/original/GorillaStudio /path/to/discovery_data /path/to/disposable-import-output
@@ -221,6 +228,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/AlternateAttireTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/BatchRenderPlanTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/BatchAttirePlanTests -c Release
+    dotnet run --project tests/BatchMappedAttireTests -c Release
     dotnet run --project tests/BatchRenderInstallerTests -c Release
     dotnet run --project tests/BatchRenderOutputTests -c Release
     python tests/validate_matchcard_layouts.py --help

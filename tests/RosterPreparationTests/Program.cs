@@ -52,7 +52,10 @@ internal static class Program
         Equal(State.UiThread, State.PickerThread);
         Equal(State.UiThread, State.DisposeThread);
         Equal(1, State.PickerCount);
-        Equal(4, State.Commits.Count);
+        Equal(5, State.Commits.Count);
+        Equal(2, State.AttireInventoryCount);
+        Equal(true, State.RegisteredAttireContext);
+        Equal(State.Root, State.RegisteredAttireSource);
         Equal(true, State.Commits.All(thread => thread == State.UiThread));
         Equal(true, State.DiskThreads.Count >= 8);
         Equal(true, State.DiskThreads.All(thread => thread != State.UiThread));
@@ -71,6 +74,36 @@ internal static class Program
         Equal(4000, saved.Single().Id);
         Equal(1506, saved.Single().SourceId);
         Equal("1506_Original_Stock", saved.Single().StockFolder);
+
+        // An older folder binding can point to an inactive mapped costume.
+        // Resolve its unambiguous active default before creating native aliases.
+        State.Reset();
+        string activeSource = Directory.CreateDirectory(Path.Combine(State.Root, "Active default source")).FullName;
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
+        Equal(true, await FolderBridge.PrepareRosterAsync(State.Root, null) != null);
+        Equal(activeSource, State.PlannedEntry.Folder);
+        Equal(activeSource, State.RegisteredAttireSource);
+        Equal(1800, State.AttireId);
+        Equal(4000, State.Registered.Id);
+
+        State.Reset();
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800 });
+        bool inactiveRejected = false;
+        try { await FolderBridge.PrepareRosterAsync(State.Root, null); }
+        catch (InvalidDataException) { inactiveRejected = true; }
+        Equal(true, inactiveRejected);
+        Equal(0, State.PictureCalls);
+        Equal(0, State.Commits.Count);
+
+        State.Reset();
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = Path.Combine(State.Root, "Another default source"), SourceId = 1801, IsDefault = true });
+        inactiveRejected = false;
+        try { await FolderBridge.PrepareRosterAsync(State.Root, null); }
+        catch (InvalidDataException) { inactiveRejected = true; }
+        Equal(true, inactiveRejected);
+        Equal(0, State.PictureCalls);
+        Equal(0, State.Commits.Count);
 
         // A successfully refreshed picker invalidates animation lookup on the UI
         // thread even when the user cancels instead of committing a wrestler.
@@ -161,6 +194,11 @@ internal static class State
     internal static readonly List<int> DiskThreads = new List<int>();
     internal static readonly List<int> Commits = new List<int>();
     internal static RosterEntry Entry, PlannedEntry, Registered;
+    internal static int AttireInventoryCount;
+    internal static DiscoveryAttireCatalogResult AttireResult;
+    internal static bool RegisteredAttireContext;
+    internal static string RegisteredAttireSource;
+    internal static readonly List<DiscoveryAttireSource> DiscoverySources = new List<DiscoveryAttireSource>();
     internal static void Reset()
     {
         UiThread = Thread.CurrentThread.ManagedThreadId;
@@ -168,6 +206,8 @@ internal static class State
         Invalidations = InvalidationThread = WarningCount = WarningThread = 0;
         ExpectWorkers = true; BlockPictures = MutateOnDispose = CancelPicker = Refreshed = ThrowPictures = ThrowRead = false;
         ReleasePictures.Reset(); DiskThreads.Clear(); Commits.Clear(); Registered = PlannedEntry = null;
+        AttireInventoryCount = 0; AttireResult = null; RegisteredAttireContext = false; RegisteredAttireSource = null;
+        DiscoverySources.Clear();
         Entry = new RosterEntry { Id = 4000, Name = "Selected Mod", Folder = Root, RosterTable = RosterTable,
             SourceId = 1506, IsMod = true, Source = "Chosen model folder", StockFolder = "1506_Original_Stock" };
     }
@@ -219,6 +259,30 @@ namespace GorillaStudio.NameFolders
         public string Source { get; set; }
         public string StockFolder { get; set; }
     }
+    public sealed class ModelCandidate
+    {
+        public string Folder { get; set; }
+        public string Name { get; set; }
+        public int SourceId { get; set; }
+    }
+    public sealed class DiscoveryAttireSource
+    {
+        public string SourceFolder { get; set; }
+        public bool IsDefault { get; set; }
+        public int SourceId { get; set; }
+    }
+    public sealed class DiscoveryAttireCatalogResult
+    { public List<DiscoveryAttireSource> Sources { get; } = new List<DiscoveryAttireSource>(); }
+    internal static class DiscoveryAttireCatalog
+    {
+        internal static DiscoveryAttireCatalogResult Find(RosterEntry entry, IEnumerable<ModelCandidate> models, string table, CancellationToken token)
+        {
+            State.Disk(); State.AttireInventoryCount = models.Count();
+            State.AttireResult = new DiscoveryAttireCatalogResult();
+            State.AttireResult.Sources.AddRange(State.DiscoverySources);
+            return State.AttireResult;
+        }
+    }
     public sealed class RosterSessionData
     {
         public List<RosterEntry> Entries;
@@ -255,6 +319,10 @@ namespace GorillaStudio.NameFolders
         public string SelectedFolder { get { return State.Root; } }
         public string CurrentRosterFile { get { return State.RosterTable; } }
         public bool DataRefreshed { get { return State.Refreshed; } }
+        internal List<ModelCandidate> CurrentModelInventory { get { return new List<ModelCandidate> {
+            new ModelCandidate { Folder = State.Root, Name = "Default", SourceId = 1506 },
+            new ModelCandidate { Folder = Path.Combine(State.Root, "Second costume source"), Name = "Alternate", SourceId = 1506 }
+        }; } }
         public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseFolder, string file = null) { Entries = entries; }
         public System.Windows.Forms.DialogResult ShowDialog()
         {
@@ -315,6 +383,14 @@ namespace GorillaStudio.NameFolders
         }
         private static void RememberRenderTable(string alias, string table) { State.Commit(); }
         private static void RememberPreparedRender(string alias, CharacterFolderPlan plan, RosterEntry entry, Dictionary<ulong, string> pictures) { State.Commit(); }
+        private static void RegisterDiscoveryAttires(string alias, RosterEntry entry, IEnumerable<ModelCandidate> inventory,
+            DiscoveryAttireCatalogResult result, string sourceFolder = null)
+        {
+            State.Commit(); State.RegisteredAttireContext = ReferenceEquals(result, State.AttireResult);
+            State.RegisteredAttireSource = sourceFolder;
+        }
+        private static void ResolveDiscoveryAttireSources(DiscoveryAttireCatalogResult result, CancellationToken token)
+        { State.Disk(); }
         private static void RememberDirectAttireSource(string alias, string source) { }
         private static void RegisterSelection(string alias, RosterEntry entry) { State.Commit(); State.Registered = entry; }
         private static void QueueModelDiscoveryTaunts(string alias, string root) { State.Commit(); }

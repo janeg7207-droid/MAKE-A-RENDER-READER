@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -28,6 +29,18 @@ namespace GorillaStudio.NameFolders
             internal AlternateAttire MissingChoice;
             internal DispatcherTimer Timer;
             internal int Generation;
+            internal string Target;
+            internal bool Switching;
+            internal bool SwitchCommitted;
+            internal CancellationTokenSource SwitchCancellation;
+            internal bool Mapped;
+            internal string SelectedDiscoveryKey;
+            internal string ChoicesFolder;
+            internal bool Reading;
+            internal int ReadGeneration;
+            internal object DiscoveryContextIdentity;
+            internal readonly AttireSourceState SourceState = new AttireSourceState();
+            internal Dictionary<Button, bool> SourceRecoveryButtons;
         }
 
         private static readonly Dictionary<object, AttireControls> attireWindows = new Dictionary<object, AttireControls>();
@@ -46,7 +59,7 @@ namespace GorillaStudio.NameFolders
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             controls.Choice = new ComboBox { FontSize = gear.FontSize, MinWidth = 80, Style = gear.Style,
-                ToolTip = "Choose an extracted attire belonging to this wrestler. Gear above selects entrance or ring pieces within that model." };
+                ToolTip = "Choose an extracted attire belonging to this wrestler, including separate sources linked by Discovery. Gear above selects entrance or ring pieces within that model." };
             controls.Refresh = new Button { Content = "↻", Margin = new Thickness(5, 0, 0, 0), Padding = new Thickness(6, 0, 6, 0),
                 ToolTip = "Read this wrestler's attire folders again, including newly added models." };
             Grid.SetColumn(controls.Refresh, 1);
@@ -58,9 +71,14 @@ namespace GorillaStudio.NameFolders
             attireWindows.Add(window, controls);
             controls.Choice.SelectionChanged += (sender, args) =>
             {
-                if (controls.Updating) return;
+                if (controls.Updating || controls.Switching) return;
                 if (AttireBusy(window)) { FillAttires(window, controls, false); return; }
                 var selected = controls.Choice.SelectedItem as AlternateAttire;
+                if (selected != null && selected.SourceFolder != null)
+                {
+                    _ = LoadDiscoveryAttireSourceAsync(window, controls, selected);
+                    return;
+                }
                 string relative = selected == null ? null : selected.RelativePath;
                 try { SetAlternateAttireSelection(window, controls.Folder, relative); }
                 catch (Exception error) when (AttireError(error))
@@ -69,17 +87,21 @@ namespace GorillaStudio.NameFolders
                     controls.Note.Text = error.Message;
                 }
             };
-            controls.Refresh.Click += (sender, args) => { if (!AttireBusy(window)) FillAttires(window, controls, true); };
+            controls.Refresh.Click += (sender, args) => {
+                if (controls.Switching) { if (!controls.SwitchCommitted) controls.SwitchCancellation?.Cancel(); return; }
+                if (!AttireBusy(window)) FillAttires(window, controls, true, true);
+            };
             controls.Timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             controls.Timer.Tick += (sender, args) =>
             {
                 string folder = AttireField(window, "Folder") as string;
-                if (!SameAttireFolder(folder, controls.Folder)) FillAttires(window, controls, true);
+                if (!controls.Switching && (!SameAttireFolder(folder, controls.Folder)
+                    || controls.Target != AttireField(window, "TargetSlot") as string)) FillAttires(window, controls, false);
                 UpdateAttireAvailability(window, controls);
             };
             controls.Timer.Start();
             window.Closed += (sender, args) => {
-                controls.Closed = true; controls.Catalog.Close(); controls.Timer.Stop(); attireWindows.Remove(window);
+                controls.Closed = true; controls.SwitchCancellation?.Cancel(); controls.Catalog.Close(); controls.Timer.Stop(); attireWindows.Remove(window);
             };
             FillAttires(window, controls, true);
         }
@@ -87,7 +109,7 @@ namespace GorillaStudio.NameFolders
         internal static void RefreshAlternateAttireSelection(object owner)
         {
             AttireControls controls;
-            if (!attireWindows.TryGetValue(owner, out controls) || controls.Closed) return;
+            if (!attireWindows.TryGetValue(owner, out controls) || controls.Closed || controls.Switching) return;
             // Called as soon as the selected wrestler finishes loading. Reuse a
             // catalog that already belongs to this folder; only the explicit ↻
             // button forces another scan after model files are added or removed.
@@ -101,17 +123,37 @@ namespace GorillaStudio.NameFolders
         private static void UpdateAttireAvailability(object owner, AttireControls controls)
         {
             string folder = AttireField(owner, "Folder") as string;
-            bool ready = !controls.Closed && !AttireBusy(owner) && !controls.Catalog.IsLoading
+            bool ready = !controls.Closed && !controls.Switching && !controls.Reading && !AttireBusy(owner) && !controls.Catalog.IsLoading
                 && !string.IsNullOrWhiteSpace(folder) && SameAttireFolder(folder, controls.Folder);
             controls.Choice.IsEnabled = ready && controls.Choice.Items.Count > 1;
-            controls.Refresh.IsEnabled = ready;
+            controls.Refresh.Content = controls.Switching ? "Cancel" : "↻";
+            controls.Refresh.IsEnabled = controls.Switching ? !controls.SwitchCommitted : ready;
+            if (ready && controls.SourceState.CanRender && controls.SourceRecoveryButtons != null)
+            {
+                foreach (var button in controls.SourceRecoveryButtons) button.Key.IsEnabled = button.Value;
+                controls.SourceRecoveryButtons = null;
+            }
+            if (!controls.SourceState.CanRender)
+            {
+                foreach (string name in new[] { "PreviewButton", "MakeButton", "InstallButton" })
+                { var button = AttireField(owner, name) as Button; if (button != null) button.IsEnabled = false; }
+                if (!controls.Switching) controls.Note.Text = controls.SourceState.Failure;
+            }
         }
 
         internal static string SelectedAlternateAttire(object owner, string folder)
         {
             AttireControls controls;
-            return owner != null && attireWindows.TryGetValue(owner, out controls) && SameAttireFolder(controls.Folder, folder)
-                ? controls.Selected : null;
+            if (owner == null || !attireWindows.TryGetValue(owner, out controls) || !SameAttireFolder(controls.Folder, folder)) return null;
+            controls.SourceState.RequireRender("gorilla_render.py");
+            ValidateDiscoveryAttireSelection(owner, controls, folder);
+            return controls.Selected;
+        }
+
+        private static bool IsSelectedAttire(AttireControls controls, AlternateAttire item)
+        {
+            return item.RelativePath != null && item.RelativePath == controls.Selected
+                && (controls.SelectedDiscoveryKey == null || item.DiscoveryKey == controls.SelectedDiscoveryKey);
         }
 
         internal static void SetAlternateAttireSelection(object owner, string folder, string relative)
@@ -131,6 +173,7 @@ namespace GorillaStudio.NameFolders
                 ResetAttireChoices(controls);
             }
             controls.Folder = folder; controls.Selected = validated;
+            ReconcileDiscoveryAttireSelection(owner, controls, folder, validated);
             FillAttires(owner, controls, !sameFolder);
             if (!changed) return;
             StopAutomaticMake(owner);
@@ -174,13 +217,21 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static void FillAttires(object owner, AttireControls controls, bool scan)
+        private static void FillAttires(object owner, AttireControls controls, bool scan, bool refreshDiscovery = false)
         {
-            if (controls.Closed) return;
+            if (controls.Closed || controls.Switching) return;
             string folder = AttireField(owner, "Folder") as string;
+            string target = AttireField(owner, "TargetSlot") as string;
             bool changedFolder = !SameAttireFolder(folder, controls.Folder);
-            if (changedFolder) { controls.Folder = folder; controls.Selected = null; controls.Generation++; }
-            if (!scan && !changedFolder)
+            bool changedTarget = controls.Target != target;
+            object discoveryContext = DiscoveryAttireContextIdentity(owner, folder);
+            bool changedContext = !ReferenceEquals(discoveryContext, controls.DiscoveryContextIdentity);
+            controls.DiscoveryContextIdentity = discoveryContext;
+            controls.Target = target;
+            if (changedFolder) { controls.Folder = folder; controls.Selected = null; controls.SelectedDiscoveryKey = null; controls.Generation++; }
+            else if (changedTarget || changedContext) controls.Generation++;
+            controls.Mapped = HasDiscoveryAttireChoices(owner, folder);
+            if (!scan && !changedFolder && !changedTarget && !changedContext && SameAttireFolder(controls.ChoicesFolder, folder))
             {
                 SelectExistingAttire(controls);
                 return;
@@ -192,7 +243,9 @@ namespace GorillaStudio.NameFolders
             controls.Choice.IsEnabled = false;
             controls.Refresh.IsEnabled = false;
             controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires." : "Reading attire models…";
-            _ = ReadAttiresAsync(owner, controls, folder, scan);
+            controls.Reading = true;
+            int readGeneration = ++controls.ReadGeneration;
+            _ = ReadAttiresAsync(owner, controls, folder, scan, refreshDiscovery, readGeneration);
         }
 
         private static void ResetAttireChoices(AttireControls controls)
@@ -200,8 +253,10 @@ namespace GorillaStudio.NameFolders
             controls.Updating = true;
             try
             {
-                controls.Choice.Items.Clear(); controls.Choice.Items.Add("Default (automatic)");
-                controls.Choice.SelectedIndex = 0; controls.MissingChoice = null;
+                controls.Choice.Items.Clear();
+                if (!controls.Mapped) { controls.Choice.Items.Add("Default (automatic)"); controls.Choice.SelectedIndex = 0; }
+                controls.MissingChoice = null;
+                controls.ChoicesFolder = null;
             }
             finally { controls.Updating = false; }
         }
@@ -211,72 +266,90 @@ namespace GorillaStudio.NameFolders
             controls.Updating = true;
             try
             {
-                if (controls.Choice.Items.Count == 0) controls.Choice.Items.Add("Default (automatic)");
+                if (controls.Choice.Items.Count == 0 && !controls.Mapped) controls.Choice.Items.Add("Default (automatic)");
                 if (controls.MissingChoice != null && controls.MissingChoice.RelativePath != controls.Selected)
                 {
                     controls.Choice.Items.Remove(controls.MissingChoice);
                     controls.MissingChoice = null;
                 }
                 object selected = controls.Choice.Items.Cast<object>().OfType<AlternateAttire>()
-                    .FirstOrDefault(item => item.RelativePath == controls.Selected);
+                    .FirstOrDefault(item => IsSelectedAttire(controls, item));
                 if (selected == null && controls.Selected != null)
                 {
                     controls.MissingChoice = new AlternateAttire { RelativePath = controls.Selected, DisplayName = "Selected: " + controls.Selected };
                     controls.Choice.Items.Add(controls.MissingChoice); selected = controls.MissingChoice;
                 }
-                controls.Choice.SelectedItem = selected ?? controls.Choice.Items[0];
+                controls.Choice.SelectedItem = selected ?? (!controls.Mapped && controls.Choice.Items.Count > 0 ? controls.Choice.Items[0] : null);
             }
             finally { controls.Updating = false; }
         }
 
-        private static async Task ReadAttiresAsync(object owner, AttireControls controls, string folder, bool refresh)
+        private static async Task ReadAttiresAsync(object owner, AttireControls controls, string folder, bool refresh,
+            bool refreshDiscovery, int readGeneration)
         {
-            AlternateAttireCatalogResult result = await controls.Catalog.ReadAsync(folder, refresh);
-            if (controls.Closed || !controls.Catalog.IsCurrent(result)
-                || !SameAttireFolder(folder, AttireField(owner, "Folder") as string)) return;
-            if (result.Error != null)
-            {
-                controls.Note.Text = result.Error.Message;
-                UpdateAttireAvailability(owner, controls);
-                return;
-            }
-            controls.Updating = true;
             try
             {
-                controls.Choice.Items.Clear(); controls.Choice.Items.Add("Default (automatic)");
-                controls.Choice.SelectedIndex = 0;
-                controls.Choice.IsEnabled = false;
-                controls.MissingChoice = null;
-                IReadOnlyList<AlternateAttire> models = result.Models;
-                foreach (AlternateAttire model in models) controls.Choice.Items.Add(model);
-                AlternateAttire selected = models.FirstOrDefault(item => item.RelativePath == controls.Selected);
-                controls.Choice.SelectedItem = selected == null ? controls.Choice.Items[0] : (object)selected;
-                // Keep a removed selection until the user chooses a replacement;
-                // rendering must fail clearly instead of substituting clothes.
-                if (controls.Selected != null && selected == null)
+                int generation = controls.Generation;
+                if (refreshDiscovery) await RefreshDiscoveryAttireContextAsync(owner, controls, folder);
+                if (controls.Closed || controls.Switching || readGeneration != controls.ReadGeneration
+                    || generation != controls.Generation || !SameAttireFolder(folder, AttireField(owner, "Folder") as string)) return;
+                AlternateAttireCatalogResult result = await controls.Catalog.ReadAsync(folder, refresh);
+                if (controls.Closed || !controls.Catalog.IsCurrent(result)
+                    || readGeneration != controls.ReadGeneration || generation != controls.Generation
+                    || !SameAttireFolder(folder, AttireField(owner, "Folder") as string)) return;
+                if (result.Error != null)
                 {
-                    controls.MissingChoice = new AlternateAttire { RelativePath = controls.Selected, DisplayName = "Missing: " + controls.Selected };
-                    controls.Choice.Items.Add(controls.MissingChoice); controls.Choice.SelectedItem = controls.MissingChoice;
-                    controls.Note.Text = "Selected attire was removed. Choose another model.";
+                    controls.Note.Text = result.Error.Message;
+                    return;
                 }
-                else controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires."
-                    : models.Count == 0 ? "No extracted attire models in this character folder."
-                    : models.Count + (models.Count == 1 ? " model available" : " models available") + " · Refresh after adding one";
-                UpdateAttireAvailability(owner, controls);
+                controls.Updating = true;
+                try
+                {
+                    controls.Mapped = HasDiscoveryAttireChoices(owner, folder);
+                    controls.Choice.Items.Clear();
+                    if (!controls.Mapped) { controls.Choice.Items.Add("Default (automatic)"); controls.Choice.SelectedIndex = 0; }
+                    controls.Choice.IsEnabled = false;
+                    controls.MissingChoice = null;
+                    IReadOnlyList<AlternateAttire> models = DiscoveryAttireChoices(owner, folder, result.Models);
+                    foreach (AlternateAttire model in models) controls.Choice.Items.Add(model);
+                    controls.ChoicesFolder = folder;
+                    AlternateAttire selected = models.FirstOrDefault(item => IsSelectedAttire(controls, item));
+                    controls.Choice.SelectedItem = selected ?? (!controls.Mapped && controls.Choice.Items.Count > 0 ? controls.Choice.Items[0] : null);
+                    // Keep a removed selection until the user chooses a replacement;
+                    // rendering must fail clearly instead of substituting clothes.
+                    if (controls.Selected != null && selected == null)
+                    {
+                        controls.MissingChoice = new AlternateAttire { RelativePath = controls.Selected, DisplayName = "Missing: " + controls.Selected };
+                        controls.Choice.Items.Add(controls.MissingChoice); controls.Choice.SelectedItem = controls.MissingChoice;
+                        controls.Note.Text = "Selected attire was removed. Choose another model.";
+                    }
+                    else controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires."
+                        : models.Count == 0 ? "No extracted attire models in this character folder."
+                        : models.Count + (models.Count == 1 ? " model available" : " models available") + " · Refresh after adding one";
+                    string mappingNote = DiscoveryAttireIssueNote(owner, folder);
+                    if (!string.IsNullOrWhiteSpace(mappingNote)) controls.Note.Text += "\n" + mappingNote;
+                }
+                catch (Exception error) when (AttireError(error)) { controls.Note.Text = error.Message; }
+                finally { controls.Updating = false; }
             }
-            catch (Exception error) when (AttireError(error)) { controls.Note.Text = error.Message; }
-            finally { controls.Updating = false; }
+            finally
+            {
+                if (!controls.Closed && controls.ReadGeneration == readGeneration)
+                { controls.Reading = false; UpdateAttireAvailability(owner, controls); }
+            }
         }
 
         static partial void SelectAttireArguments(object owner, string script, ref string[] arguments)
         {
             if (!AlternateAttires.IsRender(script) || arguments == null || arguments.Length < 3) return;
+            RequireValidAttireSource(owner, script);
             arguments = AlternateAttires.Apply(script, arguments, SelectedAlternateAttire(owner, arguments[0]));
         }
 
         static partial void ConfigureAlternateAttireProcess(object owner, Process process, string script, IEnumerable<string> args)
         {
             if (!AlternateAttires.IsRender(script) || args == null) return;
+            RequireValidAttireSource(owner, script);
             string[] arguments = args.ToArray();
             if (arguments.Length < 3) return;
             // Foreground Preview/MAKE already captured an explicit choice before
@@ -291,6 +364,12 @@ namespace GorillaStudio.NameFolders
         {
             if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return string.IsNullOrWhiteSpace(left) && string.IsNullOrWhiteSpace(right);
             return string.Equals(Path.GetFullPath(left).TrimEnd('\\', '/'), Path.GetFullPath(right).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void RequireValidAttireSource(object owner, string script)
+        {
+            AttireControls controls;
+            if (owner != null && attireWindows.TryGetValue(owner, out controls)) controls.SourceState.RequireRender(script);
         }
 
         private static object AttireField(object owner, string name)

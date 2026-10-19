@@ -13,6 +13,12 @@ namespace GorillaStudio.NameFolders
         public string RelativePath { get; internal set; }
         public string DisplayName { get; internal set; }
         public bool IsDefault { get; internal set; }
+        // A Discovery choice can belong to another complete character source.
+        // Its MCD remains relative to that source; it is never joined to a
+        // different character through a ../ override.
+        public string SourceFolder { get; internal set; }
+        public string SourceRelativePath { get; internal set; }
+        public string DiscoveryKey { get; internal set; }
         public override string ToString() { return DisplayName; }
     }
 
@@ -32,6 +38,24 @@ namespace GorillaStudio.NameFolders
         internal static void RememberWrappedSource(string alias, string source)
         {
             wrappedSources[CatalogPath(alias)] = CatalogPath(source);
+        }
+
+        internal static string SourceRelativePath(string alias, string relative)
+        {
+            if (relative == null) return null;
+            string source;
+            string normalized = relative.Replace('\\', '/');
+            return !string.IsNullOrWhiteSpace(alias) && wrappedSources.TryGetValue(CatalogPath(alias), out source)
+                && normalized.StartsWith("Default_Attire/", StringComparison.OrdinalIgnoreCase)
+                ? normalized.Substring("Default_Attire/".Length) : normalized;
+        }
+
+        internal static string AliasRelativePath(string alias, string relative)
+        {
+            if (relative == null) return null;
+            string source;
+            return (!string.IsNullOrWhiteSpace(alias) && wrappedSources.TryGetValue(CatalogPath(alias), out source) ? "Default_Attire/" : "")
+                + relative.Replace('\\', '/');
         }
 
         public static List<AlternateAttire> Read(string characterFolder)

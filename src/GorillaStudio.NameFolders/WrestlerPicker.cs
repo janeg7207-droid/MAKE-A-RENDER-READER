@@ -30,6 +30,11 @@ namespace GorillaStudio.NameFolders
         public List<RosterEntry> Entries { get; private set; }
         public RosterEntry SelectedEntry { get; private set; }
         public string SelectedFolder { get; private set; }
+        internal List<ModelCandidate> CurrentModelInventory
+        {
+            get { return modelInventory.Select(model => new ModelCandidate {
+                Folder = model.Folder, Name = model.Name, SourceId = model.SourceId }).ToList(); }
+        }
         public string CurrentRosterFile { get { return currentRosterFile; } }
         public bool DataRefreshed { get; private set; }
 

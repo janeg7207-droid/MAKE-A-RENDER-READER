@@ -89,6 +89,7 @@ namespace GorillaStudio.NameFolders
             internal string RosterFile;
             internal RosterEntry Entry;
             internal List<RosterEntry> Entries;
+            internal List<ModelCandidate> Models;
             internal bool RememberRoster;
         }
 
@@ -98,6 +99,8 @@ namespace GorillaStudio.NameFolders
             internal CharacterFolderPlan Plan;
             internal Dictionary<ulong, string> Pictures;
             internal string Alias;
+            internal List<ModelCandidate> Models;
+            internal DiscoveryAttireCatalogResult Attires;
         }
 
         private static string ChooseRosterModel(string source, RosterSessionData session, string rosterFile = null)
@@ -129,6 +132,7 @@ namespace GorillaStudio.NameFolders
                     Source = picker.SelectedFolder, RosterFile = picker.CurrentRosterFile,
                     Entry = CopyRosterEntry(picker.SelectedEntry),
                     Entries = picker.Entries.Select(CopyRosterEntry).ToList(),
+                    Models = picker.CurrentModelInventory,
                     RememberRoster = session.ChooseCharacterFolder
                 };
             }
@@ -144,16 +148,42 @@ namespace GorillaStudio.NameFolders
         private static PreparedRosterModel PrepareRosterModel(RosterModelChoice choice)
         {
             string source = DirectoryLinks.Resolve(choice.Source);
-            CharacterFolderPlan plan = CharacterFolders.Plan(source, choice.Entry);
             int physicalId = CharacterFolders.PhysicalId(source) ?? (choice.Entry.SourceId > 0
                 ? choice.Entry.SourceId : choice.Entry.Id);
+            var models = (choice.Models ?? new List<ModelCandidate>())
+                .Where(model => model != null && !string.IsNullOrWhiteSpace(model.Folder)).ToList();
+            if (!models.Any(model => string.Equals(Path.GetFullPath(model.Folder), source, StringComparison.OrdinalIgnoreCase)))
+                models.Add(new ModelCandidate { Folder = source, Name = choice.Entry.Name, SourceId = physicalId });
+            DiscoveryAttireCatalogResult attires = DiscoveryAttireCatalog.Find(choice.Entry, models,
+                choice.Entry.RosterTable, System.Threading.CancellationToken.None);
+            ResolveDiscoveryAttireSources(attires, System.Threading.CancellationToken.None);
+            if (attires.Sources.Count > 0 && !attires.Sources.Any(item =>
+                string.Equals(Path.GetFullPath(item.SourceFolder), source, StringComparison.OrdinalIgnoreCase)))
+            {
+                // A mapping table can retain inactive costumes alongside the
+                // profile's active list. Start from its proven default instead
+                // of warming an inactive source selected by older folder logic.
+                var defaults = attires.Sources.Where(item => item.IsDefault)
+                    .GroupBy(item => Path.GetFullPath(item.SourceFolder), StringComparer.OrdinalIgnoreCase).ToList();
+                if (defaults.Count != 1)
+                    throw new InvalidDataException("The selected model is not an active Discovery attire, and its active default model is missing or ambiguous. Choose an active model from the roster.");
+                DiscoveryAttireSource active = defaults[0].First();
+                source = DirectoryLinks.Resolve(active.SourceFolder);
+                physicalId = active.SourceId;
+                choice.Entry.Folder = source; choice.Entry.SourceId = physicalId;
+                foreach (RosterEntry remembered in choice.Entries.Where(entry => entry.Id == choice.Entry.Id
+                    && string.Equals(entry.RosterTable, choice.Entry.RosterTable, StringComparison.OrdinalIgnoreCase)))
+                { remembered.Folder = source; remembered.SourceId = physicalId; }
+            }
+            CharacterFolderPlan plan = CharacterFolders.Plan(source, choice.Entry);
             DirectAttirePlan attire = AutomaticAttire.Plan(source, physicalId);
             Dictionary<ulong, string> pictures = PrepareRenderImages(plan, choice.Entry.Id);
             string alias = PrepareCharacterAlias(plan, attire, pictures);
             SaveRoster(choice.Entries);
             if (choice.RememberRoster && !string.IsNullOrWhiteSpace(choice.RosterFile))
                 RememberRosterFile(choice.RosterFile);
-            return new PreparedRosterModel { Entry = choice.Entry, Plan = plan, Pictures = pictures, Alias = alias };
+            return new PreparedRosterModel { Entry = choice.Entry, Plan = plan, Pictures = pictures, Alias = alias,
+                Models = models, Attires = attires };
         }
 
         private static string CommitRosterModel(PreparedRosterModel prepared)
@@ -163,6 +193,7 @@ namespace GorillaStudio.NameFolders
             lastDiscoveryRoot = prepared.Plan.DataRoot;
             RememberRenderTable(prepared.Alias, prepared.Entry.RosterTable);
             RememberPreparedRender(prepared.Alias, prepared.Plan, prepared.Entry, prepared.Pictures);
+            RegisterDiscoveryAttires(prepared.Alias, prepared.Entry, prepared.Models, prepared.Attires, prepared.Plan.SourceFolder);
             RegisterSelection(prepared.Alias, prepared.Entry);
             QueueModelDiscoveryTaunts(prepared.Alias, prepared.Plan.DataRoot);
             return prepared.Alias;

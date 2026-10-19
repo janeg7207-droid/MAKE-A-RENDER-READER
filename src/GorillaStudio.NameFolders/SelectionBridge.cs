@@ -56,10 +56,12 @@ namespace GorillaStudio.NameFolders
             if (setTarget == null) throw new MissingMethodException("This Gorilla Studio version cannot select a mapped wrestler slot.");
             setTarget.Invoke(owner, new object[] { selected.Id.ToString(CultureInfo.InvariantCulture) });
             DiscoveryPictureSelection.Apply(owner, selected.RosterTable);
+            SeedDiscoveryAttireForSelection(owner, current, selected.Id);
             OnRosterSelectionApplied(owner);
         }
 
         static partial void OnRosterSelectionApplied(object owner);
+        static partial void SeedDiscoveryAttireForSelection(object owner, string current, int logicalId);
 
         private static void AddNativeSlotName(object owner, PendingRosterSelection selected)
         {

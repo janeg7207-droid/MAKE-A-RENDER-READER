@@ -15,6 +15,11 @@ namespace GorillaStudio.NameFolders
     {
         public string RelativePath { get; set; }
         public string DisplayName { get; set; }
+        public string SourceFolder { get; set; }
+        public int SourceId { get; set; }
+        public string DiscoveryKey { get; set; }
+        public ulong DiscoveryModelHash { get; set; }
+        public bool IsDefault { get; set; }
     }
 
     public sealed class BatchRenderJob
@@ -28,6 +33,8 @@ namespace GorillaStudio.NameFolders
         public string AttireRelativePath { get; internal set; }
         public string AttireSourceRelativePath { get; internal set; }
         public string AttireName { get; internal set; }
+        public string AttireDiscoveryKey { get; internal set; }
+        public ulong AttireDiscoveryModelHash { get; internal set; }
         public bool HasExplicitAttire { get; internal set; }
         public int VariantIndex { get; internal set; }
     }
@@ -106,6 +113,104 @@ namespace GorillaStudio.NameFolders
 
         public static BatchRenderPlan WithAttires(BatchRenderPlan original, IDictionary<int, List<BatchAttireSelection>> selections)
         {
+            return ExpandAttires(original, selections, false);
+        }
+
+        public static BatchAttireSelection DiscoveryChoice(DiscoveryAttireSource source)
+        {
+            if (source == null) throw new ArgumentNullException("source");
+            return new BatchAttireSelection { SourceFolder = source.SourceFolder, SourceId = source.SourceId,
+                RelativePath = source.RelativePath, DisplayName = source.DisplayName, DiscoveryModelHash = source.ModelHash, IsDefault = source.IsDefault,
+                DiscoveryKey = source.LogicalId.ToString(CultureInfo.InvariantCulture) + ":" + source.CostumeKey.ToString(CultureInfo.InvariantCulture)
+                    + ":" + source.MappingId.ToString(CultureInfo.InvariantCulture) + ":" + source.CostumeIndex.ToString(CultureInfo.InvariantCulture) };
+        }
+
+        public static string SelectionIdentity(BatchAttireSelection choice, string fallbackFolder = null)
+        {
+            if (choice == null) throw new ArgumentNullException("choice");
+            string folder = choice.SourceFolder ?? fallbackFolder;
+            return (string.IsNullOrWhiteSpace(folder) ? "" : Path.GetFullPath(folder).TrimEnd('\\', '/'))
+                + "\n" + (choice.RelativePath ?? "").Replace('\\', '/') + "\n" + (choice.DiscoveryKey ?? "");
+        }
+
+        /// <summary>Resolves explicitly selected active costume sources before ordinary ambiguous-model handling.</summary>
+        public static BatchRenderPlan CreateWithAttires(IEnumerable<RosterEntry> selected, IEnumerable<ModelCandidate> inventory,
+            string rosterTable, IDictionary<int, List<BatchAttireSelection>> selections)
+        {
+            var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(Copy).ToList();
+            var models = (inventory ?? Enumerable.Empty<ModelCandidate>()).Where(item => item != null).Select(item =>
+                new ModelCandidate { Folder = item.Folder, Name = item.Name, SourceId = item.SourceId }).ToList();
+            var normalized = new Dictionary<int, List<BatchAttireSelection>>();
+            foreach (var group in rows.GroupBy(entry => entry.Id).Where(group => group.Count() == 1 && group.Key >= 1 && group.Key <= 65535))
+            {
+                RosterEntry entry = group.First();
+                List<BatchAttireSelection> choices;
+                if (selections == null || !selections.TryGetValue(entry.Id, out choices) || choices == null || choices.Count == 0) continue;
+                DiscoveryAttireCatalogResult catalog = null;
+                var safe = new List<BatchAttireSelection>();
+                foreach (BatchAttireSelection choice in choices)
+                {
+                    if (choice == null) throw new ArgumentException("Choose an actual attire model for " + entry.Name + ".");
+                    if (!string.IsNullOrWhiteSpace(choice.DiscoveryKey))
+                    {
+                        if (catalog == null) catalog = DiscoveryAttireCatalog.Find(entry, models, rosterTable);
+                        safe.Add(VerifyDiscoveryChoice(entry, choice, catalog));
+                        if (string.IsNullOrWhiteSpace(entry.RosterTable) && !string.IsNullOrWhiteSpace(rosterTable))
+                            entry.RosterTable = Path.GetFullPath(rosterTable);
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrWhiteSpace(choice.SourceFolder) && !SameSource(choice.SourceFolder, entry.Folder))
+                            throw new InvalidOperationException("An attire in another model folder requires its exact active Discovery mapping. Refresh the attire choices.");
+                        string relative = AlternateAttires.Validate(entry.Folder, choice.RelativePath);
+                        if (relative == null) throw new ArgumentException("Choose an actual attire model for " + entry.Name + ".");
+                        safe.Add(new BatchAttireSelection { SourceFolder = entry.Folder, SourceId = entry.SourceId,
+                            RelativePath = relative, DisplayName = choice.DisplayName });
+                    }
+                }
+                normalized[entry.Id] = safe;
+                BatchAttireSelection first = safe.First();
+                entry.Folder = first.SourceFolder;
+                if (first.SourceId > 0) entry.SourceId = first.SourceId;
+            }
+            return ExpandAttires(Create(rows, models, rosterTable), normalized, true);
+        }
+
+        public static DiscoveryAttireCatalogResult RefreshDiscoveryAttires(BatchRenderJob job, IEnumerable<ModelCandidate> inventory, string rosterTable)
+        {
+            if (job == null || job.Entry == null) throw new ArgumentException("A wrestler job is required.", "job");
+            var result = DiscoveryAttireCatalog.Find(job.Entry, inventory, rosterTable);
+            if (!string.IsNullOrWhiteSpace(job.AttireDiscoveryKey))
+                VerifyDiscoveryChoice(job.Entry, new BatchAttireSelection { SourceFolder = job.Entry.Folder,
+                    SourceId = job.Entry.SourceId, RelativePath = job.AttireSourceRelativePath,
+                    DiscoveryKey = job.AttireDiscoveryKey, DiscoveryModelHash = job.AttireDiscoveryModelHash }, result);
+            return result;
+        }
+
+        private static BatchAttireSelection VerifyDiscoveryChoice(RosterEntry entry, BatchAttireSelection choice, DiscoveryAttireCatalogResult catalog)
+        {
+            DiscoveryAttireSource source = catalog.Sources.FirstOrDefault(item => item.LogicalId == entry.Id
+                && string.Equals(DiscoveryChoice(item).DiscoveryKey, choice.DiscoveryKey, StringComparison.Ordinal)
+                && SameSource(item.SourceFolder, choice.SourceFolder)
+                && string.Equals(item.RelativePath.Replace('\\', '/'), (choice.RelativePath ?? "").Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
+                && (choice.SourceId <= 0 || item.SourceId == choice.SourceId)
+                && (choice.DiscoveryModelHash == 0 || item.ModelHash == choice.DiscoveryModelHash));
+            if (source == null) throw new InvalidOperationException("The selected attire for " + entry.Name
+                + " is no longer an active, available Discovery costume at that exact model path. Refresh its attire choices."
+                + (catalog.Issues.Count > 0 ? " " + string.Join(" ", catalog.Issues.Take(3)) : ""));
+            var verified = DiscoveryChoice(source);
+            verified.RelativePath = AlternateAttires.Validate(verified.SourceFolder, verified.RelativePath);
+            return verified;
+        }
+
+        private static bool SameSource(string left, string right)
+        {
+            return !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right)
+                && string.Equals(Path.GetFullPath(left).TrimEnd('\\', '/'), Path.GetFullPath(right).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static BatchRenderPlan ExpandAttires(BatchRenderPlan original, IDictionary<int, List<BatchAttireSelection>> selections, bool verifiedDiscovery)
+        {
             if (original == null) throw new ArgumentNullException("original");
             var plan = new BatchRenderPlan(); plan.Skipped.AddRange(original.Skipped);
             foreach (BatchRenderJob source in original.Jobs)
@@ -122,10 +227,16 @@ namespace GorillaStudio.NameFolders
                 foreach (BatchAttireSelection choice in selected)
                 {
                     if (choice == null || string.IsNullOrWhiteSpace(choice.RelativePath)) throw new ArgumentException("Choose an actual attire model for " + source.Entry.Name + ".");
-                    string relative = AlternateAttires.Validate(source.Entry.Folder, choice.RelativePath);
-                    if (!seen.Add(relative)) continue;
-                    plan.Jobs.Add(new BatchRenderJob { Entry = Copy(source.Entry), Status = "Ready", HasExplicitAttire = true,
+                    string folder = choice.SourceFolder ?? source.Entry.Folder;
+                    if (!verifiedDiscovery && (!string.IsNullOrWhiteSpace(choice.DiscoveryKey) || !SameSource(folder, source.Entry.Folder)))
+                        throw new InvalidOperationException("Use CreateWithAttires to verify Discovery choices across model sources.");
+                    string relative = AlternateAttires.Validate(folder, choice.RelativePath);
+                    if (!seen.Add(SelectionIdentity(choice, source.Entry.Folder))) continue;
+                    RosterEntry entry = Copy(source.Entry); entry.Folder = folder;
+                    if (choice.SourceId > 0) entry.SourceId = choice.SourceId;
+                    plan.Jobs.Add(new BatchRenderJob { Entry = entry, Status = "Ready", HasExplicitAttire = true,
                         AttireSourceRelativePath = relative, AttireName = string.IsNullOrWhiteSpace(choice.DisplayName) ? relative : choice.DisplayName,
+                        AttireDiscoveryKey = choice.DiscoveryKey, AttireDiscoveryModelHash = choice.DiscoveryModelHash,
                         VariantIndex = seen.Count });
                 }
             }
@@ -138,6 +249,24 @@ namespace GorillaStudio.NameFolders
             if (!job.HasExplicitAttire) return null;
             string relative = AlternateAttires.Validate(job.Entry.Folder, job.AttireSourceRelativePath);
             return directModelWrapped ? "Default_Attire/" + relative : relative;
+        }
+
+        /// <summary>Retains the verified mapped seed when a batch uses current/default clothes.</summary>
+        public static string LoadedAttire(BatchRenderJob job, bool restoreResult, string explicitAliasPath,
+            bool mapped, string mappedSelection, string previousSelection, bool samePreviousModel)
+        {
+            if (restoreResult && job != null && job.AttireRelativePath != null) return job.AttireRelativePath;
+            if (job != null && job.HasExplicitAttire)
+            {
+                if (string.IsNullOrWhiteSpace(explicitAliasPath)) throw new InvalidOperationException("The explicit batch attire is unavailable.");
+                return explicitAliasPath;
+            }
+            if (mapped)
+            {
+                if (string.IsNullOrWhiteSpace(mappedSelection)) throw new InvalidOperationException("The current source has no selected active Discovery attire.");
+                return mappedSelection;
+            }
+            return samePreviousModel ? previousSelection : null;
         }
 
         public static string WorkspaceName(BatchRenderJob job)

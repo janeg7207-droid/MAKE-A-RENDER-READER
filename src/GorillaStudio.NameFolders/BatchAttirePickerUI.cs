@@ -17,7 +17,7 @@ namespace GorillaStudio.NameFolders
         }
 
         private static List<BatchAttireSelection> ChooseBatchAttires(Window owner, RosterEntry entry,
-            List<AlternateAttire> available, List<BatchAttireSelection> current)
+            List<BatchAttireSelection> available, List<BatchAttireSelection> current)
         {
             var dialog = new Window { Owner = owner, Title = "Attires · " + entry.Name, Width = 640, Height = 530,
                 MinWidth = 440, MinHeight = 380, WindowStartupLocation = WindowStartupLocation.CenterOwner,
@@ -44,22 +44,23 @@ namespace GorillaStudio.NameFolders
             var cancel = new Button { Content = "Cancel", Padding = new Thickness(8, 5, 8, 5), IsCancel = true };
             controls.Children.Add(all); controls.Children.Add(none); controls.Children.Add(accept); controls.Children.Add(cancel);
             Grid.SetRow(controls, 3); grid.Children.Add(controls);
-            var selected = new HashSet<string>((current ?? new List<BatchAttireSelection>()).Select(choice => choice.RelativePath), StringComparer.OrdinalIgnoreCase);
+            var selected = new HashSet<string>((current ?? new List<BatchAttireSelection>()).Select(choice => BatchRenderPlan.SelectionIdentity(choice, entry.Folder)), StringComparer.OrdinalIgnoreCase);
             if (current == null && available.Count > 0)
-                selected.Add((available.FirstOrDefault(attire => attire.IsDefault) ?? available.First()).RelativePath);
-            var checks = new Dictionary<AlternateAttire, CheckBox>();
+                selected.Add(BatchRenderPlan.SelectionIdentity(available.FirstOrDefault(attire => attire.IsDefault) ?? available.First(), entry.Folder));
+            var checks = new Dictionary<BatchAttireSelection, CheckBox>();
             Action update = () =>
             {
                 int total = checks.Values.Count(check => check.IsChecked == true);
                 count.Text = total.ToString(CultureInfo.InvariantCulture) + " checked · " + total.ToString(CultureInfo.InvariantCulture) + " separate output file(s)";
                 accept.IsEnabled = total > 0;
             };
-            foreach (AlternateAttire attire in available)
+            foreach (BatchAttireSelection attire in available)
             {
                 var label = new StackPanel();
-                label.Children.Add(new TextBlock { Text = attire.DisplayName, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
-                label.Children.Add(new TextBlock { Text = attire.RelativePath, Foreground = Brushes.LightGray, FontSize = 11, TextWrapping = TextWrapping.Wrap });
-                var check = new CheckBox { Content = label, IsChecked = selected.Contains(attire.RelativePath), Margin = new Thickness(4, 7, 4, 7) };
+                label.Children.Add(new TextBlock { Text = attire.DisplayName + (attire.IsDefault ? " (default)" : ""), Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
+                label.Children.Add(new TextBlock { Text = (attire.SourceFolder ?? entry.Folder) + "\n" + attire.RelativePath,
+                    Foreground = Brushes.LightGray, FontSize = 11, TextWrapping = TextWrapping.Wrap });
+                var check = new CheckBox { Content = label, IsChecked = selected.Contains(BatchRenderPlan.SelectionIdentity(attire, entry.Folder)), Margin = new Thickness(4, 7, 4, 7) };
                 check.Checked += (sender, args) => update(); check.Unchecked += (sender, args) => update();
                 checks.Add(attire, check); items.Children.Add(check);
             }
@@ -68,7 +69,9 @@ namespace GorillaStudio.NameFolders
             accept.Click += (sender, args) => { if (checks.Values.Any(check => check.IsChecked == true)) dialog.DialogResult = true; };
             update();
             return dialog.ShowDialog() == true ? available.Where(attire => checks[attire].IsChecked == true)
-                .Select(attire => new BatchAttireSelection { RelativePath = attire.RelativePath, DisplayName = attire.DisplayName }).ToList() : null;
+                .Select(attire => new BatchAttireSelection { SourceFolder = attire.SourceFolder, SourceId = attire.SourceId,
+                    DiscoveryKey = attire.DiscoveryKey, DiscoveryModelHash = attire.DiscoveryModelHash, IsDefault = attire.IsDefault,
+                    RelativePath = attire.RelativePath, DisplayName = attire.DisplayName }).ToList() : null;
         }
     }
 }
