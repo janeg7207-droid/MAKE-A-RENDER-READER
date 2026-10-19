@@ -38,6 +38,18 @@ namespace GorillaStudio.NameFolders
     public delegate Task<DiscoveryArchiveProcessResult> DiscoveryArchiveRunner(
         DiscoveryArchiveCommand command, CancellationToken cancellationToken);
 
+    internal sealed class DiscoveryArchiveLookupIndex
+    {
+        internal string ArchivePath, Root, Fingerprint, IndexPath, ToolPath, ToolKey;
+    }
+
+    internal sealed class DiscoveryArchiveLookup
+    {
+        internal readonly List<DiscoveryArchiveLookupIndex> Indexes = new List<DiscoveryArchiveLookupIndex>();
+        internal readonly List<string> Warnings = new List<string>();
+        internal int ArchiveCount;
+    }
+
     /// <summary>Resolves linked TypeA picture hashes using the shipped Bakery archive index.</summary>
     public static class DiscoveryArchiveRenders
     {
@@ -45,6 +57,77 @@ namespace GorillaStudio.NameFolders
         private const long MaximumPictureBytes = 128L * 1024 * 1024;
         private const long MaximumFallbackCopyBytes = 512L * 1024 * 1024;
         private static readonly SemaphoreSlim Gate = new SemaphoreSlim(1, 1);
+
+        internal static SemaphoreSlim AssetGate { get { return Gate; } }
+        internal static DiscoveryArchiveRunner AssetRunner { get { return RunProcessAsync; } }
+
+        internal static string ValidateAssetCache(string cacheRoot, string gameRoot, string discoveryRoot)
+        {
+            if (string.IsNullOrWhiteSpace(cacheRoot)) throw new ArgumentException("Choose an asset cache outside the game and Discovery folders.", nameof(cacheRoot));
+            string cache = Path.GetFullPath(cacheRoot);
+            if (HasExistingReparseAncestor(cache)) throw new ArgumentException("The asset cache cannot use a linked directory.", nameof(cacheRoot));
+            foreach (string source in new[] { gameRoot, discoveryRoot })
+                if (!string.IsNullOrWhiteSpace(source) && IsWithin(cache, Path.GetFullPath(source)))
+                    throw new ArgumentException("The asset cache must be outside the game and Discovery folders.", nameof(cacheRoot));
+            return cache;
+        }
+
+        internal static bool AssetPathLinked(string path, string root) { return HasReparsePath(path, root); }
+        internal static bool AssetSourceUnchanged(DiscoveryArchiveLookupIndex index) { return FileStamp(index.ArchivePath) == index.Fingerprint; }
+        internal static Task<DiscoveryArchiveProcessResult> ExtractAssetAsync(DiscoveryArchiveLookupIndex index, string asset, string output,
+            DiscoveryArchiveRunner runner, CancellationToken token)
+        {
+            return runner(Command(index.ToolPath, 90000, "unpack-file", "--input", index.ArchivePath,
+                "--file", asset, "--output", output), token);
+        }
+
+        // Both picture and matchup readers use the shipped executable, exact
+        // metadata cache key, bounded process runner and original-name fallback.
+        // The caller holds AssetGate; no operation writes beside a game archive.
+        internal static async Task<DiscoveryArchiveLookup> ReadAssetIndexesAsync(string appRoot, string gameRoot, string discoveryRoot,
+            string cache, Action<string> progress, DiscoveryArchiveRunner runner, CancellationToken token)
+        {
+            var result = new DiscoveryArchiveLookup();
+            var archives = FindArchives(gameRoot, discoveryRoot, cache, result.Warnings, token);
+            result.ArchiveCount = archives.Count;
+            if (archives.Count == 0) return result;
+            string executable, toolKey;
+            try { executable = PrepareTool(appRoot, gameRoot, cache, out toolKey); }
+            catch (Exception error) when (IsFileError(error)) { result.Warnings.Add(error.Message); return result; }
+            for (int i = 0; i < archives.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var archive = archives[i];
+                Report(progress, "Reading linked Discovery assets: archive " + (i + 1) + " of " + archives.Count + "…");
+                try
+                {
+                    archive.Fingerprint = FileStamp(archive.Path);
+                    string directory = Path.Combine(cache, "indexes", Hash("index-v1\n" + archive.Fingerprint + "\n" + toolKey));
+                    Directory.CreateDirectory(directory);
+                    string index = Path.Combine(directory, "files.txt");
+                    if (!CacheValid(index))
+                    {
+                        string temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".txt");
+                        try
+                        {
+                            var execution = await runner(Command(executable, 45000, "list-files", "--input", archive.Path,
+                                "--output", temporary, "--extended"), token).ConfigureAwait(false);
+                            if (execution == null || execution.ExitCode != 0 || !File.Exists(temporary))
+                                await DefaultIndexFallbackAsync(executable, archive, temporary, directory, progress, runner, token).ConfigureAwait(false);
+                            if (new FileInfo(temporary).Length > MaximumIndexBytes) throw new IOException("The archive index exceeds the supported size.");
+                            if (FileStamp(archive.Path) != archive.Fingerprint) throw new IOException("The archive changed while its asset index was being read.");
+                            Replace(temporary, index); SaveValidation(index);
+                        }
+                        finally { Delete(temporary); }
+                    }
+                    result.Indexes.Add(new DiscoveryArchiveLookupIndex { ArchivePath = archive.Path, Root = archive.Root,
+                        Fingerprint = archive.Fingerprint, IndexPath = index, ToolPath = executable, ToolKey = toolKey });
+                }
+                catch (Exception error) when (IsFileError(error) || error is TimeoutException || error is System.ComponentModel.Win32Exception)
+                { result.Warnings.Add("Could not read " + Path.GetFileName(archive.Path) + ": " + error.Message); }
+            }
+            return result;
+        }
 
         private sealed class Archive
         {

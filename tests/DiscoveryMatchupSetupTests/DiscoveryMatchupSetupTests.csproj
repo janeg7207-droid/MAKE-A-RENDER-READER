@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMatchupSetup.cs" Link="DiscoveryMatchupSetup.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMatchupCatalog.cs" Link="DiscoveryMatchupCatalog.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryArchiveMatchups.cs" Link="DiscoveryArchiveMatchups.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryArchiveRenders.cs" Link="DiscoveryArchiveRenders.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/MatchCardLayouts.cs" Link="MatchCardLayouts.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/FlatBufferFile.cs" Link="FlatBufferFile.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryProfiles.cs" Link="DiscoveryProfiles.cs" />
+  </ItemGroup>
+</Project>

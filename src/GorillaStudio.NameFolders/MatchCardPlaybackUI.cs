@@ -46,7 +46,7 @@ namespace GorillaStudio.NameFolders
                         button.RemoveHandler(Button.ClickEvent, original);
                         button.Click += async (sender, args) => await RunCombinedGameSetupAsync(window);
                     }
-            window.Closed += (sender, args) => { playbackWindows.Remove(window); screenSetupReports.Remove(window); layoutSetupReports.Remove(window); };
+            window.Closed += (sender, args) => { playbackWindows.Remove(window); screenSetupReports.Remove(window); layoutSetupReports.Remove(window); matchupSetupReports.Remove(window); };
         }
 
         private static IEnumerable<Button> PlaybackButtons(DependencyObject parent)
@@ -62,16 +62,27 @@ namespace GorillaStudio.NameFolders
 
         private static async Task<MatchCardLayoutsReport> CompleteMatchCardLayoutsAsync(Window window, string root)
         {
-            await LayoutSetupGate.WaitAsync();
+            var busy = window.GetType().GetField("Busy", InstanceMembers);
+            var body = window.GetType().GetField("BodyGrid", InstanceMembers)?.GetValue(window) as UIElement;
+            if (busy != null && busy.FieldType == typeof(bool) && (bool)busy.GetValue(window) && !combinedGameSetups.Contains(window))
+            {
+                SetModelStatus(window, "Run Game setup after the current model or render finishes to refresh Discovery matchup cards.");
+                return new MatchCardLayoutsReport();
+            }
+            bool ownsBusy = busy != null && busy.FieldType == typeof(bool) && !(bool)busy.GetValue(window);
+            bool enabled = body?.IsEnabled ?? true;
+            if (ownsBusy) { busy.SetValue(window, true); if (body != null) body.IsEnabled = false; }
             try
             {
-                var report = await Task.Run(() => MatchCardLayouts.Apply(AppDomain.CurrentDomain.BaseDirectory, root, false));
+                var discovery = await ReadDiscoveryMatchupsAsync(window, root, false);
+                var report = discovery.Layouts;
+                if (!window.IsLoaded) return report;
                 layoutSetupReports[window] = report;
-                if (report.Failed.Count + report.Unsupported.Count > 0) SetModelStatus(window, "Some match-card layouts could not be prepared. Open Check match-card setup for details.");
-                else if (report.BakeRequired) SetModelStatus(window, "Moving match-card layers are prepared. Bake once in Discovery, then restart WWE.");
+                if (DiscoveryMatchupsNeedAttention(window)) SetModelStatus(window, "Some Discovery matchup cards need attention. Open Check match-card setup, then Matchup cards.");
+                else if (discovery.BakeRequired) SetModelStatus(window, "Moving match-card layers are prepared. Bake once in Discovery, then restart WWE.");
                 return report;
             }
-            finally { LayoutSetupGate.Release(); }
+            finally { if (ownsBusy) { busy.SetValue(window, false); if (body != null) body.IsEnabled = enabled; } }
         }
 
         private static async Task RunCombinedGameSetupAsync(Window window)
@@ -98,24 +109,40 @@ namespace GorillaStudio.NameFolders
                 busy?.SetValue(window, true); ownsBusy = busy != null;
                 if (body != null) body.IsEnabled = false;
                 SetModelStatus(window, "Preparing moving match-card screens…");
-                var task = run?.Invoke(window, new object[] {
-                    Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
-                    new[] { root }, null, null
-                }) as Task<ValueTuple<int, List<string>>>;
-                if (task == null) throw new InvalidOperationException("The original game setup process could not be started.");
-                var output = await task;
-                var result = MatchCardReadiness.FromSetupResult(output.Item2);
-                if (output.Item1 != 0)
+                var result = MatchCardReadiness.FromSetupResult(null);
+                try
                 {
-                    result.Success = false;
-                    result.Failed.Add("Game setup exited with code " + output.Item1.ToString(CultureInfo.InvariantCulture) + ".");
-                    result.Summary = "Game setup did not finish. Open the app log for the setup error, then try again.";
+                    var task = run?.Invoke(window, new object[] {
+                        Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
+                        new[] { root }, null, null
+                    }) as Task<ValueTuple<int, List<string>>>;
+                    if (task == null) throw new InvalidOperationException("The original game setup process could not be started.");
+                    var output = await task;
+                    result = MatchCardReadiness.FromSetupResult(output.Item2);
+                    if (output.Item1 != 0)
+                    {
+                        result.Success = false;
+                        result.Failed.Add("Game setup exited with code " + output.Item1.ToString(CultureInfo.InvariantCulture) + ".");
+                        result.Summary = "Game setup did not finish. Open the app log for the setup error, then try again.";
+                    }
                 }
+                catch (Exception error)
+                {
+                    string message = (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message;
+                    result.Success = false;
+                    result.Failed.Add(message);
+                    result.Summary = "The original screen setup could not finish: " + message;
+                }
+                if (!window.IsLoaded) return;
                 screenSetupReports[window] = result;
                 layoutSetupReports.Remove(window);
-                if (!result.HasResult || !result.Success) { SetModelStatus(window, result.Summary); return; }
+                // Exact Discovery references can still be resolved when the older
+                // filename-based setup reports a partial archive failure.
                 var layouts = await CompleteMatchCardLayoutsAsync(window, root);
-                if (layouts.Failed.Count + layouts.Unsupported.Count == 0 && (result.BakeRequired || layouts.BakeRequired))
+                if (!window.IsLoaded) return;
+                if (!result.HasResult || !result.Success) SetModelStatus(window, "The original screen setup has unresolved errors. Discovery matchup lookup also ran; open Check match-card setup for both reports.");
+                else if (DiscoveryMatchupsNeedAttention(window)) SetModelStatus(window, "Discovery matchup setup prepared the available cards; some references or layouts still need attention. Open Matchup cards in the setup check.");
+                else if (layouts.Failed.Count + layouts.Unsupported.Count == 0 && (result.BakeRequired || layouts.BakeRequired || matchupSetupReports[window].BakeRequired))
                     SetModelStatus(window, "Game setup files are ready. Bake once in Discovery, then restart WWE.");
                 else if (!result.BakeRequired && !layouts.BakeRequired && layouts.Failed.Count + layouts.Unsupported.Count == 0)
                     SetModelStatus(window, "Game setup reports no changes. Open Check match-card setup if cards still show a still picture.");
@@ -152,7 +179,9 @@ namespace GorillaStudio.NameFolders
             var setup = new Button { Content = "Run game setup", Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(0, 0, 8, 0) };
             var enable = new Button { Content = "Enable moving renders", Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(0, 0, 8, 0) };
             var refresh = new Button { Content = "Check again", Padding = new Thickness(9, 5, 9, 5) };
-            buttons.Children.Add(setup); buttons.Children.Add(enable); buttons.Children.Add(refresh);
+            var cards = new Button { Content = "Matchup cards…", Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(8, 0, 0, 0) };
+            cards.Click += (sender, args) => ShowDiscoveryMatchupCards(window);
+            buttons.Children.Add(setup); buttons.Children.Add(enable); buttons.Children.Add(refresh); buttons.Children.Add(cards);
             DockPanel.SetDock(buttons, Dock.Bottom); body.Children.Add(buttons);
             var report = new TextBox {
                 IsReadOnly = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -177,6 +206,8 @@ namespace GorillaStudio.NameFolders
                     MatchCardLayoutsReport layouts;
                     if (layoutSetupReports.TryGetValue(window, out layouts)) report.Text += "\n\nMatch-card layout repair:\n" + layouts.Summary
                         + LayoutDetails(layouts);
+                    DiscoveryMatchupSetupReport matchups;
+                    if (matchupSetupReports.TryGetValue(window, out matchups)) report.Text += "\n\nDiscovery matchup catalog:\n" + DiscoveryMatchupDetails(matchups);
                 }
                 catch (Exception error) when (PictureError(error)) { report.Text = error.Message; }
             };
@@ -184,7 +215,13 @@ namespace GorillaStudio.NameFolders
             Func<Task> checkScreens = async () =>
             {
                 if (checking) return;
+                var nativeBusy = window.GetType().GetField("Busy", InstanceMembers);
+                if (nativeBusy != null && nativeBusy.GetValue(window) is bool && (bool)nativeBusy.GetValue(window))
+                { report.Text = "Wait for the current model, render or setup to finish, then check again."; return; }
                 checking = true; refresh.IsEnabled = false;
+                setup.IsEnabled = false; cards.IsEnabled = false;
+                bool ownsBusy = nativeBusy != null && nativeBusy.FieldType == typeof(bool);
+                if (ownsBusy) nativeBusy.SetValue(window, true);
                 try
                 {
                     string root = PlaybackRoot(window);
@@ -193,12 +230,14 @@ namespace GorillaStudio.NameFolders
                         MethodInfo run = window.GetType().GetMethod("RunPy", InstanceMembers, null,
                             new[] { typeof(string), typeof(IEnumerable<string>), typeof(Action<string>), typeof(Action<Process>) }, null);
                         string studio = window.GetType().GetField("Studio", InstanceMembers)?.GetValue(window) as string;
-                        var task = run?.Invoke(window, new object[] {
-                            Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
-                            new[] { root, "check" }, null, null
-                        }) as Task<ValueTuple<int, List<string>>>;
-                        if (task != null)
+                        update();
+                        try
                         {
+                            var task = run?.Invoke(window, new object[] {
+                                Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
+                                new[] { root, "check" }, null, null
+                            }) as Task<ValueTuple<int, List<string>>>;
+                            if (task == null) throw new InvalidOperationException("The original screen check could not be started.");
                             var output = await task;
                             var checkedSetup = MatchCardReadiness.FromSetupResult(output.Item2);
                             if (output.Item1 != 0)
@@ -206,22 +245,24 @@ namespace GorillaStudio.NameFolders
                                 checkedSetup.Success = false;
                                 checkedSetup.Summary = "Screen check exited with code " + output.Item1.ToString(CultureInfo.InvariantCulture) + ". Open the app log for details.";
                             }
-                            update();
                             report.Text += "\n\nCurrent screen check:\n" + checkedSetup.Summary;
-                            await LayoutSetupGate.WaitAsync();
-                            MatchCardLayoutsReport layouts;
-                            try { layouts = await Task.Run(() => MatchCardLayouts.Apply(AppDomain.CurrentDomain.BaseDirectory, root, true)); }
-                            finally { LayoutSetupGate.Release(); }
-                            report.Text += "\n\nCurrent match-card layout check:\n" + layouts.Summary
-                                + LayoutDetails(layouts);
                         }
-                        else update();
+                        catch (Exception error)
+                        { report.Text += "\n\nOriginal screen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
+                        var matchups = await ReadDiscoveryMatchupsAsync(window, root, true);
+                        var layouts = matchups.Layouts;
+                        report.Text += "\n\nCurrent match-card layout check:\n" + layouts.Summary
+                            + LayoutDetails(layouts);
+                        report.Text += "\n\nDiscovery matchup catalog:\n" + DiscoveryMatchupDetails(matchups);
                     }
                     else update();
                 }
                 catch (Exception error)
                 { update(); report.Text += "\n\nScreen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
-                finally { checking = false; refresh.IsEnabled = true; }
+                finally {
+                    if (ownsBusy) nativeBusy.SetValue(window, false);
+                    checking = false; refresh.IsEnabled = true; setup.IsEnabled = true; cards.IsEnabled = true;
+                }
             };
             refresh.Click += async (sender, args) => await checkScreens();
             enable.Click += (sender, args) =>
@@ -320,8 +361,12 @@ namespace GorillaStudio.NameFolders
                         SetModelStatus(window, "Moving screen files need game setup. Run game setup, then bake once in Discovery.");
                     else if (result.BakeRequired) SetModelStatus(window, "Game setup files are ready. Bake once in Discovery, then restart WWE for moving match cards.");
                     window.GetType().GetMethod("Log", InstanceMembers, null, new[] { typeof(string) }, null)?.Invoke(window, new object[] { result.Summary });
-                    if (result.HasResult && result.Success && !result.IsCheck && !string.IsNullOrWhiteSpace(setupRoot))
-                        try { await CompleteMatchCardLayoutsAsync(window, setupRoot); }
+                    if (!result.IsCheck && !string.IsNullOrWhiteSpace(setupRoot))
+                        try {
+                            await CompleteMatchCardLayoutsAsync(window, setupRoot);
+                            if (window.IsLoaded && (!result.HasResult || !result.Success))
+                                SetModelStatus(window, "The original screen setup has unresolved errors. Discovery matchup lookup also ran; open Check match-card setup for both reports.");
+                        }
                         catch (Exception error) when (PictureError(error)) { SetModelStatus(window, "Match-card layout setup could not finish: " + error.Message); }
                 }));
             });

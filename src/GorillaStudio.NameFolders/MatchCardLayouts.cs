@@ -37,8 +37,19 @@ namespace GorillaStudio.NameFolders
         private static readonly int[] Slots = { 2, 3, 4, 5, 6, 7, 8, 4, 5, 6, 8, 5, 6, 8, 4, 1, 2, 3, 6, 8 };
         private static readonly string[] ScreenDirectories = { "UI/Projects/ShowAssets/matchups", "UI/Projects/MatchUp", "UI/Projects/2K22_show_assets/matchup_screens" };
         private static readonly HashSet<int> ScalarSlots = new HashSet<int> { 0, 2, 30, 39, 51, 52, 53 };
+        private static readonly StringComparison PathComparison = Path.DirectorySeparatorChar == '\\' ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
         public static MatchCardLayoutsReport Apply(string appRoot, string discoveryRoot, bool checkOnly)
+        {
+            return Apply(appRoot, discoveryRoot, checkOnly, null);
+        }
+
+        /// <summary>
+        /// Exact catalog-resolved screen paths can authorize a custom outer node name.
+        /// Every path must remain inside the selected data folder; the measured layout,
+        /// complete player groups and supported leaf recipe are still required.
+        /// </summary>
+        public static MatchCardLayoutsReport Apply(string appRoot, string discoveryRoot, bool checkOnly, IEnumerable<string> explicitScreenPaths)
         {
             var report = new MatchCardLayoutsReport { IsCheck = checkOnly };
             try
@@ -53,6 +64,8 @@ namespace GorillaStudio.NameFolders
                     throw new InvalidDataException("The supplied match-card movie template is not a playing movie layer.");
                 byte[] placeholder = ValidatePlaceholders(appRoot);
                 var files = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                var knownNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var explicitFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (string sub in ScreenDirectories)
                 {
                     string directory = Path.Combine(root, sub.Replace('/', Path.DirectorySeparatorChar));
@@ -61,25 +74,53 @@ namespace GorillaStudio.NameFolders
                     {
                         string name = Path.GetFileName(file);
                         if (name.EndsWith(".jsfb", StringComparison.OrdinalIgnoreCase) && !name.Equals("matchup_bg.jsfb", StringComparison.OrdinalIgnoreCase)
-                            && (name.StartsWith("matchup", StringComparison.OrdinalIgnoreCase) || name.EndsWith("match_card.jsfb", StringComparison.OrdinalIgnoreCase))) files.Add(file);
+                            && (name.StartsWith("matchup", StringComparison.OrdinalIgnoreCase) || name.EndsWith("match_card.jsfb", StringComparison.OrdinalIgnoreCase)))
+                        { files.Add(file); knownNames.Add(file); }
                     }
                 }
-                foreach (string file in files)
+                string projects = Path.Combine(root, "UI", "Projects");
+                if (Directory.Exists(projects))
+                    foreach (string file in WalkFiles(projects))
+                        if (file.EndsWith(".jsfb", StringComparison.OrdinalIgnoreCase) && HasScreenHeader(file)) files.Add(file);
+                foreach (string path in explicitScreenPaths ?? Enumerable.Empty<string>())
                 {
                     try
                     {
+                        if (string.IsNullOrWhiteSpace(path)) throw new IOException("A catalog screen path is empty.");
+                        string portable = path.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
+                        string full = Path.GetFullPath(Path.IsPathRooted(portable) ? portable : Path.Combine(root, portable));
+                        string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                        if (!full.StartsWith(prefix, PathComparison))
+                            throw new IOException("A catalog screen path is outside the selected Discovery folder: " + path);
+                        ValidateInputPath(root, full);
+                        files.Add(full); explicitFiles.Add(full);
+                    }
+                    catch (Exception error) when (Expected(error)) { report.Failed.Add(error.Message); }
+                }
+                int recognized = 0;
+                foreach (string file in files)
+                {
+                    bool relevant = explicitFiles.Contains(file) || knownNames.Contains(file);
+                    try
+                    {
+                        ValidateInputPath(root, file);
                         byte[] original = ReadSmall(file);
                         var source = new Screen(original);
+                        bool explicitScreen = explicitFiles.Contains(file);
+                        if (!relevant && !HasMatchupLayout(source)) continue;
+                        relevant = true;
+                        if (HasPlayerGroups(source, explicitScreen)) recognized++;
                         int added; List<string> unsupported;
-                        byte[] patched = Patch(source, template, movie, out added, out unsupported);
+                        byte[] patched = Patch(source, template, movie, explicitScreen, out added, out unsupported);
                         foreach (string message in unsupported) report.Unsupported.Add(Relative(root, file) + ": " + message);
                         if (added == 0) { if (unsupported.Count == 0) report.Already++; continue; }
                         if (!checkOnly) ReplaceBackedUp(root, file, original, patched, report);
                         report.Patched++; report.AddedSlots += added; report.BakeRequired = true;
                     }
-                    catch (Exception error) when (Expected(error)) { report.Failed.Add(Relative(root, file) + ": " + error.Message); }
+                    catch (Exception error) when (Expected(error))
+                    { if (relevant) report.Failed.Add(Relative(root, file) + ": " + error.Message); }
                 }
-                if (files.Count > 0)
+                if (recognized > 0)
                     for (int layout = 0; layout < Layouts.Length; layout++)
                         for (int player = 1; player <= Slots[layout]; player++)
                         {
@@ -105,47 +146,76 @@ namespace GorillaStudio.NameFolders
             return report;
         }
 
-        private static byte[] Patch(Screen source, Screen template, int movie, out int added, out List<string> unsupported)
+        private static bool HasMatchupLayout(Screen screen)
+        {
+            return screen.Nodes.Any(node => node.Path.Count >= 2 && Layouts.Contains(node.Path[node.Path.Count - 1])
+                && node.Path.Take(node.Path.Count - 1).Contains("matchup"));
+        }
+
+        private static bool PlayerGroup(Node node, string layout, bool explicitScreen)
+        {
+            int count = node.Path.Count;
+            if (count < 2 || node.Path[count - 2] != layout) return false;
+            string player = node.Path[count - 1];
+            return player.Length == 2 && player[0] >= '1' && player[0] <= '8' && player[1] == 'P'
+                && (explicitScreen || node.Path.Take(count - 2).Contains("matchup"));
+        }
+
+        private static bool HasPlayerGroups(Screen source, bool explicitScreen)
+        {
+            return source.Nodes.Any(node => Layouts.Any(layout => PlayerGroup(node, layout, explicitScreen)));
+        }
+
+        private static byte[] Patch(Screen source, Screen template, int movie, bool explicitScreen, out int added, out List<string> unsupported)
         {
             added = 0; unsupported = new List<string>();
-            if (!source.Nodes.Any(node => node.Path.Count == 3 && node.Path[0] == "matchup" && Layouts.Contains(node.Path[1])))
+            if (!HasPlayerGroups(source, explicitScreen))
                 unsupported.Add("No supported match-up player-slot groups were found; left unchanged.");
             var clone = new Copier(source.Bytes);
             var changes = new HashSet<int>();
             for (int layout = 0; layout < Layouts.Length; layout++)
             {
-                var groups = source.Nodes.Where(node => node.Path.Count == 3 && node.Path[0] == "matchup" && node.Path[1] == Layouts[layout]
-                    && node.Path[2].Length == 2 && node.Path[2][0] >= '1' && node.Path[2][0] <= '8' && node.Path[2][1] == 'P').ToList();
-                if (groups.Count == 0) continue;
-                if (groups.Count != Slots[layout] || Enumerable.Range(1, Slots[layout]).Any(player => groups.Count(node => node.Path[2] == player + "P") != 1))
-                { unsupported.Add(Layouts[layout] + " has an unexpected player-slot structure; left unchanged."); continue; }
-                foreach (Node group in groups)
+                var containers = source.Nodes.Where(node => PlayerGroup(node, Layouts[layout], explicitScreen)).GroupBy(node => node.Parent);
+                foreach (var container in containers)
                 {
-                    int[] children = source.Children(group.Position);
-                    string[] names = children.Select(source.Name).ToArray();
-                    if (names.Contains("GM_clip")) continue;
-                    if (children.Length != 2 || names[0] != "CAS_dummy" || names[1] != "SS_dummy"
-                        || children.Any(child => source.ByteField(child, 2) != 2))
-                    { unsupported.Add(string.Join("/", group.Path) + " has custom slot children; left unchanged."); continue; }
-                    int player = int.Parse(group.Path[2].Substring(0, 1), CultureInfo.InvariantCulture);
-                    // Validate every clone before changing the original child pointer.
-                    // Unsupported non-leaf/mod schemas leave the complete input unchanged.
-                    try
+                    var groups = container.ToList();
+                    string label = string.Join("/", groups[0].Path.Take(groups[0].Path.Count - 1));
+                    if (groups.Count != Slots[layout] || Enumerable.Range(1, Slots[layout]).Any(player => groups.Count(node => node.Path.Last() == player + "P") != 1))
+                    { unsupported.Add(label + " has an unexpected player-slot structure; left unchanged."); continue; }
+                    foreach (Node group in groups)
                     {
-                        int vector = clone.Allocate(16); clone.Put32(vector, 3);
-                        int cas = clone.Table(source, children[0], true);
-                        int still = clone.Table(source, children[1], true);
-                        int moving = clone.Table(template, movie, true);
-                        clone.Name(moving, "GM_clip"); clone.Asset(moving, Hash(MoviePath(layout, player)));
-                        clone.Floats(moving, 3, 0f, -551f); clone.Floats(moving, 4, 1024f, 1024f);
-                        clone.Floats(moving, 5, 1102f / 1024f, 1102f / 1024f);
-                        float marker = 1f + (8 * layout + player) / 1048576f;
-                        clone.Floats(still, 5, marker, marker);
-                        clone.Point(vector + 4, cas); clone.Point(vector + 8, still); clone.Point(vector + 12, moving);
-                        int childField = source.Field(group.Position, 55); clone.Point(childField, vector);
-                        changes.Add(childField); added++;
+                        int[] children = source.Children(group.Position);
+                        string[] names = children.Select(source.Name).ToArray();
+                        int player = int.Parse(group.Path.Last().Substring(0, 1), CultureInfo.InvariantCulture);
+                        int[] existingMovies = children.Where(child => source.Name(child) == "GM_clip").ToArray();
+                        if (existingMovies.Length > 0)
+                        {
+                            if (existingMovies.Length != 1 || !ExpectedMovie(source, existingMovies[0], layout, player))
+                                unsupported.Add(string.Join("/", group.Path) + ": existing GM_clip is not an autoplay movie for this layout/player asset; existing bytes were left unchanged.");
+                            continue;
+                        }
+                        if (children.Length != 2 || names[0] != "CAS_dummy" || names[1] != "SS_dummy"
+                            || children.Any(child => source.ByteField(child, 2) != 2))
+                        { unsupported.Add(string.Join("/", group.Path) + " has custom slot children; left unchanged."); continue; }
+                        // Validate every clone before changing the original child pointer.
+                        // Unsupported non-leaf/mod schemas leave the complete input unchanged.
+                        try
+                        {
+                            int vector = clone.Allocate(16); clone.Put32(vector, 3);
+                            int cas = clone.Table(source, children[0], true);
+                            int still = clone.Table(source, children[1], true);
+                            int moving = clone.Table(template, movie, true);
+                            clone.Name(moving, "GM_clip"); clone.Asset(moving, Hash(MoviePath(layout, player)));
+                            clone.Floats(moving, 3, 0f, -551f); clone.Floats(moving, 4, 1024f, 1024f);
+                            clone.Floats(moving, 5, 1102f / 1024f, 1102f / 1024f);
+                            float marker = 1f + (8 * layout + player) / 1048576f;
+                            clone.Floats(still, 5, marker, marker);
+                            clone.Point(vector + 4, cas); clone.Point(vector + 8, still); clone.Point(vector + 12, moving);
+                            int childField = source.Field(group.Position, 55); clone.Point(childField, vector);
+                            changes.Add(childField); added++;
+                        }
+                        catch (InvalidDataException error) { unsupported.Add(string.Join("/", group.Path) + ": " + error.Message); }
                     }
-                    catch (InvalidDataException error) { unsupported.Add(string.Join("/", group.Path) + ": " + error.Message); }
                 }
             }
             if (added == 0) return source.Bytes;
@@ -164,6 +234,15 @@ namespace GorillaStudio.NameFolders
                     throw new InvalidDataException("The completed slot did not retain its playing movie layer.");
             }
             return result;
+        }
+
+        private static bool ExpectedMovie(Screen source, int movie, int layout, int player)
+        {
+            if (source.ByteField(movie, 2) != 7 || source.ByteField(movie, 51) != 1) return false;
+            int asset = source.Field(movie, 0);
+            if (asset == 0 || (long)asset + 8 > (long)movie + source.ShapeOf(movie).Size) return false;
+            ulong actual = U32(source.Bytes, asset) | (ulong)U32(source.Bytes, asset + 4) << 32;
+            return actual == Hash(MoviePath(layout, player));
         }
 
         private static byte[] ValidatePlaceholders(string appRoot)
@@ -213,13 +292,41 @@ namespace GorillaStudio.NameFolders
         private static string Relative(string root, string path) { return path.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ? path.Substring(root.TrimEnd(Path.DirectorySeparatorChar).Length + 1) : path; }
         private static bool Expected(Exception error) { return error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException || error is InvalidOperationException || error is OverflowException || error is NotSupportedException || error is System.Security.SecurityException; }
 
+        private static bool HasScreenHeader(string path)
+        {
+            try
+            {
+                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    if (stream.Length < 12 || stream.Length > Limit) return false;
+                    byte[] header = new byte[8];
+                    return stream.Read(header, 0, header.Length) == header.Length && Encoding.ASCII.GetString(header, 4, 4) == "Scre";
+                }
+            }
+            catch (Exception error) when (Expected(error)) { return false; }
+        }
+
+        private static void ValidateInputPath(string root, string file)
+        {
+            string current = Path.GetFullPath(file), boundary = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            while (current != null && (string.Equals(current, boundary, PathComparison)
+                || current.StartsWith(boundary + Path.DirectorySeparatorChar, PathComparison)))
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("A linked catalog screen path was not followed: " + current);
+                if (string.Equals(current, boundary, PathComparison)) return;
+                current = Path.GetDirectoryName(current);
+            }
+            throw new IOException("A screen path is outside the selected Discovery folder.");
+        }
+
         private static IEnumerable<string> WalkFiles(string root)
         {
             var pending = new Stack<string>(); pending.Push(root);
             while (pending.Count > 0)
             {
                 string folder = pending.Pop();
-                if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) throw new IOException("A linked screen directory was not followed: " + folder);
+                if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) continue;
                 foreach (string child in Directory.GetDirectories(folder)) pending.Push(child);
                 foreach (string file in Directory.GetFiles(folder))
                     if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) == 0) yield return file;
@@ -271,7 +378,7 @@ namespace GorillaStudio.NameFolders
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
 
-        private sealed class Node { internal int Position; internal List<string> Path; }
+        private sealed class Node { internal int Position, Parent; internal List<string> Path; }
         private sealed class Shape { internal int VTable, Size; internal int[] Offsets; }
         private sealed class Screen
         {
@@ -281,14 +388,14 @@ namespace GorillaStudio.NameFolders
                 Bytes = bytes;
                 if (bytes.Length < 12 || Encoding.ASCII.GetString(bytes, 4, 4) != "Scre") throw new InvalidDataException("Not a Scre project.");
                 int root = Target(0); ShapeOf(root);
-                foreach (int child in Vector(root, 3)) Walk(child, new List<string>(), new HashSet<int>(), 0);
+                foreach (int child in Vector(root, 3)) Walk(child, root, new List<string>(), new HashSet<int>(), 0);
             }
-            private void Walk(int position, List<string> path, HashSet<int> parents, int depth)
+            private void Walk(int position, int parent, List<string> path, HashSet<int> parents, int depth)
             {
                 if (depth > 64 || Nodes.Count > 30000 || !parents.Add(position)) throw new InvalidDataException("Cyclic or oversized screen hierarchy.");
                 var names = new List<string>(path) { Name(position) };
-                Nodes.Add(new Node { Position = position, Path = names });
-                foreach (int child in Children(position)) Walk(child, names, parents, depth + 1);
+                Nodes.Add(new Node { Position = position, Parent = parent, Path = names });
+                foreach (int child in Children(position)) Walk(child, position, names, parents, depth + 1);
                 parents.Remove(position);
             }
             internal int[] Children(int table) { return Vector(table, 55); }
