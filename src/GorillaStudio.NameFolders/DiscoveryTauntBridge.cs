@@ -8,6 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -32,22 +33,115 @@ namespace GorillaStudio.NameFolders
         private static readonly HashSet<Window> hooked = new HashSet<Window>();
         private static readonly Dictionary<Window, string> applied = new Dictionary<Window, string>();
         private static readonly HashSet<Window> searchHooked = new HashSet<Window>();
+        private static readonly Dictionary<Window, long> refreshRequests = new Dictionary<Window, long>();
+        private static long nextRefreshRequest;
 
-        public static async Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot)
+        public static Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot)
         {
-            await RefreshLock.WaitAsync();
+            return RefreshAsync(owner, discoveryRoot, null, CancellationToken.None, null);
+        }
+
+        public static async Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot,
+            Action<string> progress, CancellationToken cancellationToken, Action<bool> cancellationEnabled = null)
+        {
+            var window = owner as Window;
+            if (window == null) throw new ArgumentException("Choose an open Gorilla Studio window.", nameof(owner));
+            long request = Interlocked.Increment(ref nextRefreshRequest);
+            lock (refreshRequests) refreshRequests[window] = request;
+            string game = null, folder = null;
+            bool entered = false;
+            using (var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             try
             {
-                DiscoveryTauntImport result = await Task.Run(() => DiscoveryTauntLibrary.Build(
-                    AppDomain.CurrentDomain.BaseDirectory, FolderBridge.StorageDirectory, discoveryRoot));
-                var window = owner as Window;
-                if (window == null) throw new ArgumentException("Choose an open Gorilla Studio window.", nameof(owner));
-                if (window.Dispatcher.CheckAccess()) { if (window.IsLoaded) Apply(window, result); }
-                else if (!window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
-                    window.Dispatcher.Invoke(new Action(() => { if (window.IsLoaded) Apply(window, result); }));
-                return result;
+                EventHandler closed = (sender, args) => cancellation.Cancel();
+                try
+                {
+                    RefreshOnDispatcher(window, () => {
+                        if (!window.IsLoaded) throw new OperationCanceledException(cancellation.Token);
+                        game = window.GetType().GetField("Game", Members)?.GetValue(window) as string;
+                        folder = window.GetType().GetField("Folder", Members)?.GetValue(window) as string;
+                        window.Closed += closed;
+                    });
+                    await RefreshLock.WaitAsync(cancellation.Token);
+                    entered = true;
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    progress?.Invoke("Reading Discovery taunt definitions and extracted animation assets…");
+                    string app = AppDomain.CurrentDomain.BaseDirectory;
+                    string dataRoot = null;
+                    List<string> missing = await Task.Run(() => DiscoveryTauntLibrary.FindUnresolvedClips(app,
+                        discoveryRoot, out dataRoot), cancellation.Token);
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    DiscoveryMotionFallbacks fallbacks = null;
+                    if (missing.Count > 0 && !string.IsNullOrWhiteSpace(dataRoot))
+                    {
+                        progress?.Invoke("Looking for " + missing.Count.ToString(CultureInfo.InvariantCulture) + " animation clips in game and Discovery archives…");
+                        try
+                        {
+                            fallbacks = await DiscoveryArchiveMotions.FindAsync(app, game, dataRoot, missing,
+                                Path.Combine(FolderBridge.StorageDirectory, "motion-archives"), progress, cancellation.Token);
+                            if (fallbacks == null) throw new InvalidOperationException("The animation archive lookup returned no result.");
+                        }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException
+                            || error is InvalidDataException || error is InvalidOperationException || error is ArgumentException
+                            || error is NotSupportedException || error is System.ComponentModel.Win32Exception)
+                        {
+                            fallbacks = new DiscoveryMotionFallbacks {
+                                Incomplete = true, Status = "Automatic animation archive lookup could not finish: " + error.Message
+                            };
+                            fallbacks.Warnings.Add(fallbacks.Status);
+                            foreach (string clip in missing) fallbacks.Issues[clip] = fallbacks.Status;
+                        }
+                    }
+                    cancellation.Token.ThrowIfCancellationRequested();
+                    RefreshOnDispatcher(window, () => {
+                        if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
+                        cancellationEnabled?.Invoke(false);
+                    });
+                    // Build updates a shared overlay. Once this short commit starts,
+                    // complete the matching UI switch rather than leaving old keys
+                    // pointing at an animation removed by a half-canceled refresh.
+                    progress?.Invoke("Finishing the animation library…");
+                    DiscoveryTauntImport result = await Task.Run(() => DiscoveryTauntLibrary.Build(
+                        app, FolderBridge.StorageDirectory, discoveryRoot, fallbacks));
+                    RefreshOnDispatcher(window, () => {
+                        if (RefreshContextCurrent(window, request, game, folder)) Apply(window, result);
+                    });
+                    return result;
+                }
+                finally
+                {
+                    if (!window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
+                        RefreshOnDispatcher(window, () => window.Closed -= closed);
+                }
             }
-            finally { RefreshLock.Release(); }
+            finally
+            {
+                if (entered) RefreshLock.Release();
+                lock (refreshRequests)
+                {
+                    long current;
+                    if (refreshRequests.TryGetValue(window, out current) && current == request) refreshRequests.Remove(window);
+                }
+            }
+        }
+
+        private static void RefreshOnDispatcher(Window window, Action action)
+        {
+            if (window.Dispatcher.HasShutdownStarted || window.Dispatcher.HasShutdownFinished)
+                throw new OperationCanceledException("The Gorilla Studio window is closing.");
+            if (window.Dispatcher.CheckAccess()) action();
+            else window.Dispatcher.Invoke(action);
+        }
+
+        private static bool RefreshContextCurrent(Window window, long request, string game, string folder)
+        {
+            long current;
+            lock (refreshRequests)
+                if (!refreshRequests.TryGetValue(window, out current) || current != request) return false;
+            return window.IsLoaded
+                && string.Equals(game, window.GetType().GetField("Game", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(folder, window.GetType().GetField("Folder", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase);
         }
 
         public static void ConfigureProcess(object owner, Process process, string script, IEnumerable<string> args)
@@ -151,6 +245,7 @@ namespace GorillaStudio.NameFolders
                 window.Closed += (sender, args) => { hooked.Remove(window); applied.Remove(window); searchHooked.Remove(window); };
             }
             ShowPreviewHint(window);
+            FolderBridge.AttachAutomaticTauntPreview(window);
         }
 
         private sealed class UnavailableTauntConverter : IValueConverter
@@ -221,19 +316,29 @@ namespace GorillaStudio.NameFolders
                 }
                 return;
             }
-            if (!key.StartsWith("discovery", StringComparison.Ordinal) && !key.Contains("_discovery_")) return;
+            bool discovery = key.StartsWith("discovery", StringComparison.Ordinal) || key.Contains("_discovery_");
+            string library = window.GetType().GetField("Library", Members)?.GetValue(window) as string;
+            // Bundled thumbnails are retained exactly. A missing stock atlas
+            // can be supplied by the same actual wrestler preview as a newly
+            // discovered taunt, without changing any existing native atlas.
+            if (!discovery && !string.IsNullOrWhiteSpace(library)
+                && File.Exists(Path.Combine(library, "previews_game", key + ".png"))) return;
             if (ShowDiscoveryPreview(window, key)) return;
+            Field<DispatcherTimer>(window, "PreviewTimer")?.Stop();
+            var preview = Field<Image>(window, "TauntPreview");
+            if (preview != null) preview.Source = null;
             var making = Field<TextBlock>(window, "PreviewMaking");
             if (making != null)
             {
-                making.Text = "Click Preview to see this taunt\non your selected wrestler.";
+                making.Text = FolderBridge.AutomaticTauntPreviewRequested(window, key)
+                    ? "Preparing your wrestler preview…" : "Select this taunt to create its preview\non your selected wrestler.";
                 making.Visibility = Visibility.Visible;
             }
         }
 
         private static bool ShowDiscoveryPreview(Window window, string key)
         {
-            if (string.IsNullOrEmpty(key) || (!key.StartsWith("discovery", StringComparison.Ordinal) && !key.Contains("_discovery_"))) return false;
+            if (string.IsNullOrEmpty(key) || !Regex.IsMatch(key, @"\A[A-Za-z0-9_]+\z") || DiscoveryTauntSearch.IsUnavailableKey(key)) return false;
             try
             {
                 Type type = window.GetType();

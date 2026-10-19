@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 
@@ -19,6 +21,7 @@ namespace GorillaStudio.NameFolders
         private static readonly HashSet<Window> attachedWindows = new HashSet<Window>();
         private static readonly HashSet<Window> rosterWindowsBusy = new HashSet<Window>();
         private static readonly Dictionary<Window, ModelTauntRefresh> modelTauntRefreshes = new Dictionary<Window, ModelTauntRefresh>();
+        private static readonly Dictionary<Window, TauntLoadProgress> tauntLoads = new Dictionary<Window, TauntLoadProgress>();
         private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
         private sealed class ModelTauntRefresh
@@ -26,6 +29,18 @@ namespace GorillaStudio.NameFolders
             internal readonly DiscoveryTauntRefreshGate Gate = new DiscoveryTauntRefreshGate();
             internal DispatcherTimer Timer;
             internal bool Closed;
+        }
+
+        private sealed class TauntLoadProgress
+        {
+            internal readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+            internal Button Cancel;
+            internal Panel Host;
+            internal Window Dialog;
+            internal TextBlock Status;
+            internal bool Committing;
+            internal bool Closed;
+            internal bool Finished;
         }
 
         private static void QueueModelDiscoveryTaunts(string alias, string discoveryRoot)
@@ -110,6 +125,7 @@ namespace GorillaStudio.NameFolders
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 AttachUpdateControls(window);
+                AttachAutomaticTauntPreview(window);
                 if (!NativeStartupAutomation(window))
                     await RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             };
@@ -122,6 +138,7 @@ namespace GorillaStudio.NameFolders
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 AttachUpdateControls(window);
+                AttachAutomaticTauntPreview(window);
                 if (!NativeStartupAutomation(window))
                     _ = RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
             }
@@ -323,7 +340,7 @@ namespace GorillaStudio.NameFolders
 
         private static async Task RefreshDiscoveryTauntsAsync(Window window, string source, bool explicitSetup)
         {
-            if (string.IsNullOrWhiteSpace(source)) return;
+            if (string.IsNullOrWhiteSpace(source) || !window.IsLoaded || tauntLoads.ContainsKey(window)) return;
             Type type = window.GetType();
             var busyField = type.GetField("Busy", InstanceMembers);
             var gameBusyField = type.GetField("GameBusy", InstanceMembers);
@@ -337,8 +354,17 @@ namespace GorillaStudio.NameFolders
             var body = bodyField == null ? null : bodyField.GetValue(window) as UIElement;
             bool enabled = body != null && body.IsEnabled;
             if (body != null) body.IsEnabled = false;
+            var load = new TauntLoadProgress();
+            tauntLoads[window] = load;
+            EventHandler closed = (sender, args) => {
+                load.Closed = true;
+                load.Cancellation.Cancel();
+                CloseTauntLoadProgress(load);
+            };
+            window.Closed += closed;
             try
             {
+                ShowTauntLoadProgress(window, body, load);
                 StopAutomaticMake(window);
                 var prepField = type.GetField("PrepTask", InstanceMembers);
                 var preparation = prepField == null ? null : prepField.GetValue(window) as Task;
@@ -347,8 +373,15 @@ namespace GorillaStudio.NameFolders
                     try { await preparation; }
                     catch { /* The next native preparation retains its normal error handling. */ }
                 }
+                load.Cancellation.Token.ThrowIfCancellationRequested();
                 SetModelStatus(window, "Reading Discovery taunts and animation assets…");
-                DiscoveryTauntImport import = await DiscoveryTauntBridge.RefreshAsync(window, source);
+                DiscoveryTauntImport import = await DiscoveryTauntBridge.RefreshAsync(window, source,
+                    update => UpdateTauntLoadProgress(window, load, update), load.Cancellation.Token,
+                    canCancel => {
+                        load.Committing = !canCancel;
+                        if (load.Cancel != null) load.Cancel.IsEnabled = canCancel && !load.Closed && !load.Cancellation.IsCancellationRequested;
+                    });
+                if (load.Closed || !window.IsLoaded) return;
                 string message = import.Definitions == 0
                     ? "No Discovery moves table found; the bundled taunts remain available."
                     : import.Available + " taunts available · " + import.Imported + " added from Discovery";
@@ -356,21 +389,30 @@ namespace GorillaStudio.NameFolders
                 if (import.Unsupported > 0) message += " · " + import.Unsupported + " unsupported animations";
                 if (import.ReadFailures > 0) message += " · " + import.ReadFailures + " animation read errors";
                 if (import.CacheFailures > 0) message += " · " + import.CacheFailures + " preview cache errors";
+                if (import.ArchiveImported > 0) message += " · " + import.ArchiveImported + " recovered from archives";
+                if (import.ArchivesSearched) message += " · " + import.ArchiveCount + " archives checked";
                 if (import.ScanIncomplete) message += " · scan incomplete (see details)";
                 SetModelStatus(window, message);
                 if (explicitSetup)
                 {
-                    string details = message + "\n\nSelect a wrestler, choose a taunt, then click Preview.";
+                    string details = message + "\n\nSelect a wrestler and choose a taunt to preview it.";
                     if (import.SearchRoots.Count > 0)
-                        details += "\n\nAnimation search covers the entire Discovery folder:\n" + string.Join("\n", import.SearchRoots)
-                            + "\nInstalled-game archives are not searched for animations.";
+                        details += "\n\nAnimation search covers the entire Discovery folder:\n" + string.Join("\n", import.SearchRoots);
+                    if (!string.IsNullOrWhiteSpace(import.ArchiveStatus)) details += "\n\n" + import.ArchiveStatus;
+                    else if (import.ArchivesSearched) details += "\n\n" + import.ArchiveCount + " game/Discovery archives searched for unmatched animation clips.";
                     if (import.Warnings.Count > 0) details += "\n\n" + string.Join("\n", import.Warnings);
                     Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), details,
                         "Discovery data loaded", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Information);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                if (!load.Closed && window.IsLoaded)
+                    SetModelStatus(window, "Animation lookup canceled; the current taunt library was kept.");
+            }
             catch (Exception error)
             {
+                if (load.Closed || !window.IsLoaded) return;
                 SetModelStatus(window, "Discovery taunts could not be refreshed: " + error.Message);
                 if (explicitSetup)
                     Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), error.Message,
@@ -378,10 +420,92 @@ namespace GorillaStudio.NameFolders
             }
             finally
             {
-                if (body != null) body.IsEnabled = enabled;
-                if (ownsBusy) busyField.SetValue(window, false);
-                SetPerformanceBusy(window, false);
+                load.Finished = true;
+                window.Closed -= closed;
+                CloseTauntLoadProgress(load);
+                tauntLoads.Remove(window);
+                load.Cancellation.Dispose();
+                if (!load.Closed)
+                {
+                    if (body != null) body.IsEnabled = enabled;
+                    if (ownsBusy) busyField.SetValue(window, false);
+                    SetPerformanceBusy(window, false);
+                }
             }
+        }
+
+        private static void ShowTauntLoadProgress(Window owner, UIElement disabledBody, TauntLoadProgress load)
+        {
+            Button reference = null;
+            foreach (Button candidate in PlaybackButtons(owner))
+                if (string.Equals(candidate.Content as string, "Game setup", StringComparison.OrdinalIgnoreCase))
+                { reference = candidate; break; }
+            var host = reference?.Parent as Panel;
+            var cancel = new Button {
+                Content = "Cancel load", Padding = new Thickness(8, 3, 8, 3),
+                ToolTip = "Cancel the animation archive lookup and keep the current taunt library."
+            };
+            load.Cancel = cancel;
+            cancel.Click += (sender, args) => CancelTauntLoad(owner, load);
+            if ((host is StackPanel || host is WrapPanel) && !InsideTauntBody(host, disabledBody))
+            {
+                cancel.Style = reference.Style;
+                cancel.FontSize = reference.FontSize;
+                cancel.Margin = reference.Margin;
+                host.Children.Insert(host.Children.IndexOf(reference) + 1, cancel);
+                load.Host = host;
+                return;
+            }
+            var dialog = new Window {
+                Owner = owner, Title = "Loading Discovery animations", Width = 460, Height = 175,
+                ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = new SolidColorBrush(Color.FromRgb(22, 22, 27)), Foreground = Brushes.White,
+                FontFamily = owner.FontFamily, FontSize = 13, ShowInTaskbar = false
+            };
+            load.Dialog = dialog;
+            var panel = new DockPanel { Margin = new Thickness(16) };
+            cancel.HorizontalAlignment = HorizontalAlignment.Right;
+            DockPanel.SetDock(cancel, Dock.Bottom); panel.Children.Add(cancel);
+            load.Status = new TextBlock { Text = "Reading Discovery animation assets…", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
+            panel.Children.Add(load.Status); dialog.Content = panel;
+            dialog.Closing += (sender, args) => {
+                if (load.Finished || load.Closed) return;
+                args.Cancel = true;
+                if (!load.Committing) CancelTauntLoad(owner, load);
+            };
+            dialog.Show();
+        }
+
+        private static bool InsideTauntBody(DependencyObject item, UIElement body)
+        {
+            for (DependencyObject current = item; current != null; current = VisualTreeHelper.GetParent(current))
+                if (ReferenceEquals(current, body)) return true;
+            return false;
+        }
+
+        private static void CancelTauntLoad(Window owner, TauntLoadProgress load)
+        {
+            if (load.Committing || load.Finished || load.Closed) return;
+            load.Cancellation.Cancel();
+            if (load.Cancel != null) load.Cancel.IsEnabled = false;
+            if (load.Status != null) load.Status.Text = "Canceling animation lookup…";
+            if (owner.IsLoaded) SetModelStatus(owner, "Canceling animation lookup…");
+        }
+
+        private static void UpdateTauntLoadProgress(Window owner, TauntLoadProgress load, string message)
+        {
+            if (owner.Dispatcher.HasShutdownStarted || owner.Dispatcher.HasShutdownFinished) return;
+            owner.Dispatcher.BeginInvoke(new Action(() => {
+                if (load.Finished || load.Closed || !owner.IsLoaded || (load.Cancellation.IsCancellationRequested && !load.Committing)) return;
+                if (load.Status != null) load.Status.Text = message;
+                SetModelStatus(owner, message);
+            }));
+        }
+
+        private static void CloseTauntLoadProgress(TauntLoadProgress load)
+        {
+            if (load.Host != null && load.Cancel != null) { load.Host.Children.Remove(load.Cancel); load.Host = null; }
+            if (load.Dialog != null && (load.Finished || load.Closed)) { load.Dialog.Close(); load.Dialog = null; }
         }
 
         private static string RememberedRoot(Window window)

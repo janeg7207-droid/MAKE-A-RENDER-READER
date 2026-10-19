@@ -6,6 +6,18 @@ using System.Text;
 
 namespace GorillaStudio.NameFolders
 {
+    /// <summary>Exact animation records recovered from sources outside the extracted Discovery tree.</summary>
+    public sealed class DiscoveryMotionFallbacks
+    {
+        public Dictionary<string, DiscoveryMotionAsset> Assets { get; } = new Dictionary<string, DiscoveryMotionAsset>(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> Issues { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public List<string> Warnings { get; } = new List<string>();
+        public bool ArchivesSearched { get; internal set; }
+        public int ArchiveCount { get; internal set; }
+        public bool Incomplete { get; internal set; }
+        public string Status { get; internal set; }
+    }
+
     public sealed class DiscoveryMotionAsset
     {
         public string Path { get; internal set; }

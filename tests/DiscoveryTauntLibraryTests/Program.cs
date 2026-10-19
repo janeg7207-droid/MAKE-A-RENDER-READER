@@ -117,7 +117,159 @@ internal static class Program
         RefreshTests(root);
         ScopeTests(root);
         DiagnosticTests(root);
+        FallbackTests(root);
         SearchTests();
+    }
+
+    private sealed class FallbackFixture
+    {
+        internal string App, Library, Decoded, Data, Table, Storage, CachedClip;
+        internal DiscoveryMotionFallbacks Fallbacks;
+    }
+
+    private static FallbackFixture FallbackFixtureAt(string root, string name)
+    {
+        string directory = Directory.CreateDirectory(Path.Combine(root, "archive-fallback", name)).FullName;
+        var f = new FallbackFixture {
+            App = Directory.CreateDirectory(Path.Combine(directory, "app")).FullName,
+            Data = Directory.CreateDirectory(Path.Combine(directory, "discovery_data")).FullName,
+            Storage = Directory.CreateDirectory(Path.Combine(directory, "private-cache")).FullName
+        };
+        f.Library = Directory.CreateDirectory(Path.Combine(f.App, "data", "library")).FullName;
+        f.Decoded = Directory.CreateDirectory(Path.Combine(f.App, "data", "gamepack", "decoded")).FullName;
+        Directory.CreateDirectory(Path.Combine(f.App, "engine"));
+        Directory.CreateDirectory(Path.Combine(f.Data, "MoveData"));
+        File.WriteAllText(Path.Combine(f.Library, "taunts.json"), "{\"taunts\":[]}");
+        f.Table = Path.Combine(f.Data, "MoveData", "CAMMoveData.jsfb");
+        byte[] table = CamTable();
+        Write(table, 136, 17330u); Write(table, 140, 0u);
+        byte[] label = System.Text.Encoding.UTF8.GetBytes("Enigma 4");
+        Array.Clear(table, 164, 40); Write(table, 160, (uint)label.Length); Array.Copy(label, 0, table, 164, label.Length);
+        File.WriteAllBytes(f.Table, table);
+        string privateMotions = Directory.CreateDirectory(Path.Combine(f.Storage, "archive-motion-cache")).FullName;
+        f.CachedClip = Path.Combine(privateMotions, "17330a000.clip");
+        byte[] clip = Motion("17330a000", 30);
+        Array.Copy(BitConverter.GetBytes(10f), 0, clip, 0xA8 + 4, 4);
+        File.WriteAllBytes(f.CachedClip, clip);
+        f.Fallbacks = new DiscoveryMotionFallbacks { ArchivesSearched = true, ArchiveCount = 2, Status = "Recovered the exact clip from indexed archives." };
+        f.Fallbacks.Assets["17330a000"] = FallbackAsset(f.CachedClip, "17330a000");
+        return f;
+    }
+
+    private static DiscoveryMotionAsset FallbackAsset(string path, string declaredClip)
+    {
+        return new DiscoveryMotionAsset { Path = path, Offset = 0, Length = checked((int)new FileInfo(path).Length), Id = DiscoveryMotionAssets.ClipId(declaredClip), Loose = false };
+    }
+
+    private static void FallbackTests(string root)
+    {
+        const string clip = "17330a000";
+        var f = FallbackFixtureAt(root, "exact-enigma");
+        var sources = new[] { Path.Combine(f.Library, "taunts.json"), f.Table, f.CachedClip }.ToDictionary(path => path, Hash);
+        DiscoveryTauntImport first = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        string manifest = Path.Combine(first.Library, "taunts.json");
+        string npz = Path.Combine(first.Root, "data", "gamepack", "decoded", clip + ".npz");
+        Equal("An exact private cached Enigma 4 body clip fills its Discovery definition", 1, first.Imported);
+        Equal("Recovered archive motions have an explicit successful-import count", 1, first.ArchiveImported);
+        Equal("The recovered Enigma variant uses its complete canonical clip identity", clip,
+            JsonDocument.Parse(File.ReadAllText(manifest)).RootElement.GetProperty("taunts")[0].GetProperty("clip").GetString());
+        Equal("The recovered clip keeps the actual Discovery label Enigma 4", "Enigma 4",
+            JsonDocument.Parse(File.ReadAllText(manifest)).RootElement.GetProperty("taunts")[0].GetProperty("name").GetString());
+        Equal("A recovered variant receives a real engine key rather than an unavailable UI key", true,
+            ManifestKey(manifest).StartsWith("discovery17330a000_", StringComparison.Ordinal));
+        Equal("Recovered motion poses match the exact private clip bytes", true,
+            DiscoveryMotionNpz.MatchesPoses(npz, DiscoveryMotionDecoder.Decode(File.ReadAllBytes(f.CachedClip))));
+        Equal("Recovered clip import removes the unavailable row", 0, first.Unavailable.Count);
+        Equal("The imported catalog preserves archive-search count and status", true,
+            first.ArchivesSearched && first.ArchiveCount == 2 && first.ArchiveStatus == f.Fallbacks.Status);
+        Equal("Importing recovered motion never changes Discovery or bundled sources", true, sources.All(item => Hash(item.Key) == item.Value));
+
+        string key = ManifestKey(manifest);
+        string previews = Directory.CreateDirectory(Path.Combine(first.Library, "previews_game")).FullName;
+        string preview = Path.Combine(previews, key + ".png");
+        File.WriteAllBytes(preview, Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1kAAAAASUVORK5CYII="));
+        var beforePreflight = Directory.GetFiles(f.Storage, "*", SearchOption.AllDirectories).ToDictionary(path => path,
+            path => Tuple.Create(Hash(path), File.GetLastWriteTimeUtc(path)));
+        string inferredRoot;
+        List<string> unresolved = DiscoveryTauntLibrary.FindUnresolvedClips(f.App, f.Table, out inferredRoot);
+        Equal("Read-only archive preflight retains the exact unresolved Enigma clip", true, unresolved.SequenceEqual(new[] { clip }));
+        Equal("Read-only archive preflight recovers the full data root from the selected CAM table", f.Data, inferredRoot);
+        Equal("Read-only preflight does not delete the previous recovered overlay NPZ", true, File.Exists(npz));
+        Equal("Read-only preflight preserves every existing recovered cache, manifest, stamp and preview byte and timestamp", true,
+            beforePreflight.All(item => File.Exists(item.Key) && Hash(item.Key) == item.Value.Item1 && File.GetLastWriteTimeUtc(item.Key) == item.Value.Item2));
+        Equal("Read-only preflight creates no additional overlay or preview files", beforePreflight.Count, Directory.GetFiles(f.Storage, "*", SearchOption.AllDirectories).Length);
+        Equal("Read-only preflight leaves all Discovery and bundled source bytes unchanged", true, sources.All(item => Hash(item.Key) == item.Value));
+
+        string firstPoseHash = PoseHash(npz);
+        byte[] changed = Motion(clip, 60); Array.Copy(BitConverter.GetBytes(25f), 0, changed, 0xA8 + 4, 4);
+        File.WriteAllBytes(f.CachedClip, changed);
+        DiscoveryTauntImport changedImport = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("Changed recovered animation bytes receive a different renderer cache key", false, key == ManifestKey(manifest));
+        Equal("Changed recovered motion remains a counted archive import", 1, changedImport.ArchiveImported);
+        Equal("Changed recovered bytes refresh the actual decoded motion poses", true,
+            firstPoseHash != PoseHash(npz) && DiscoveryMotionNpz.MatchesPoses(npz, DiscoveryMotionDecoder.Decode(changed)));
+        Equal("Refreshing recovered motion leaves its private source clip unchanged", true, File.ReadAllBytes(f.CachedClip).SequenceEqual(changed));
+
+        f = FallbackFixtureAt(root, "wrong-declared-id");
+        f.Fallbacks.Assets[clip] = FallbackAsset(f.CachedClip, "17331a000");
+        var rejected = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("A fallback whose declared record ID differs from Enigma 4 is never imported", 0, rejected.ArchiveImported);
+        Equal("A declared-ID mismatch cannot create a fake playable engine entry", 0, ManifestCount(Path.Combine(rejected.Library, "taunts.json")));
+        Equal("A declared-ID mismatch retains the exact unavailable variant", clip, rejected.Unavailable.Single().Clip);
+        Equal("A declared-ID mismatch includes its explicit validation warning", true, rejected.Warnings.Any(warning => warning.Contains("record ID") && warning.Contains(clip)));
+
+        f = FallbackFixtureAt(root, "wrong-header-id");
+        File.WriteAllBytes(f.CachedClip, Motion("17331a000", 30));
+        rejected = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("A correct declared ID cannot hide a different file-header identity", 0, rejected.ArchiveImported);
+        Equal("A mismatched private clip header cannot become a playable engine entry", 0, ManifestCount(Path.Combine(rejected.Library, "taunts.json")));
+        Equal("A mismatched private clip header has a source-read failure rather than a format guess", DiscoveryTauntUnavailableKind.ReadFailure, rejected.Unavailable.Single().Kind);
+        Equal("A mismatched-header diagnostic identifies the expected clip and cached source", true,
+            rejected.Unavailable.Single().Reason.Contains(clip) && rejected.Unavailable.Single().Reason.Contains(f.CachedClip));
+
+        f = FallbackFixtureAt(root, "editable-priority");
+        string extracted = Directory.CreateDirectory(Path.Combine(f.Data, "Animation", "Edits")).FullName;
+        byte[] edited = Motion(clip, 24); Array.Copy(BitConverter.GetBytes(50f), 0, edited, 0xA8 + 4, 4);
+        string editedPath = Path.Combine(extracted, "edited.clip"); File.WriteAllBytes(editedPath, edited);
+        string cachedSourceHash = Hash(f.CachedClip);
+        var editable = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("An extracted editable clip takes precedence over the archive fallback", 0, editable.ArchiveImported);
+        Equal("Extracted motion priority uses the actual edited poses", true,
+            DiscoveryMotionNpz.MatchesPoses(Path.Combine(editable.Root, "data", "gamepack", "decoded", clip + ".npz"), DiscoveryMotionDecoder.Decode(edited)));
+        Equal("Using extracted motion does not rewrite its fallback cache source", cachedSourceHash, Hash(f.CachedClip));
+        Equal("Read-only preflight does not request archive recovery when an extracted exact clip exists", 0,
+            DiscoveryTauntLibrary.FindUnresolvedClips(f.App, f.Data, out inferredRoot).Count);
+
+        f = FallbackFixtureAt(root, "bundled-priority");
+        File.WriteAllText(Path.Combine(f.Library, "taunts.json"), JsonSerializer.Serialize(new { taunts = new[] {
+            new { key = "bundled_enigma", name = "Bundled Enigma 4", clip, cut = new[] { 1, 2 }, seconds = 0.1 }
+        } }));
+        string bundled = Path.Combine(f.Decoded, clip + ".npz");
+        byte[] bundledMotion = Motion(clip, 30); DiscoveryMotionNpz.Write(bundled, DiscoveryMotionDecoder.Decode(bundledMotion));
+        string bundledHash = Hash(bundled);
+        var stock = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("An existing bundled motion takes precedence over archive recovery", 0, stock.ArchiveImported);
+        Equal("Archive fallback cannot replace the bundled renderer key", "bundled_enigma", ManifestKey(Path.Combine(stock.Library, "taunts.json")));
+        Equal("Archive fallback leaves the original bundled NPZ unchanged", bundledHash, Hash(bundled));
+        Equal("Bundled priority preserves the bundled motion in the engine overlay", bundledHash,
+            Hash(Path.Combine(stock.Root, "data", "gamepack", "decoded", clip + ".npz")));
+        Equal("Read-only preflight does not request archive recovery for an existing bundled motion", 0,
+            DiscoveryTauntLibrary.FindUnresolvedClips(f.App, f.Data, out inferredRoot).Count);
+
+        f = FallbackFixtureAt(root, "conflict-reason"); f.Fallbacks.Assets.Clear();
+        const string conflict = "Two indexed archives contain different records for 17330a000; no archive load order was assumed.";
+        f.Fallbacks.Issues[clip] = conflict;
+        var conflicted = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("An unresolved archive conflict preserves the precise resolver reason", true, conflicted.Unavailable.Single().Reason.Contains(conflict));
+        Equal("An unresolved archive conflict cannot fabricate a playable entry", 0, ManifestCount(Path.Combine(conflicted.Library, "taunts.json")));
+        Equal("A searched archive conflict is not mislabeled as an unsearched archive", false, conflicted.Unavailable.Single().Reason.Contains("CAK archives were not searched"));
+        f.Fallbacks.Incomplete = true;
+        const string incomplete = "The installed archive search stopped before MotionArea.cak could be indexed; exact 17330a000 recovery remains unresolved.";
+        f.Fallbacks.Issues[clip] = incomplete; f.Fallbacks.Warnings.Add("MotionArea.cak could not be indexed.");
+        var unfinished = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        Equal("An incomplete archive search retains a separate unavailable classification", DiscoveryTauntUnavailableKind.ScanIncomplete, unfinished.Unavailable.Single().Kind);
+        Equal("An incomplete archive search preserves its exact resolver reason", true, unfinished.Unavailable.Single().Reason.Contains(incomplete));
+        Equal("An incomplete archive search retains its original warning", true, unfinished.Warnings.Contains("MotionArea.cak could not be indexed."));
     }
 
     private static void ScopeTests(string root)
@@ -358,8 +510,30 @@ internal static class Program
             DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", key, "output" }, lines(15, 10, null)));
         Equal("Model preparation never writes a browser preview", null,
             DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", args.Concat(new[] { "prepare=model" }), lines(15, 10, null)));
+        string ordinaryKey = "t17330", ordinaryTarget = Path.Combine(previews, ordinaryKey + ".png");
+        string[] ordinaryArgs = { "folder", ordinaryKey, "output", "quick=1" };
+        Equal("A missing ordinary playable taunt browser atlas is created from its completed preview", ordinaryKey,
+            DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", ordinaryArgs, lines(15, 10, null)));
+        Equal("An ordinary taunt atlas receives the actual completed preview strip", true,
+            File.ReadAllBytes(ordinaryTarget).SequenceEqual(File.ReadAllBytes(play)));
+        string ordinaryHash = Hash(ordinaryTarget);
+        DateTime ordinaryWrite = File.GetLastWriteTimeUtc(ordinaryTarget);
+        byte[] differentStrip = png.Concat(new byte[] { 9, 8, 7, 6, 5 }).ToArray();
+        File.WriteAllBytes(play, differentStrip);
+        Equal("A second ordinary preview does not replace its existing browser atlas", null,
+            DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", ordinaryArgs, lines(15, 10, null)));
+        Equal("The existing ordinary atlas keeps its original SHA-256 despite a different later strip", ordinaryHash, Hash(ordinaryTarget));
+        Equal("Skipping an existing ordinary atlas preserves its write timestamp", ordinaryWrite, File.GetLastWriteTimeUtc(ordinaryTarget));
+        Equal("A Discovery preview continues to refresh its existing browser atlas", key,
+            DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", args, lines(15, 10, null)));
+        Equal("A refreshed Discovery atlas contains the current preview strip", true,
+            File.ReadAllBytes(target).SequenceEqual(differentStrip));
+        string nativeAtlas = Path.Combine(previews, "original62543.png");
+        File.WriteAllBytes(nativeAtlas, png.Concat(new byte[] { 42, 43 }).ToArray());
+        string nativeAtlasHash = Hash(nativeAtlas);
         Equal("Original bundled taunt thumbnails remain untouched", null,
             DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", "original62543", "output", "quick=1" }, lines(15, 10, null)));
+        Equal("A real existing native atlas keeps its exact original SHA-256", nativeAtlasHash, Hash(nativeAtlas));
         Equal("A renamed original motion can store its versioned preview", "original_discovery_abcd",
             DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", "original_discovery_abcd", "output", "quick=1" }, lines(15, 10, null)));
         Equal("Invalid frame counts cannot create a misleading thumbnail", null,
@@ -370,11 +544,19 @@ internal static class Program
             DiscoveryTauntPreviewCapture.Capture(overlay, "roster_lookup.py", args, lines(15, 10, null)));
         Equal("Preview keys cannot escape their dedicated directory", null,
             DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", "discovery_../../escape", "output", "quick=1" }, lines(15, 10, null)));
+        foreach (string unsafeKey in new[] { "t17330/../../escape", @"t17330\escape", "t17330.png", "t17330 with spaces", "t17330\n", "", ".." })
+            Equal("Ordinary playable keys reject unsafe filename syntax: " + unsafeKey.Replace("\n", "<newline>"), null,
+                DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", unsafeKey, "output", "quick=1" }, lines(15, 10, null)));
+        Equal("A UI-only unavailable taunt identity cannot acquire a playable browser atlas", null,
+            DiscoveryTauntPreviewCapture.Capture(overlay, "gorilla_render.py", new[] { "folder", "discovery_unavailable_17330a000", "output", "quick=1" }, lines(15, 10, null)));
 
         string linkedOverlay = Directory.CreateDirectory(Path.Combine(root, "linked-overlay", "data", "library")).FullName;
         Directory.CreateSymbolicLink(Path.Combine(linkedOverlay, "previews_game"), previews);
         Equal("The capture cannot write through an original-library directory link", null,
             DiscoveryTauntPreviewCapture.Capture(Path.Combine(root, "linked-overlay"), "gorilla_render.py", args, lines(15, 10, null)));
+        Equal("An ordinary missing browser atlas cannot be created through a linked previews directory", null,
+            DiscoveryTauntPreviewCapture.Capture(Path.Combine(root, "linked-overlay"), "gorilla_render.py", new[] { "folder", "t99998", "output", "quick=1" }, lines(15, 10, null)));
+        Equal("Rejected linked-directory capture leaves no ordinary atlas in the original library", false, File.Exists(Path.Combine(previews, "t99998.png")));
     }
 
     private static void Actual(string application, string discovery, string storage)

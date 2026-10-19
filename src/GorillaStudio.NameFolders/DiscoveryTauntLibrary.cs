@@ -41,6 +41,10 @@ namespace GorillaStudio.NameFolders
         public int Unsupported { get; internal set; }
         public int ReadFailures { get; internal set; }
         public int CacheFailures { get; internal set; }
+        public int ArchiveImported { get; internal set; }
+        public int ArchiveCount { get; internal set; }
+        public bool ArchivesSearched { get; internal set; }
+        public string ArchiveStatus { get; internal set; }
         public bool ScanIncomplete { get; internal set; }
         public bool AnimationRootFound { get; internal set; }
         public IReadOnlyList<string> SearchRoots { get; internal set; } = new string[0];
@@ -52,7 +56,46 @@ namespace GorillaStudio.NameFolders
     /// <summary>Builds a writable engine data overlay without changing Discovery or the installed application.</summary>
     public static class DiscoveryTauntLibrary
     {
+        /// <summary>Finds lookup misses without changing the current engine overlay or preview files.</summary>
+        public static List<string> FindUnresolvedClips(string applicationRoot, string discoveryRoot, out string dataRoot)
+        {
+            string table = DiscoveryTaunts.FindTable(discoveryRoot);
+            dataRoot = table == null ? null : SourceRoot(discoveryRoot, table);
+            if (table == null) return new List<string>();
+            var manifest = JsonObject(File.ReadAllText(Path.Combine(applicationRoot, "data", "library", "taunts.json")));
+            object raw;
+            if (!manifest.TryGetValue("taunts", out raw) || !(raw is IEnumerable))
+                throw new InvalidDataException("The bundled taunt library has no animation list.");
+            var bundled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (object item in (IEnumerable)raw)
+            {
+                var entry = item as Dictionary<string, object>;
+                if (entry == null) throw new InvalidDataException("A bundled taunt entry is invalid.");
+                object clip;
+                if (entry.TryGetValue("clip", out clip) && clip is string) bundled.Add((string)clip);
+            }
+            DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(dataRoot);
+            return DiscoveryTaunts.Read(table).Where(definition => !bundled.Contains(definition.Clip)
+                && assets.Find(definition.Clip) == null).Select(definition => definition.Clip).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static string SourceRoot(string selected, string table)
+        {
+            string source = Path.GetFullPath(selected);
+            if (File.Exists(source)) source = Path.GetDirectoryName(source);
+            DirectoryInfo parent = Directory.GetParent(table);
+            if (parent != null && string.Equals(parent.Name, "MoveData", StringComparison.OrdinalIgnoreCase))
+                source = parent.Parent.FullName;
+            return source;
+        }
+
         public static DiscoveryTauntImport Build(string applicationRoot, string storageRoot, string discoveryRoot)
+        {
+            return Build(applicationRoot, storageRoot, discoveryRoot, null);
+        }
+
+        public static DiscoveryTauntImport Build(string applicationRoot, string storageRoot, string discoveryRoot,
+            DiscoveryMotionFallbacks fallbacks)
         {
             string baseData = Path.Combine(applicationRoot, "data");
             string baseLibrary = Path.Combine(baseData, "library");
@@ -67,11 +110,7 @@ namespace GorillaStudio.NameFolders
             string table = DiscoveryTaunts.FindTable(discoveryRoot);
             if (table == null) return result;
 
-            string sourceRoot = Path.GetFullPath(discoveryRoot);
-            // The CAM table's parent is MoveData; its parent is the full data root.
-            DirectoryInfo tableParent = Directory.GetParent(table);
-            if (tableParent != null && string.Equals(tableParent.Name, "MoveData", StringComparison.OrdinalIgnoreCase))
-                sourceRoot = tableParent.Parent.FullName;
+            string sourceRoot = SourceRoot(discoveryRoot, table);
             List<DiscoveryTaunt> definitions = DiscoveryTaunts.Read(table);
             result.Definitions = definitions.Count;
             DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(sourceRoot);
@@ -79,6 +118,13 @@ namespace GorillaStudio.NameFolders
             result.AnimationRootFound = assets.AnimationRootFound;
             result.SearchRoots = assets.SearchRoots;
             result.Warnings.AddRange(assets.Warnings.Take(8));
+            if (fallbacks != null)
+            {
+                result.ArchivesSearched = fallbacks.ArchivesSearched;
+                result.ArchiveCount = fallbacks.ArchiveCount;
+                result.ArchiveStatus = fallbacks.Status;
+                result.Warnings.AddRange(fallbacks.Warnings.Take(8));
+            }
             string identity = Hash(Encoding.UTF8.GetBytes(Path.GetFullPath(applicationRoot) + "\n" + sourceRoot + "\n" + Hash(File.ReadAllBytes(baseManifest))));
             string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20));
             string data = Path.Combine(overlay, "data"), library = Path.Combine(data, "library"), pack = Path.Combine(data, "gamepack");
@@ -113,13 +159,27 @@ namespace GorillaStudio.NameFolders
                 List<Dictionary<string, object>> matches;
                 byClip.TryGetValue(definition.Clip, out matches);
                 DiscoveryMotionAsset asset = assets.Find(definition.Clip);
+                bool fromArchive = false;
+                // Active extracted edits and existing bundled motion remain authoritative.
+                // Fallbacks only fill definitions with no playable motion source.
+                if (asset == null && matches == null && fallbacks != null)
+                {
+                    DiscoveryMotionAsset recovered;
+                    if (fallbacks.Assets.TryGetValue(definition.Clip, out recovered) && recovered != null)
+                    {
+                        if (recovered.Id != DiscoveryMotionAssets.ClipId(definition.Clip))
+                            result.Warnings.Add("Ignored a recovered animation whose record ID does not match " + definition.Clip + ".");
+                        else { asset = recovered; fromArchive = true; }
+                    }
+                }
                 if (asset == null)
                 {
                     if (matches == null)
                     {
                         result.Missing++;
-                        AddUnavailable(result, definition, assets.ScanIncomplete ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation,
-                            LookupMissReason(definition.Clip, assets, sourceRoot));
+                        AddUnavailable(result, definition, assets.ScanIncomplete || (fallbacks != null && fallbacks.Incomplete)
+                                ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation,
+                            LookupMissReason(definition.Clip, assets, sourceRoot, fallbacks));
                     }
                     else
                     {
@@ -173,6 +233,7 @@ namespace GorillaStudio.NameFolders
                         WriteAtomic(stamp, hash);
                     }
                     applied.Add(definition.Clip);
+                    if (fromArchive) result.ArchiveImported++;
                     if (matches == null)
                     {
                         var item = new Dictionary<string, object> {
@@ -201,6 +262,7 @@ namespace GorillaStudio.NameFolders
                                 item["tested_on"] = new[] { "Discovery motion; preview on your selected wrestler" };
                                 item["cut"] = null;
                                 item["seconds"] = Math.Round(frames / (double)fps, 2);
+                                item["preview"] = null;
                             }
                     }
                 }
@@ -261,7 +323,7 @@ namespace GorillaStudio.NameFolders
 
         private enum MotionImportStage { ReadSource, Decode, PrepareCache }
 
-        private static string LookupMissReason(string clip, DiscoveryMotionAssets assets, string sourceRoot)
+        private static string LookupMissReason(string clip, DiscoveryMotionAssets assets, string sourceRoot, DiscoveryMotionFallbacks fallbacks)
         {
             string roots = assets.SearchRoots.Count == 0 ? sourceRoot : string.Join("; ", assets.SearchRoots);
             string reason = "Animation clip " + clip + " was not located in the scanned extracted .clip/.clips files under " + roots + ".";
@@ -270,6 +332,12 @@ namespace GorillaStudio.NameFolders
                     : ": " + assets.Warnings[0].TrimEnd('.') + ".") + " Load Discovery data again to review the scan warnings.";
             else if (!assets.AnimationRootFound)
                 reason += " No Animation folder was found in that scan.";
+            string issue;
+            if (fallbacks != null && fallbacks.Issues.TryGetValue(clip, out issue))
+                return reason + " " + issue;
+            if (fallbacks != null && fallbacks.ArchivesSearched)
+                return reason + " No unambiguous matching motion was recovered from the available archive search."
+                    + (fallbacks.Incomplete ? " The archive search did not finish; see its warnings." : "");
             return reason + " Installed-game CAK archives were not searched.";
         }
 

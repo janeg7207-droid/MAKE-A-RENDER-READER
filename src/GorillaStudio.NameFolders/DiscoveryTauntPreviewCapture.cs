@@ -16,8 +16,8 @@ namespace GorillaStudio.NameFolders
             string[] args = arguments.ToArray();
             if (args.Length < 2 || !PreviewCache.IsPreviewRequest(script, args)) return null;
             string key = args[1];
-            if (key == null || !Regex.IsMatch(key, @"^[A-Za-z0-9_]+$") ||
-                (!key.StartsWith("discovery", StringComparison.Ordinal) && !key.Contains("_discovery_"))) return null;
+            if (key == null || !Regex.IsMatch(key, @"\A[A-Za-z0-9_]+\z") || DiscoveryTauntSearch.IsUnavailableKey(key)) return null;
+            bool generatedMotion = key.StartsWith("discovery", StringComparison.Ordinal) || key.Contains("_discovery_");
             try
             {
                 string resultLine = lines.LastOrDefault(line => line != null && line.StartsWith("RESULT ", StringComparison.Ordinal));
@@ -35,10 +35,13 @@ namespace GorillaStudio.NameFolders
                 string directory = Path.Combine(engineRoot, "data", "library", "previews_game");
                 if (!Directory.Exists(directory) || (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) return null;
                 string target = Path.Combine(directory, key + ".png"), temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                // Keep the original motion-browser atlases. Generate only the
+                // missing bundled previews, while refreshing custom motions.
+                if (!generatedMotion && File.Exists(target)) return null;
                 try
                 {
                     File.Copy(source, temporary, false);
-                    if (File.Exists(target)) File.Replace(temporary, target, null);
+                    if (generatedMotion && File.Exists(target)) File.Replace(temporary, target, null);
                     else File.Move(temporary, target);
                 }
                 finally { if (File.Exists(temporary)) File.Delete(temporary); }

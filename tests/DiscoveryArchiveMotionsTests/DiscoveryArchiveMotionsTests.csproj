@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryArchiveRenders.cs" Link="DiscoveryArchiveRenders.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryArchiveMotions.cs" Link="DiscoveryArchiveMotions.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMotionAssets.cs" Link="DiscoveryMotionAssets.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMotionDecoder.cs" Link="DiscoveryMotionDecoder.cs" />
+    <None Include="Fixtures/*.clip" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

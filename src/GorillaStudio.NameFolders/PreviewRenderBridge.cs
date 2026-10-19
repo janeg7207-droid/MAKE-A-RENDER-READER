@@ -22,7 +22,7 @@ namespace GorillaStudio.NameFolders
             string[] arguments = args == null ? null : args.ToArray();
             if (arguments != null && arguments.Any(DiscoveryTauntSearch.IsUnavailableKey))
             {
-                string message = "This taunt has no playable animation. Check its search result for the missing file or unsupported format.";
+                string message = "This taunt has no playable animation. Read its search result for the lookup or import details.";
                 if (onLine != null) onLine(message);
                 return new ValueTuple<int, List<string>>(1, new List<string> { message });
             }
