@@ -45,7 +45,8 @@ namespace GorillaStudio.NameFolders
         }
 
         public static async Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot,
-            Action<string> progress, CancellationToken cancellationToken, Action<bool> cancellationEnabled = null)
+            Action<string> progress, CancellationToken cancellationToken, Action<bool> cancellationEnabled = null,
+            Func<long> sourceRevision = null)
         {
             var window = owner as Window;
             if (window == null) throw new ArgumentException("Choose an open Gorilla Studio window.", nameof(owner));
@@ -68,53 +69,74 @@ namespace GorillaStudio.NameFolders
                     await RefreshLock.WaitAsync(cancellation.Token);
                     entered = true;
                     cancellation.Token.ThrowIfCancellationRequested();
-                    progress?.Invoke("Reading Discovery taunt definitions and extracted animation assets…");
                     string app = AppDomain.CurrentDomain.BaseDirectory;
-                    string dataRoot = null;
-                    List<string> missing = await Task.Run(() => DiscoveryTauntLibrary.FindUnresolvedClips(app,
-                        discoveryRoot, out dataRoot), cancellation.Token);
-                    cancellation.Token.ThrowIfCancellationRequested();
-                    DiscoveryMotionFallbacks fallbacks = null;
-                    if (missing.Count > 0 && !string.IsNullOrWhiteSpace(dataRoot))
+                    bool commitStarted = false;
+                    for (int attempt = 0; attempt < 3; attempt++)
                     {
-                        progress?.Invoke("Looking for " + missing.Count.ToString(CultureInfo.InvariantCulture) + " animation clips in game and Discovery archives…");
+                        RefreshOnDispatcher(window, () => {
+                            if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
+                        });
+                        // Once an overlay update has begun, finish its replacement
+                        // even if a caller cancels. The original load contract also
+                        // disables Cancel before this shared-data commit.
+                        CancellationToken lookupToken = commitStarted ? CancellationToken.None : cancellation.Token;
+                        lookupToken.ThrowIfCancellationRequested();
+                        progress?.Invoke(attempt == 0 ? "Reading Discovery taunt definitions and extracted animation assets…"
+                            : "Animation sources changed. Reading the current files again…");
+                        DiscoveryTauntLibrary.Preparation prepared = await Task.Run(() =>
+                            DiscoveryTauntLibrary.Prepare(app, discoveryRoot, lookupToken, sourceRevision), lookupToken);
+                        IReadOnlyList<string> missing = prepared.Missing;
+                        string dataRoot = prepared.DataRoot;
+                        DiscoveryMotionFallbacks fallbacks = null;
+                        if (missing.Count > 0 && !string.IsNullOrWhiteSpace(dataRoot))
+                        {
+                            progress?.Invoke("Looking for " + missing.Count.ToString(CultureInfo.InvariantCulture) + " animation clips in game and Discovery archives…");
+                            try
+                            {
+                                fallbacks = await DiscoveryArchiveMotions.FindAsync(app, game, dataRoot, missing,
+                                    Path.Combine(FolderBridge.StorageDirectory, "motion-archives"), progress, lookupToken);
+                                if (fallbacks == null) throw new InvalidOperationException("The animation archive lookup returned no result.");
+                            }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException
+                                || error is InvalidDataException || error is InvalidOperationException || error is ArgumentException
+                                || error is NotSupportedException || error is System.ComponentModel.Win32Exception)
+                            {
+                                fallbacks = new DiscoveryMotionFallbacks {
+                                    Incomplete = true, Status = "Automatic animation archive lookup could not finish: " + error.Message
+                                };
+                                fallbacks.Warnings.Add(fallbacks.Status);
+                                foreach (string clip in missing) fallbacks.Issues[clip] = fallbacks.Status;
+                            }
+                        }
+                        lookupToken.ThrowIfCancellationRequested();
+                        // A newly exported loose override outranks an archive
+                        // fallback, even if it appeared while that lookup ran.
+                        if (!await Task.Run(() => prepared.IsCurrent(lookupToken), lookupToken)) continue;
+                        RefreshOnDispatcher(window, () => {
+                            if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
+                            cancellationEnabled?.Invoke(false);
+                        });
+                        commitStarted = true;
+                        progress?.Invoke("Finishing the animation library…");
+                        DiscoveryTauntImport result;
                         try
                         {
-                            fallbacks = await DiscoveryArchiveMotions.FindAsync(app, game, dataRoot, missing,
-                                Path.Combine(FolderBridge.StorageDirectory, "motion-archives"), progress, cancellation.Token);
-                            if (fallbacks == null) throw new InvalidOperationException("The animation archive lookup returned no result.");
+                            result = await Task.Run(() => DiscoveryTauntLibrary.BuildCurrentPreparation(
+                                prepared, FolderBridge.StorageDirectory, fallbacks, progress));
                         }
-                        catch (OperationCanceledException) { throw; }
-                        catch (Exception error) when (error is IOException || error is UnauthorizedAccessException
-                            || error is InvalidDataException || error is InvalidOperationException || error is ArgumentException
-                            || error is NotSupportedException || error is System.ComponentModel.Win32Exception)
-                        {
-                            fallbacks = new DiscoveryMotionFallbacks {
-                                Incomplete = true, Status = "Automatic animation archive lookup could not finish: " + error.Message
-                            };
-                            fallbacks.Warnings.Add(fallbacks.Status);
-                            foreach (string clip in missing) fallbacks.Issues[clip] = fallbacks.Status;
-                        }
+                        catch (DiscoveryTauntSourcesChangedException) { continue; }
+                        if (!await Task.Run(() => prepared.IsCurrent(CancellationToken.None))) continue;
+                        RefreshOnDispatcher(window, () => {
+                            if (RefreshContextCurrent(window, request, game, folder))
+                            {
+                                RecordAnimationReport(window, game, dataRoot ?? discoveryRoot, result);
+                                Apply(window, result);
+                            }
+                        });
+                        return result;
                     }
-                    cancellation.Token.ThrowIfCancellationRequested();
-                    RefreshOnDispatcher(window, () => {
-                        if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
-                        cancellationEnabled?.Invoke(false);
-                    });
-                    // Build updates a shared overlay. Once this short commit starts,
-                    // complete the matching UI switch rather than leaving old keys
-                    // pointing at an animation removed by a half-canceled refresh.
-                    progress?.Invoke("Finishing the animation library…");
-                    DiscoveryTauntImport result = await Task.Run(() => DiscoveryTauntLibrary.Build(
-                        app, FolderBridge.StorageDirectory, discoveryRoot, fallbacks));
-                    RefreshOnDispatcher(window, () => {
-                        if (RefreshContextCurrent(window, request, game, folder))
-                        {
-                            RecordAnimationReport(window, game, dataRoot ?? discoveryRoot, result);
-                            Apply(window, result);
-                        }
-                    });
-                    return result;
+                    throw new InvalidOperationException("Discovery animation files are still changing. Finish extracting or saving them, then load Discovery again.");
                 }
                 finally
                 {
@@ -158,6 +180,7 @@ namespace GorillaStudio.NameFolders
                 GameRoot = game, DiscoveryRoot = root, HasImport = true,
                 Definitions = import.Definitions, Available = import.Available, Imported = import.Imported,
                 ArchiveImported = import.ArchiveImported, ArchiveCount = import.ArchiveCount,
+                VerifiedImported = import.VerifiedImported, VerifiedPackHash = import.VerifiedPackHash,
                 Missing = import.Missing, Unsupported = import.Unsupported, ReadFailures = import.ReadFailures,
                 CacheFailures = import.CacheFailures, ArchivesSearched = import.ArchivesSearched,
                 ArchiveStatus = import.ArchiveStatus, ScanIncomplete = import.ScanIncomplete
@@ -450,10 +473,17 @@ namespace GorillaStudio.NameFolders
             var making = Field<TextBlock>(window, "PreviewMaking");
             if (making != null)
             {
-                making.Text = FolderBridge.AutomaticTauntPreviewRequested(window, key)
-                    ? "Preparing your wrestler preview…" : "Select this taunt to create its preview\non your selected wrestler.";
+                making.Text = FolderBridge.AutomaticTauntPreviewStatus(window, key)
+                    ?? "No preview yet. Select this taunt\nor press Preview for your wrestler.";
                 making.Visibility = Visibility.Visible;
             }
+        }
+
+        internal static bool ShowCapturedWrestlerPreview(Window window, string key)
+        {
+            var selected = Field<ListBox>(window, "TauntList")?.SelectedItem;
+            return selected != null && string.Equals(Convert.ToString(selected.GetType().GetProperty("Key").GetValue(selected, null)), key, StringComparison.Ordinal)
+                && ShowDiscoveryPreview(window, key);
         }
 
         private static bool ShowDiscoveryPreview(Window window, string key)

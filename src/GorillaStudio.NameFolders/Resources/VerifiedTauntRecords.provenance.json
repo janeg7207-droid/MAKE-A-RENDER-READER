@@ -1,0 +1,10 @@
+{
+  "path": "VerifiedTauntRecords.zip",
+  "sha256": "c8fc73997f66dc1cc82fc55a792e9e7e155fd60fd35ef34433f8d31a6592833e",
+  "bytes": 9752329,
+  "playableRecordCount": 617,
+  "unsupportedMetadataCount": 71,
+  "uncompressedRecordBytes": 10767704,
+  "sourceArchiveSha256": "f9194a3c6ed560326c2f01490f68d0cb8487a925dd107f92b8eb153c89c20fca",
+  "provenance": "See manifest.json inside the ZIP for exact source members, raw record hashes, decoder audit and duplicate-equivalence evidence."
+}

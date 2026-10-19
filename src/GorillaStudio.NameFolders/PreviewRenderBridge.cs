@@ -48,12 +48,20 @@ namespace GorillaStudio.NameFolders
                             cached = true;
                             if (onLine != null) foreach (string line in lines) onLine(line);
                             try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, lines); } catch { }
+                            try { CaptureCompletedPngResult(owner, script, arguments, lines); } catch { }
+                            try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, 0, lines); } catch { }
                             return new ValueTuple<int, List<string>>(0, lines);
                         }
                     }
                 }
 
-                ValueTuple<int, List<string>> result = await InvokeNativeRender(owner, script, arguments, onLine, started);
+                if (BatchRenderCancellationRequested(owner))
+                    return new ValueTuple<int, List<string>>(1, new List<string> { "Batch canceled." });
+                ValueTuple<int, List<string>> result = await InvokeNativeRender(owner, script, arguments, onLine, process => {
+                    TrackBatchRenderProcess(owner, process);
+                    if (started != null) started(process);
+                });
+                try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, result.Item1, result.Item2); } catch { }
                 if (store != null && result.Item1 == 0 && fast == FastPreviewEnabled)
                 {
                     // Rendering can prepare files or the user can edit a texture while
@@ -62,7 +70,11 @@ namespace GorillaStudio.NameFolders
                     if (key == after) await Task.Run(() => store.Save(key, result.Item2));
                 }
                 if (preview && result.Item1 == 0)
+                {
                     try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, result.Item2); } catch { }
+                }
+                if (result.Item1 == 0)
+                    try { CaptureCompletedPngResult(owner, script, arguments, result.Item2); } catch { }
                 return result;
             }
             finally

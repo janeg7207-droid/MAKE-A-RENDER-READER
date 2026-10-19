@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -19,6 +20,39 @@ namespace GorillaStudio.NameFolders
     public static partial class FolderBridge
     {
         private static readonly Dictionary<Window, Window> batchWindows = new Dictionary<Window, Window>();
+        private static readonly Dictionary<object, BatchRenderLifetime> batchRenderLifetimes = new Dictionary<object, BatchRenderLifetime>();
+
+        internal static bool BatchRenderCancellationRequested(object owner)
+        {
+            BatchRenderLifetime lifetime;
+            return owner != null && batchRenderLifetimes.TryGetValue(owner, out lifetime) && lifetime.IsCancellationRequested;
+        }
+
+        internal static void TrackBatchRenderProcess(object owner, Process process)
+        {
+            BatchRenderLifetime lifetime;
+            if (owner != null && process != null && batchRenderLifetimes.TryGetValue(owner, out lifetime)) lifetime.TrackProcess(process);
+        }
+
+        private sealed class BatchEnabledRestore
+        {
+            private readonly DependencyObject element;
+            private readonly object localValue;
+            private readonly BindingBase binding;
+            internal BatchEnabledRestore(DependencyObject element)
+            {
+                this.element = element;
+                localValue = element?.ReadLocalValue(UIElement.IsEnabledProperty);
+                binding = element == null ? null : BindingOperations.GetBindingBase(element, UIElement.IsEnabledProperty);
+            }
+            internal void Restore()
+            {
+                if (element == null) return;
+                if (binding != null) BindingOperations.SetBinding(element, UIElement.IsEnabledProperty, binding);
+                else if (ReferenceEquals(localValue, DependencyProperty.UnsetValue)) element.ClearValue(UIElement.IsEnabledProperty);
+                else element.SetValue(UIElement.IsEnabledProperty, localValue);
+            }
+        }
 
         private sealed class BatchRosterRow
         {
@@ -113,7 +147,24 @@ namespace GorillaStudio.NameFolders
             var stop = new Button { Content = "Close", Padding = new Thickness(9, 6, 9, 6) };
             actions.Children.Add(open); actions.Children.Add(details); actions.Children.Add(installAll); actions.Children.Add(use); actions.Children.Add(start); actions.Children.Add(stop);
             Grid.SetRow(actions, 5); grid.Children.Add(actions);
-            bool running = false, cancel = false, loaded = false, showingResults = false;
+            bool running = false, cancel = false, loaded = false, showingResults = false, closeRequested = false, closed = false;
+            BatchRenderLifetime renderLifetime = null;
+            Task cancelTask = Task.CompletedTask;
+            Action requestCancel = () =>
+            {
+                cancel = true;
+                stop.IsEnabled = false;
+                status.Text = renderLifetime == null ? "Finishing the current operation before closing…" : "Canceling the batch render… Waiting for its render processes to stop. Completed files are kept.";
+                BatchRenderLifetime active = renderLifetime;
+                if (active == null) return;
+                cancelTask = Task.Run(async () => await active.CancelAsync());
+                cancelTask.ContinueWith(task => owner.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (closed || !task.IsFaulted) return;
+                    status.Text = "The batch process could not be stopped yet. Retrying safely… " + BatchError(task.Exception.GetBaseException()).Message;
+                })), TaskContinuationOptions.OnlyOnFaulted);
+            };
+            Action closeWhenRequested = () => { if (closeRequested && !closed && !running) dialog.Close(); };
             var rows = new List<BatchRosterRow>();
             var inventory = new List<ModelCandidate>();
             var completed = new List<BatchRenderJob>();
@@ -151,7 +202,7 @@ namespace GorillaStudio.NameFolders
             selectAll.Click += (sender, args) => { foreach (var item in list.Items.OfType<ListBoxItem>()) if (item.Tag is BatchRosterRow row) row.Selected = true; refresh(); };
             clear.Click += (sender, args) => { foreach (var row in rows) row.Selected = false; refresh(); };
             list.SelectionChanged += (sender, args) => use.IsEnabled = !running && list.SelectedItem is ListBoxItem item && item.Tag is BatchRenderJob job && completed.Contains(job);
-            stop.Click += (sender, args) => { if (running) { cancel = true; stop.IsEnabled = false; status.Text = "Stopping after the current wrestler finishes. Completed files are kept."; } else dialog.Close(); };
+            stop.Click += (sender, args) => { if (running) requestCancel(); else dialog.Close(); };
             open.Click += (sender, args) => { if (Directory.Exists(normalOutputDirectory)) Process.Start(new ProcessStartInfo { FileName = normalOutputDirectory, UseShellExecute = true }); };
             details.Click += (sender, args) => { if (Directory.Exists(runDirectory)) Process.Start(new ProcessStartInfo { FileName = runDirectory, UseShellExecute = true }); };
             chooseAttires = async row =>
@@ -192,7 +243,7 @@ namespace GorillaStudio.NameFolders
                     status.Text = "Attire choices stay with each wrestler. MAKE selected renders one file per chosen attire using " + tauntName + ".";
                 }
                 catch (Exception error) { status.Text = BatchError(error).Message; }
-                finally { running = false; searchRow.IsEnabled = true; list.IsEnabled = true; stop.IsEnabled = true; refresh(); if (cancel) dialog.Close(); }
+                finally { running = false; searchRow.IsEnabled = true; list.IsEnabled = true; stop.IsEnabled = true; refresh(); closeWhenRequested(); }
             };
             installAll.Click += async (sender, args) =>
             {
@@ -204,7 +255,7 @@ namespace GorillaStudio.NameFolders
                 if (!Directory.Exists(game)) { status.Text = "Choose your WWE 2K26 game folder in Gorilla Studio before installing this batch."; return; }
                 running = true; installAll.IsEnabled = false; use.IsEnabled = false; stop.IsEnabled = false;
                 var content = owner.Content as UIElement;
-                bool enabled = content != null && content.IsEnabled;
+                var enabled = new BatchEnabledRestore(content);
                 if (content != null) content.IsEnabled = false;
                 try
                 {
@@ -221,12 +272,12 @@ namespace GorillaStudio.NameFolders
                     }
                 }
                 catch (Exception error) { status.Text = "Batch installation stopped: " + BatchError(error).Message; }
-                finally { running = false; if (content != null) content.IsEnabled = enabled; installAll.IsEnabled = true; stop.IsEnabled = true; }
+                finally { running = false; enabled.Restore(); installAll.IsEnabled = true; stop.IsEnabled = true; closeWhenRequested(); }
             };
-            CancelEventHandler ownerClosing = (sender, args) => { if (running) { args.Cancel = true; cancel = true; status.Text = "Stopping after the current wrestler finishes. Completed files are kept."; } };
+            CancelEventHandler ownerClosing = (sender, args) => { if (running) { args.Cancel = true; closeRequested = true; requestCancel(); } };
             owner.Closing += ownerClosing;
-            dialog.Closing += (sender, args) => { if (running) { args.Cancel = true; cancel = true; status.Text = "Stopping after the current wrestler finishes. Completed files are kept."; } };
-            dialog.Closed += (sender, args) => { owner.Closing -= ownerClosing; batchWindows.Remove(owner); };
+            dialog.Closing += (sender, args) => { if (running) { args.Cancel = true; closeRequested = true; requestCancel(); } };
+            dialog.Closed += (sender, args) => { closed = true; owner.Closing -= ownerClosing; batchWindows.Remove(owner); };
             use.Click += async (sender, args) =>
             {
                 var job = (list.SelectedItem as ListBoxItem)?.Tag as BatchRenderJob;
@@ -235,7 +286,7 @@ namespace GorillaStudio.NameFolders
                 if (!BatchRenderPlan.VerifyCompleted(job.RenderPath, job.Entry.Id, job.OutputDirectory, out reason)) { status.Text = reason; return; }
                 running = true; use.IsEnabled = false; start.IsEnabled = false; installAll.IsEnabled = false; stop.IsEnabled = false;
                 var ownerContent = owner.Content as UIElement;
-                bool ownerEnabled = ownerContent != null && ownerContent.IsEnabled;
+                var ownerEnabled = new BatchEnabledRestore(ownerContent);
                 if (ownerContent != null) ownerContent.IsEnabled = false;
                 try
                 {
@@ -252,19 +303,24 @@ namespace GorillaStudio.NameFolders
                     status.Text = "Loaded the completed result for " + job.Entry.Name + ". Close this window, then press Install into the game.";
                 }
                 catch (Exception error) { status.Text = BatchError(error).Message; }
-                finally { running = false; if (ownerContent != null) ownerContent.IsEnabled = ownerEnabled; use.IsEnabled = true; installAll.IsEnabled = CanInstallBatchTogether(completed); stop.IsEnabled = true; }
+                finally { running = false; ownerEnabled.Restore(); use.IsEnabled = true; installAll.IsEnabled = CanInstallBatchTogether(completed); stop.IsEnabled = true; closeWhenRequested(); }
             };
             start.Click += async (sender, args) =>
             {
                 if (running || BatchNativeBusy(owner) || !(bool)unlocked.Invoke(owner, null)) return;
                 if (!ReferenceEquals(taunts.SelectedItem, taunt)) { status.Text = "The selected taunt changed. Close and reopen Batch MAKE with the taunt you want."; return; }
                 running = true; cancel = false; completed.Clear(); allJobs.Clear();
+                renderLifetime = new BatchRenderLifetime();
+                batchRenderLifetimes[owner] = renderLifetime;
                 start.IsEnabled = false; searchRow.IsEnabled = false; list.IsEnabled = false; use.IsEnabled = false;
-                stop.Content = "Stop after current";
+                stop.Content = "Cancel batch";
                 var ownerContent = owner.Content as UIElement;
-                bool ownerEnabled = ownerContent != null && ownerContent.IsEnabled;
+                var ownerEnabled = new BatchEnabledRestore(ownerContent);
+                var bodyEnabled = new BatchEnabledRestore(type.GetField("BodyGrid", InstanceMembers)?.GetValue(owner) as DependencyObject);
+                var renderButtons = new[] { "PreviewButton", "MakeButton" }.Select(name =>
+                    new BatchEnabledRestore(type.GetField(name, InstanceMembers)?.GetValue(owner) as DependencyObject)).ToArray();
                 if (ownerContent != null) ownerContent.IsEnabled = false;
-                var owned = owner.OwnedWindows.Cast<Window>().Where(window => window != dialog).ToDictionary(window => window, window => window.IsEnabled);
+                var owned = owner.OwnedWindows.Cast<Window>().Where(window => window != dialog).ToDictionary(window => window, window => new BatchEnabledRestore(window));
                 foreach (Window other in owned.Keys) other.IsEnabled = false;
                 var output = type.GetField("Output", InstanceMembers);
                 string previousOutput = output?.GetValue(owner) as string;
@@ -285,11 +341,13 @@ namespace GorillaStudio.NameFolders
                     StopAutomaticMake(owner);
                     var preparation = type.GetField("PrepTask", InstanceMembers)?.GetValue(owner) as Task;
                     if (preparation != null) try { await preparation; } catch { }
+                    renderLifetime.Token.ThrowIfCancellationRequested();
                     SetPerformanceBusy(owner, true);
                     var chosen = rows.Where(row => row.Selected).Select(row => BatchRenderPlan.Copy(row.Entry)).ToList();
                     var choices = rows.Where(row => row.Selected && row.Attires != null).GroupBy(row => row.Entry.Id)
                         .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.First().Attires);
                     var plan = await Task.Run(() => BatchRenderPlan.WithAttires(BatchRenderPlan.Create(chosen, inventory, table), choices));
+                    renderLifetime.Token.ThrowIfCancellationRequested();
                     if (plan.Jobs.Count == 0) { status.Text = string.Join("\n", plan.Skipped.Take(8)); return; }
                     if (output == null || string.IsNullOrWhiteSpace(previousOutput)) throw new InvalidOperationException("The original render output folder is unavailable.");
                     runDirectory = Path.Combine(StorageDirectory, "batches", "Batch-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 8));
@@ -314,9 +372,11 @@ namespace GorillaStudio.NameFolders
                             if (job.ExtractFromGame)
                             {
                                 job.Entry.Folder = await RequestGameModelAsync(job.Entry, job.Entry.StockFolder, message => status.Text = currentLabel + "\n" + message);
+                                renderLifetime.Token.ThrowIfCancellationRequested();
                                 if (!Directory.Exists(job.Entry.Folder)) throw new IOException("The game model was not extracted.");
                             }
                             await BatchLoadCharacterAsync(owner, job.Entry, setFolder, previousFolder, previousAttire, job);
+                            renderLifetime.Token.ThrowIfCancellationRequested();
                             string jobFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
                             job.AttireRelativePath = SelectedAlternateAttire(owner, jobFolder);
                             if (!ReferenceEquals(taunts.SelectedItem, taunt)) { cancel = true; throw new InvalidOperationException("The selected taunt changed; the batch stopped before rendering another taunt."); }
@@ -325,6 +385,7 @@ namespace GorillaStudio.NameFolders
                             if (task == null) throw new InvalidOperationException("The original render command did not return a task.");
                             await task;
                             timer.Stop();
+                            renderLifetime.Token.ThrowIfCancellationRequested();
                             string renderPath = type.GetField("LastGmr", InstanceMembers)?.GetValue(owner) as string;
                             string reason;
                             if (!BatchRenderPlan.VerifyCompleted(renderPath, job.Entry.Id, job.OutputDirectory, out reason)) throw new InvalidDataException(reason);
@@ -338,6 +399,7 @@ namespace GorillaStudio.NameFolders
                             }
                             catch (Exception error) { job.Status = "Complete; output copy failed: " + BatchError(error).Message; }
                         }
+                        catch (OperationCanceledException) { timer.Stop(); job.Status = "Canceled"; type.GetField("LastGmr", InstanceMembers)?.SetValue(owner, null); }
                         catch (Exception error) { timer.Stop(); job.Status = "Failed: " + BatchError(error).Message; }
                         finally
                         {
@@ -353,22 +415,53 @@ namespace GorillaStudio.NameFolders
                         list.Items.Add(new ListBoxItem { Content = job.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + job.Entry.Name + " · " + (job.AttireName ?? "Current/default") + " · " + job.Status, Tag = job, Foreground = Brushes.White });
                     foreach (string skipped in plan.Skipped) list.Items.Add(new ListBoxItem { Content = "Skipped · " + skipped, Foreground = Brushes.LightGray });
                     status.Text = completed.Count.ToString(CultureInfo.InvariantCulture) + " completed · " + allJobs.Count(job => job.Status.StartsWith("Failed", StringComparison.Ordinal)).ToString(CultureInfo.InvariantCulture)
-                        + " failed · " + plan.Skipped.Count.ToString(CultureInfo.InvariantCulture) + " skipped" + (cancel ? " · stopped after current wrestler" : "")
+                        + " failed · " + plan.Skipped.Count.ToString(CultureInfo.InvariantCulture) + " skipped" + (cancel ? " · canceled; interrupted files are not installed" : "")
                         + ".\n" + completed.Count(job => job.PublishedRenderPath != null).ToString(CultureInfo.InvariantCulture) + " saved to: " + normalOutputDirectory
                         + (completed.Any(job => job.PublishedRenderPath == null) ? "\nSome output copies failed; their completed workspace files are kept and can still be installed." : "")
                         + "\nOpen output folder for your GMR files. Batch details opens the manifest and separate workspaces."
                         + (completed.GroupBy(job => job.Entry.Id).Any(group => group.Count() > 1) ? "\nSeveral outfits use the same wrestler ID. Select one completed outfit and use Use selected result to install that version." : "");
                 }
+                catch (OperationCanceledException) { status.Text = "Batch canceled. Previously completed files are kept."; }
                 catch (Exception error) { status.Text = "Batch stopped: " + BatchError(error).Message; }
                 finally
                 {
-                    timer.Stop(); running = false; stop.IsEnabled = true; stop.Content = "Close";
+                    timer.Stop();
+                    // A canceled native Go may exit before a queued preparation
+                    // or descendant has drained. Keep the modal owner locked until
+                    // every process registered to this batch is confirmed stopped.
+                    if (renderLifetime != null)
+                    {
+                        if (busy != null) busy.SetValue(owner, true);
+                        // End the session even after success: an attire preparation
+                        // queued at the end must not start behind a closed dialog.
+                        Task finalStop = renderLifetime.CancelAsync();
+                        var preparation = type.GetField("PrepTask", InstanceMembers)?.GetValue(owner) as Task;
+                        if (preparation != null) try { await preparation; } catch { }
+                        bool stopped = false;
+                        while (!stopped)
+                        {
+                            try { await finalStop; await renderLifetime.CancelAsync(); stopped = !renderLifetime.HasRunningProcesses; }
+                            catch (Exception error) { status.Text = "Waiting for this batch's render processes to stop before unlocking the app… " + BatchError(error).Message; }
+                            if (!stopped) { await Task.Delay(750); finalStop = renderLifetime.CancelAsync(); }
+                        }
+                        try { await cancelTask; } catch { }
+                    }
+                    if (renderLifetime != null)
+                    {
+                        batchRenderLifetimes.Remove(owner);
+                        renderLifetime.Dispose(); renderLifetime = null;
+                    }
+                    running = false; stop.IsEnabled = true; stop.Content = "Close";
                     if (output != null) output.SetValue(owner, previousOutput);
                     if (busy != null) busy.SetValue(owner, false);
+                    type.GetField("PrepShown", InstanceMembers)?.SetValue(owner, false);
+                    var progress = type.GetField("Progress", InstanceMembers)?.GetValue(owner) as ProgressBar;
+                    if (progress != null) progress.IsIndeterminate = false;
                     pendingRosterSelection = null; preparedForLoad = null;
                     SetPerformanceBusy(owner, false);
-                    if (ownerContent != null) ownerContent.IsEnabled = ownerEnabled;
-                    foreach (var other in owned) if (other.Key.IsLoaded) other.Key.IsEnabled = other.Value;
+                    bodyEnabled.Restore(); ownerEnabled.Restore();
+                    foreach (BatchEnabledRestore button in renderButtons) button.Restore();
+                    foreach (var other in owned) if (other.Key.IsLoaded) other.Value.Restore();
                     open.IsEnabled = Directory.Exists(normalOutputDirectory);
                     details.IsEnabled = Directory.Exists(runDirectory);
                     installAll.IsEnabled = CanInstallBatchTogether(completed);
@@ -385,6 +478,7 @@ namespace GorillaStudio.NameFolders
                         if (install != null) install.IsEnabled = matching != null && type.GetField("Game", InstanceMembers)?.GetValue(owner) is string game && Directory.Exists(game);
                     }
                     QueueSelectedPicture(owner);
+                    closeWhenRequested();
                 }
             };
             dialog.Loaded += async (sender, args) =>
@@ -395,6 +489,7 @@ namespace GorillaStudio.NameFolders
                     List<RosterEntry> saved = ReadRoster();
                     RosterSessionData session = await Task.Run(() => RosterLaunch.Open(root, saved, rosterFile,
                         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json")));
+                    if (closed) return;
                     table = session.DiscoveryTable;
                     rows = session.Entries.Where(entry => entry.Id > 0 && entry.Id <= 65535 && !string.IsNullOrWhiteSpace(entry.Name))
                         .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.Id).Select(entry => new BatchRosterRow { Entry = entry }).ToList();
@@ -402,6 +497,7 @@ namespace GorillaStudio.NameFolders
                     var currentRows = rows.Where(row => row.Entry.Id.ToString(CultureInfo.InvariantCulture) == currentId).ToList();
                     if (currentRows.Count == 1) currentRows[0].Selected = true;
                     inventory = await Task.Run(() => BatchModelInventory(session, root));
+                    if (closed) return;
                     loaded = true; status.Text = rows.Count.ToString(CultureInfo.InvariantCulture) + " roster entries · " + inventory.Count.ToString(CultureInfo.InvariantCulture) + " model folders indexed. Select wrestlers above.";
                     refresh();
                 }

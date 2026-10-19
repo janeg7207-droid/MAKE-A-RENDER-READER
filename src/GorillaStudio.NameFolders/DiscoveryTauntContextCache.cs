@@ -62,6 +62,7 @@ namespace GorillaStudio.NameFolders
         }
 
         public bool CanReuse { get { lock (gate) return !disposed && healthy && completedRevision == revision; } }
+        public long CurrentRevision { get { lock (gate) return revision; } }
         public long BeginRefresh() { lock (gate) return revision; }
         public void CompleteRefresh(long startedRevision, bool sourcesFullyWatched = true)
         {

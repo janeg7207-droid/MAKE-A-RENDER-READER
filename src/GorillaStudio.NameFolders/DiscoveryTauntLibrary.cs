@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Runtime.InteropServices;
 #if NET8_0_OR_GREATER
 using System.Text.Json;
@@ -15,6 +16,12 @@ using System.Web.Script.Serialization;
 
 namespace GorillaStudio.NameFolders
 {
+    internal sealed class DiscoveryTauntSourcesChangedException : InvalidOperationException
+    {
+        internal DiscoveryTauntSourcesChangedException()
+            : base("Discovery animation files changed during lookup. Read the current sources again before building the library.") { }
+    }
+
     public enum DiscoveryTauntUnavailableKind { MissingAnimation, UnsupportedFormat, ScanIncomplete, ReadFailure, CacheFailure }
 
     public sealed class DiscoveryUnavailableTaunt
@@ -42,6 +49,8 @@ namespace GorillaStudio.NameFolders
         public int ReadFailures { get; internal set; }
         public int CacheFailures { get; internal set; }
         public int ArchiveImported { get; internal set; }
+        public int VerifiedImported { get; internal set; }
+        public string VerifiedPackHash { get; internal set; }
         public int ArchiveCount { get; internal set; }
         public bool ArchivesSearched { get; internal set; }
         public string ArchiveStatus { get; internal set; }
@@ -57,27 +66,111 @@ namespace GorillaStudio.NameFolders
     /// <summary>Builds a writable engine data overlay without changing Discovery or the installed application.</summary>
     public static class DiscoveryTauntLibrary
     {
-        /// <summary>Finds lookup misses without changing the current engine overlay or preview files.</summary>
-        public static List<string> FindUnresolvedClips(string applicationRoot, string discoveryRoot, out string dataRoot)
+        /// <summary>A read-only lookup shared by archive preflight and the matching library build.</summary>
+        public sealed class Preparation
         {
-            string table = DiscoveryTaunts.FindTable(discoveryRoot);
-            dataRoot = table == null ? null : SourceRoot(discoveryRoot, table);
-            if (table == null) return new List<string>();
-            var manifest = JsonObject(File.ReadAllText(Path.Combine(applicationRoot, "data", "library", "taunts.json")));
+            internal string ApplicationRoot, SelectedRoot, ManifestPath, ManifestText, ManifestHash, Table;
+            internal readonly string OverlayRevision = Guid.NewGuid().ToString("N");
+            internal SourceStamp ManifestStamp, TableStamp;
+            internal List<DiscoveryTaunt> Definitions;
+            internal DiscoveryMotionAssets Assets;
+            internal VerifiedTauntRecordPack Records;
+            internal Func<long> ExternalRevision;
+            internal long CapturedRevision;
+            public string DataRoot { get; internal set; }
+            public IReadOnlyList<string> Missing { get; internal set; }
+
+            public bool IsCurrent(CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (ExternalRevision != null && ExternalRevision() != CapturedRevision) return false;
+                if (!ManifestStamp.IsCurrent()) return false;
+                string currentTable = DiscoveryTaunts.FindTable(SelectedRoot);
+                if (!string.Equals(Table, currentTable, StringComparison.OrdinalIgnoreCase)) return false;
+                bool current = Table == null || (TableStamp.IsCurrent() && Assets.IsCurrent(cancellationToken));
+                return current && (ExternalRevision == null || ExternalRevision() == CapturedRevision);
+            }
+        }
+
+        internal sealed class SourceStamp
+        {
+            private string path;
+            private long length, modified;
+            internal string ContentHash;
+            internal static SourceStamp Read(string path)
+            {
+                var file = new FileInfo(path);
+                return new SourceStamp { path = file.FullName, length = file.Length, modified = file.LastWriteTimeUtc.Ticks,
+                    ContentHash = Hash(File.ReadAllBytes(path)) };
+            }
+            internal bool IsCurrent()
+            {
+                try
+                {
+                    var file = new FileInfo(path);
+                    return file.Exists && file.Length == length && file.LastWriteTimeUtc.Ticks == modified
+                        && ContentHash == Hash(File.ReadAllBytes(path));
+                }
+                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { return false; }
+            }
+        }
+
+        public static Preparation Prepare(string applicationRoot, string discoveryRoot, CancellationToken cancellationToken,
+            Func<long> externalRevision = null, VerifiedTauntRecordPack recordPack = null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // The caller's watcher also covers game/mod CAK membership outside
+            // this extracted .clip/.clips tree. Capture its lease before scanning.
+            long revision = externalRevision == null ? 0 : externalRevision();
+            string manifestPath = Path.Combine(applicationRoot, "data", "library", "taunts.json");
+            var result = new Preparation { ApplicationRoot = Path.GetFullPath(applicationRoot), SelectedRoot = discoveryRoot,
+                ManifestPath = manifestPath, ManifestStamp = SourceStamp.Read(manifestPath),
+                ExternalRevision = externalRevision, CapturedRevision = revision,
+                Records = recordPack ?? VerifiedTauntRecordPack.Bundled };
+            result.ManifestHash = result.ManifestStamp.ContentHash;
+            result.ManifestText = File.ReadAllText(manifestPath);
+            var manifest = JsonObject(result.ManifestText);
             object raw;
             if (!manifest.TryGetValue("taunts", out raw) || !(raw is IEnumerable))
                 throw new InvalidDataException("The bundled taunt library has no animation list.");
             var bundled = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (object item in (IEnumerable)raw)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var entry = item as Dictionary<string, object>;
                 if (entry == null) throw new InvalidDataException("A bundled taunt entry is invalid.");
                 object clip;
                 if (entry.TryGetValue("clip", out clip) && clip is string) bundled.Add((string)clip);
             }
-            DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(dataRoot);
-            return DiscoveryTaunts.Read(table).Where(definition => !bundled.Contains(definition.Clip)
-                && assets.Find(definition.Clip) == null).Select(definition => definition.Clip).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            result.Table = DiscoveryTaunts.FindTable(discoveryRoot);
+            result.Definitions = new List<DiscoveryTaunt>();
+            result.Missing = new string[0];
+            if (result.Table == null) return result;
+            result.TableStamp = SourceStamp.Read(result.Table);
+            result.DataRoot = SourceRoot(discoveryRoot, result.Table);
+            result.Definitions = DiscoveryTaunts.Read(result.Table);
+            cancellationToken.ThrowIfCancellationRequested();
+            result.Assets = DiscoveryMotionAssets.Read(result.DataRoot, cancellationToken);
+            var missing = new List<string>();
+            foreach (DiscoveryTaunt definition in result.Definitions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                VerifiedTauntRecord record;
+                if (!bundled.Contains(definition.Clip) && result.Assets.Find(definition.Clip) == null
+                    && !result.Records.TryRead(definition.Clip, out record)) missing.Add(definition.Clip);
+            }
+            result.Missing = missing.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            return result;
+        }
+
+        /// <summary>Finds lookup misses without changing the current engine overlay or preview files.</summary>
+        public static List<string> FindUnresolvedClips(string applicationRoot, string discoveryRoot, out string dataRoot)
+        {
+            if (DiscoveryTaunts.FindTable(discoveryRoot) == null)
+            { dataRoot = null; return new List<string>(); }
+            Preparation prepared = Prepare(applicationRoot, discoveryRoot, CancellationToken.None);
+            dataRoot = prepared.DataRoot;
+            return prepared.Missing.ToList();
         }
 
         private static string SourceRoot(string selected, string table)
@@ -98,23 +191,53 @@ namespace GorillaStudio.NameFolders
         public static DiscoveryTauntImport Build(string applicationRoot, string storageRoot, string discoveryRoot,
             DiscoveryMotionFallbacks fallbacks)
         {
+            // Retain the historical root for direct/synchronous callers. The
+            // interactive prepared-refresh path uses its own revision below.
+            return BuildPreparation(Prepare(applicationRoot, discoveryRoot, CancellationToken.None), storageRoot, fallbacks, null, true, false);
+        }
+
+        public static DiscoveryTauntImport BuildPrepared(Preparation prepared, string storageRoot,
+            DiscoveryMotionFallbacks fallbacks = null, Action<string> progress = null)
+        {
+            return BuildPreparation(prepared, storageRoot, fallbacks, progress, true, true);
+        }
+
+        // The refresh bridge has just validated this snapshot while cancellation
+        // was still enabled, and validates it again before applying the result.
+        // Avoid an identical second directory/metadata sweep at the same boundary.
+        internal static DiscoveryTauntImport BuildCurrentPreparation(Preparation prepared, string storageRoot,
+            DiscoveryMotionFallbacks fallbacks, Action<string> progress)
+        {
+            return BuildPreparation(prepared, storageRoot, fallbacks, progress, false, true);
+        }
+
+        private static DiscoveryTauntImport BuildPreparation(Preparation prepared, string storageRoot,
+            DiscoveryMotionFallbacks fallbacks, Action<string> progress, bool validate, bool separateOverlay)
+        {
+            if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+            if (validate && !prepared.IsCurrent(CancellationToken.None))
+                throw new DiscoveryTauntSourcesChangedException();
+            string applicationRoot = prepared.ApplicationRoot;
             string baseData = Path.Combine(applicationRoot, "data");
             string baseLibrary = Path.Combine(baseData, "library");
             string baseManifest = Path.Combine(baseLibrary, "taunts.json");
-            var manifest = JsonObject(File.ReadAllText(baseManifest));
+            // Parse a fresh copy: building a manifest adds aliases and cache keys;
+            // those changes must never mutate this read-only source snapshot.
+            var manifest = JsonObject(prepared.ManifestText);
             object raw;
             if (!manifest.TryGetValue("taunts", out raw) || !(raw is IEnumerable))
                 throw new InvalidDataException("The bundled taunt library has no animation list.");
             var entries = ((IEnumerable)raw).Cast<object>().Select(value => value as Dictionary<string, object>).ToList();
             if (entries.Any(value => value == null)) throw new InvalidDataException("A bundled taunt entry is invalid.");
             var result = new DiscoveryTauntImport { Library = baseLibrary, Taunts = entries, Available = entries.Count };
-            string table = DiscoveryTaunts.FindTable(discoveryRoot);
+            result.VerifiedPackHash = prepared.Records.Sha256;
+            string table = prepared.Table;
             if (table == null) return result;
 
-            string sourceRoot = SourceRoot(discoveryRoot, table);
-            List<DiscoveryTaunt> definitions = DiscoveryTaunts.Read(table);
+            string sourceRoot = prepared.DataRoot;
+            List<DiscoveryTaunt> definitions = prepared.Definitions;
             result.Definitions = definitions.Count;
-            DiscoveryMotionAssets assets = DiscoveryMotionAssets.Read(sourceRoot);
+            DiscoveryMotionAssets assets = prepared.Assets;
             result.ScanIncomplete = assets.ScanIncomplete;
             result.AnimationRootFound = assets.AnimationRootFound;
             result.HasLinkedSources = assets.HasLinkedSources || (File.GetAttributes(table) & FileAttributes.ReparsePoint) != 0;
@@ -128,8 +251,12 @@ namespace GorillaStudio.NameFolders
                 result.ArchiveStatus = fallbacks.Status;
                 result.Warnings.AddRange(fallbacks.Warnings);
             }
-            string identity = Hash(Encoding.UTF8.GetBytes(Path.GetFullPath(applicationRoot) + "\n" + sourceRoot + "\n" + Hash(File.ReadAllBytes(baseManifest))));
-            string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20));
+            string identity = Hash(Encoding.UTF8.GetBytes(Path.GetFullPath(applicationRoot) + "\n" + sourceRoot + "\n" + prepared.ManifestHash));
+            // Never mutate the active window's previous engine data while an
+            // interactive refresh is still being checked for source changes.
+            // A failed/stale attempt remains private and is never applied.
+            string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20)
+                + (separateOverlay ? "-" + prepared.OverlayRevision.Substring(0, 12) : ""));
             string data = Path.Combine(overlay, "data"), library = Path.Combine(data, "library"), pack = Path.Combine(data, "gamepack");
             Directory.CreateDirectory(data);
             foreach (string directory in Directory.GetDirectories(applicationRoot))
@@ -157,15 +284,25 @@ namespace GorillaStudio.NameFolders
                 .GroupBy(item => (string)item["clip"], StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.OrdinalIgnoreCase);
             var applied = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int completed = 0;
             foreach (DiscoveryTaunt definition in definitions)
             {
+                if (completed++ % 32 == 0)
+                    progress?.Invoke("Preparing taunt " + completed.ToString(CultureInfo.InvariantCulture) + " of "
+                        + definitions.Count.ToString(CultureInfo.InvariantCulture) + "…");
                 List<Dictionary<string, object>> matches;
                 byClip.TryGetValue(definition.Clip, out matches);
                 DiscoveryMotionAsset asset = assets.Find(definition.Clip);
+                VerifiedTauntRecord verified = null;
                 bool fromArchive = false;
-                // Active extracted edits and existing bundled motion remain authoritative.
-                // Fallbacks only fill definitions with no playable motion source.
-                if (asset == null && matches == null && fallbacks != null)
+                // Extracted edits (including unsupported ones) always win. The
+                // shipped exact body pack is a bundled fallback, so users who
+                // keep a custom motion only inside a CAK must extract its active
+                // .clip/.clips into Discovery to override this stock record.
+                if (asset == null && matches == null) prepared.Records.TryRead(definition.Clip, out verified);
+                // Archive lookup fills only definitions with no extracted,
+                // bundled or verified shipped record.
+                if (asset == null && verified == null && matches == null && fallbacks != null)
                 {
                     DiscoveryMotionAsset recovered;
                     if (fallbacks.Assets.TryGetValue(definition.Clip, out recovered) && recovered != null)
@@ -175,14 +312,23 @@ namespace GorillaStudio.NameFolders
                         else { asset = recovered; fromArchive = true; }
                     }
                 }
-                if (asset == null)
+                if (asset == null && verified == null)
                 {
                     if (matches == null)
                     {
-                        result.Missing++;
-                        AddUnavailable(result, definition, assets.ScanIncomplete || (fallbacks != null && fallbacks.Incomplete)
-                                ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation,
-                            LookupMissReason(definition.Clip, assets, sourceRoot, fallbacks));
+                        string unsupported;
+                        if (prepared.Records.TryGetUnsupported(definition.Clip, out unsupported))
+                        {
+                            result.Unsupported++;
+                            AddUnavailable(result, definition, DiscoveryTauntUnavailableKind.UnsupportedFormat, unsupported);
+                        }
+                        else
+                        {
+                            result.Missing++;
+                            AddUnavailable(result, definition, assets.ScanIncomplete || (fallbacks != null && fallbacks.Incomplete)
+                                    ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation,
+                                LookupMissReason(definition.Clip, assets, sourceRoot, fallbacks));
+                        }
                     }
                     else
                     {
@@ -193,9 +339,10 @@ namespace GorillaStudio.NameFolders
                     continue;
                 }
                 MotionImportStage stage = MotionImportStage.ReadSource;
+                string sourcePath = verified == null ? asset.Path : "verified taunt pack " + prepared.Records.Sha256 + " · " + definition.Clip;
                 try
                 {
-                    byte[] bytes = asset.Read();
+                    byte[] bytes = verified == null ? asset.Read() : verified.Bytes;
                     string hash = Hash(bytes);
                     string cached = Path.Combine(cache, hash + ".npz");
                     DecodedDiscoveryMotion motion = null;
@@ -237,6 +384,7 @@ namespace GorillaStudio.NameFolders
                     }
                     applied.Add(definition.Clip);
                     if (fromArchive) result.ArchiveImported++;
+                    if (verified != null) result.VerifiedImported++;
                     if (matches == null)
                     {
                         var item = new Dictionary<string, object> {
@@ -244,8 +392,9 @@ namespace GorillaStudio.NameFolders
                             { "name", definition.Name }, { "clip", definition.Clip }, { "cut", null },
                             { "blend", 0.6 }, { "face", "facial_6368.npz" }, { "face_offset", 0 },
                             { "seconds", Math.Round(frames / (double)fps, 2) },
-                            { "also", definition.Names.Skip(1).ToArray() }, { "tags", new[] { "Discovery motion" } },
-                            { "drift_fix", false }, { "tested_on", new[] { "Preview on your selected wrestler" } }
+                            { "also", definition.Names.Skip(1).ToArray() },
+                            { "tags", new[] { verified == null ? "Discovery motion" : "Verified body motion" } },
+                            { "drift_fix", false }, { "tested_on", new[] { verified == null ? "Preview on your selected wrestler" : "Verified body record; preview on your selected wrestler" } }
                         };
                         entries.Add(item);
                         matches = new List<Dictionary<string, object>> { item };
@@ -277,19 +426,19 @@ namespace GorillaStudio.NameFolders
                     {
                         result.ReadFailures++;
                         kind = DiscoveryTauntUnavailableKind.ReadFailure;
-                        reason = "Animation clip " + definition.Clip + " was indexed in " + asset.Path + ", but could not be read: " + error.Message;
+                        reason = "Animation clip " + definition.Clip + " was indexed in " + sourcePath + ", but could not be read: " + error.Message;
                     }
                     else if (stage == MotionImportStage.Decode)
                     {
                         result.Unsupported++;
                         kind = DiscoveryTauntUnavailableKind.UnsupportedFormat;
-                        reason = "Animation clip " + definition.Clip + " was found in " + asset.Path + ", but this app could not decode its animation format: " + error.Message;
+                        reason = "Animation clip " + definition.Clip + " was found in " + sourcePath + ", but this app could not decode its animation format: " + error.Message;
                     }
                     else
                     {
                         result.CacheFailures++;
                         kind = DiscoveryTauntUnavailableKind.CacheFailure;
-                        reason = "Animation clip " + definition.Clip + " was found in " + asset.Path + ", but its preview cache could not be prepared in " + storageRoot + ": " + error.Message;
+                        reason = "Animation clip " + definition.Clip + " was found in " + sourcePath + ", but its preview cache could not be prepared in " + storageRoot + ": " + error.Message;
                     }
                     result.Warnings.Add(definition.Name + ": " + error.Message);
                     if (matches != null)
@@ -317,6 +466,7 @@ namespace GorillaStudio.NameFolders
             entries = entries.OrderBy(item => Convert.ToString(item["name"], CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase).ToList();
             manifest["taunts"] = entries;
             WriteAtomic(Path.Combine(library, "taunts.json"), Json(manifest));
+            result.Warnings.AddRange(prepared.Records.Warnings.Where(warning => !result.Warnings.Contains(warning)));
             result.Root = overlay;
             result.Library = library;
             result.Taunts = entries;
@@ -480,7 +630,7 @@ namespace GorillaStudio.NameFolders
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateHardLink(string newPath, string existingPath, IntPtr security);
 
-        private static string Json(object value)
+        internal static string Json(object value)
         {
 #if NET8_0_OR_GREATER
             return JsonSerializer.Serialize(value);

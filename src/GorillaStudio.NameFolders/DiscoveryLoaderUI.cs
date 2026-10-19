@@ -131,6 +131,7 @@ namespace GorillaStudio.NameFolders
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 AttachUpdateControls(window);
+                AttachPngExportControls(window);
                 AttachAutomaticTauntPreview(window);
                 if (!NativeStartupAutomation(window))
                     await RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
@@ -144,6 +145,7 @@ namespace GorillaStudio.NameFolders
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
                 AttachUpdateControls(window);
+                AttachPngExportControls(window);
                 AttachAutomaticTauntPreview(window);
                 if (!NativeStartupAutomation(window))
                     _ = RefreshDiscoveryTauntsAsync(window, RememberedRoot(window), false);
@@ -422,7 +424,7 @@ namespace GorillaStudio.NameFolders
                     canCancel => {
                         load.Committing = !canCancel;
                         if (load.Cancel != null) load.Cancel.IsEnabled = canCancel && !load.Closed && !load.Cancellation.IsCancellationRequested;
-                    });
+                    }, () => context.CurrentRevision);
                 if (load.Closed || !window.IsLoaded) return;
                 // Nested links may point outside both watched trees. Preserve
                 // normal rescans for those sources instead of retaining stale
@@ -436,6 +438,7 @@ namespace GorillaStudio.NameFolders
                 if (import.ReadFailures > 0) message += " · " + import.ReadFailures + " animation read errors";
                 if (import.CacheFailures > 0) message += " · " + import.CacheFailures + " preview cache errors";
                 if (import.ArchiveImported > 0) message += " · " + import.ArchiveImported + " recovered from archives";
+                if (import.VerifiedImported > 0) message += " · " + import.VerifiedImported + " from verified Animation data";
                 if (import.ArchivesSearched) message += " · " + import.ArchiveCount + " archives checked";
                 if (import.ScanIncomplete) message += " · lookup incomplete: open Animation details";
                 SetModelStatus(window, message);

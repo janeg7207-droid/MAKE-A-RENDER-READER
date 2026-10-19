@@ -76,7 +76,32 @@ internal static class Program
         queue.Enqueue("PAC/AfterClose", 17000);
         Equal("A closed window cannot restart automatic previews", null, queue.TryBegin("PAC/AfterClose", false, 18000));
         Equal("Closing prevents all later queue work", false, queue.HasWork);
+        OutcomeTests();
         Console.WriteLine("PASS " + passed + " automatic taunt preview checks");
+    }
+
+    private static void OutcomeTests()
+    {
+        var stopped = AutomaticTauntPreviewOutcome.FromProcess(1, new[] { "STAGE 2/8 loading", "FileNotFoundError: selected model is unavailable" }, false);
+        Equal("A native Go task that returns after renderer failure is not considered successful", false, stopped.Succeeded);
+        Equal("The real renderer error replaces the preparation hint", true, stopped.Message.Contains("selected model is unavailable"));
+        Equal("A failed exit never wins over an old RESULT line", false,
+            AutomaticTauntPreviewOutcome.FromProcess(9, new[] { "RESULT old", "Render failed" }, true).Succeeded);
+        var noResult = AutomaticTauntPreviewOutcome.FromProcess(0, new[] { "STAGE 6/6 done" }, true);
+        Equal("An exit-zero process without a preview result is reported as unfinished", false, noResult.Succeeded);
+        Equal("An incomplete process result has an actionable retry message", true, noResult.Message.Contains("Press Preview to retry"));
+        var noImage = AutomaticTauntPreviewOutcome.FromProcess(0, new[] { "RESULT metadata" }, false);
+        Equal("Missing output image pixels cannot be presented as a completed preview", false, noImage.Succeeded);
+        Equal("Missing output images have a distinct message", true, noImage.Message.Contains("readable preview image"));
+        var success = AutomaticTauntPreviewOutcome.FromProcess(0, new[] { "STAGE 9/9 ready", "RESULT metadata" }, true);
+        Equal("A successful new preview with real image pixels reaches ready", true, success.Succeeded);
+        Equal("A successful cache hit with real image pixels reaches ready", true,
+            AutomaticTauntPreviewOutcome.FromProcess(0, new[] { "RESULT cached metadata" }, true).Succeeded);
+        Equal("Successful completion never retains a preparation message", false, success.Message.Contains("Preparing"));
+        var emptyError = AutomaticTauntPreviewOutcome.FromProcess(7, new string[0], false);
+        Equal("An empty failed-process log still exposes its exit code", true, emptyError.Message.Contains("exit 7"));
+        Equal("A caught Go exception terminates the preparation state", false, AutomaticTauntPreviewOutcome.Failure("Blender could not start").Succeeded);
+        Equal("An empty error cannot create a permanently blank hint", true, AutomaticTauntPreviewOutcome.Failure(null).Message.Contains("Press Preview"));
     }
     private static void Equal<T>(string label, T expected, T actual)
     {

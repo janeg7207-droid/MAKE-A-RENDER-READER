@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Threading;
 using GorillaStudio.NameFolders;
 
 namespace GorillaStudio.NameFolders
@@ -43,12 +44,153 @@ internal static class Program
 
     private static void Main(string[] args)
     {
+        if (args.Length == 3 && args[0] == "--audit-record-versions")
+        { AuditRecordVersions(args[1], args[2]); return; }
+        if (args.Length == 6 && args[0] == "--verify-record-pack")
+        { VerifyRecordPack(args[1], args[2], args[3], args[4], args[5]); return; }
+        if (args.Length == 3 && args[0] == "--verify-embedded-pack")
+        {
+            var assembly = System.Reflection.Assembly.LoadFile(Path.GetFullPath(args[1]));
+            using (Stream input = assembly.GetManifestResourceStream("GorillaStudio.NameFolders.VerifiedTauntRecords.zip"))
+            {
+                Equal("The actual helper DLL contains the expected verified-record resource", true, input != null);
+                using (VerifiedTauntRecordPack pack = VerifiedTauntRecordPack.Read(input))
+                {
+                    Equal("The embedded helper resource has the exact reviewed ZIP SHA-256", Hash(args[2]).ToLowerInvariant(), pack.Sha256);
+                    Equal("The actual shipped helper embeds every supported recovered body", 617, pack.Count);
+                    Equal("The shipped helper retains all found-but-unsupported body diagnostics", 71, pack.UnsupportedCount);
+                    Equal("The actual helper resource loads without warnings", 0, pack.Warnings.Count);
+                }
+            }
+            Console.WriteLine("PASS " + passed + " embedded verified-pack checks"); return;
+        }
         string work = Path.Combine(Path.GetTempPath(), "discovery-library-units-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(work);
         try { UnitTests(work); }
         finally { Directory.Delete(work, true); }
         if (args.Length == 3) Actual(args[0], args[1], args[2]);
         Console.WriteLine("PASS " + passed + " Discovery taunt library checks");
+    }
+
+    private static void AuditRecordVersions(string input, string output)
+    {
+        using (JsonDocument json = JsonDocument.Parse(File.ReadAllText(input)))
+        {
+            var records = new List<object>();
+            int supported = 0, supportedUnbundled = 0;
+            foreach (var group in json.RootElement.GetProperty("versions").EnumerateArray()
+                .GroupBy(row => row.GetProperty("clip").GetString(), StringComparer.Ordinal).OrderBy(row => row.Key, StringComparer.Ordinal))
+            {
+                JsonElement source = group.OrderBy(row => row.GetProperty("source").GetProperty("archive_member").GetString()
+                    .Contains("/Acts/Basic/", StringComparison.Ordinal) ? 0 : 1)
+                    .ThenBy(row => row.GetProperty("path").GetString(), StringComparer.Ordinal).First();
+                string clip = group.Key, path = source.GetProperty("path").GetString();
+                byte[] bytes = File.ReadAllBytes(path);
+                string sha = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                bool bundledAvailable = source.GetProperty("definition").GetProperty("bundled_available").GetBoolean();
+                string failure = null;
+                int frames = 0, bones = 0; float fps = 0;
+                try
+                {
+                    if (BitConverter.ToUInt64(bytes, 0) != DiscoveryMotionAssets.ClipId(clip)
+                        || sha != source.GetProperty("source").GetProperty("sha256").GetString())
+                        throw new InvalidDataException("The raw record no longer matches its exact identity/provenance.");
+                    DecodedDiscoveryMotion motion = DiscoveryMotionDecoder.Decode(bytes);
+                    frames = motion.Frames; bones = motion.Ids.Length; fps = motion.Fps;
+                    foreach (float value in motion.Poses)
+                        if (!float.IsFinite(value)) throw new InvalidDataException("Decoded motion contains a non-finite pose component.");
+                    supported++;
+                    if (!bundledAvailable) supportedUnbundled++;
+                }
+                catch (Exception error) when (error is InvalidDataException || error is ArgumentException || error is OverflowException)
+                { failure = error.Message; }
+                records.Add(new { clip, path, size = bytes.Length, sha256 = sha, supported = failure == null,
+                    bundled_available = bundledAvailable, frames, bones, fps, error = failure });
+            }
+            var report = new { source = Path.GetFullPath(input), source_archive_sha256 = json.RootElement.GetProperty("source_archive_sha256").GetString(),
+                decoder = "Production DiscoveryMotionDecoder.Decode + complete finite-pose check", records = records.ToArray(),
+                total = records.Count, supported, supported_unbundled = supportedUnbundled,
+                unsupported = records.Count - supported, windows_render_verified = false };
+            File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine("Production decoder audit: " + records.Count + " canonical records; " + supported + " supported; "
+                + supportedUnbundled + " supported and not bundled. Report: " + output);
+        }
+    }
+
+    private static void VerifyRecordPack(string zipPath, string application, string discovery, string storage, string output)
+    {
+        using (var input = File.OpenRead(zipPath))
+        using (VerifiedTauntRecordPack pack = VerifiedTauntRecordPack.Read(input))
+        using (var zip = ZipFile.OpenRead(zipPath))
+        using (JsonDocument provenance = JsonDocument.Parse(zip.GetEntry("manifest.json").Open()))
+        {
+            JsonElement[] records = provenance.RootElement.GetProperty("records").EnumerateArray().ToArray();
+            Equal("The shipped verified pack has the audited supported unbundled count", 617, pack.Count);
+            Equal("The manifest and actual pack reader agree on playable record count", records.Length, pack.Count);
+            var bundled = JsonDocument.Parse(File.ReadAllText(Path.Combine(application, "data", "library", "taunts.json")))
+                .RootElement.GetProperty("taunts").EnumerateArray().Select(row => row.GetProperty("clip").GetString()).ToHashSet(StringComparer.Ordinal);
+            List<DiscoveryTaunt> currentDefinitions = DiscoveryTaunts.Read(DiscoveryTaunts.FindTable(discovery));
+            var definitions = currentDefinitions.Select(row => row.Clip).ToHashSet(StringComparer.Ordinal);
+            DiscoveryTaunt outlier = currentDefinitions.Single(row => row.Clip == "100000a255");
+            Equal("The 6-7 custom reference preserves its full CAM logical ID", 100000, outlier.Id);
+            Equal("The 6-7 custom reference preserves variant255 without clamping", 255, outlier.Variant);
+            Equal("The 6-7 custom reference preserves its separate DataMoveID", true, outlier.DataMoveIds.Contains(26550404));
+            foreach (JsonElement row in records)
+            {
+                string clip = row.GetProperty("clip").GetString();
+                Equal("Verified record has a canonical current Discovery definition: " + clip, true, definitions.Contains(clip));
+                Equal("Verified record cannot replace a bundled native motion: " + clip, false, bundled.Contains(clip));
+                VerifiedTauntRecord record;
+                Equal("Production reader verifies exact raw size/SHA/ID: " + clip, true, pack.TryRead(clip, out record));
+                DecodedDiscoveryMotion motion = DiscoveryMotionDecoder.Decode(record.Bytes);
+                bool finite = true;
+                foreach (float value in motion.Poses) finite &= float.IsFinite(value);
+                Equal("Production decoder reads finite complete body poses: " + clip, true, finite && motion.Frames > 0 && motion.Ids.Length > 0);
+            }
+            Equal("Every verified packed record passes its production reader checks", 0, pack.Warnings.Count);
+            string sourceManifest = Path.Combine(application, "data", "library", "taunts.json");
+            string sourceTable = DiscoveryTaunts.FindTable(discovery);
+            string manifestHash = Hash(sourceManifest), tableHash = Hash(sourceTable);
+            var prepared = DiscoveryTauntLibrary.Prepare(application, discovery, CancellationToken.None, null, pack);
+            DiscoveryTauntImport result = DiscoveryTauntLibrary.BuildPrepared(prepared, storage);
+            using (JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(result.Library, "taunts.json"))))
+            {
+                var playable = manifest.RootElement.GetProperty("taunts").EnumerateArray()
+                    .Select(row => row.GetProperty("clip").GetString()).ToHashSet(StringComparer.Ordinal);
+                foreach (string clip in new[] { "37367a000", "37248a000" }.Concat(Enumerable.Range(1, 5).Select(variant => "62247a" + variant.ToString("000"))))
+                {
+                    Equal("The recovered requested taunt is playable by exact canonical ID: " + clip, true, playable.Contains(clip));
+                    VerifiedTauntRecord record; pack.TryRead(clip, out record);
+                    Equal("The recovered requested taunt uses its own verified poses: " + clip, true,
+                        record != null && DiscoveryMotionNpz.MatchesPoses(Path.Combine(result.Root, "data", "gamepack", "decoded", clip + ".npz"),
+                            DiscoveryMotionDecoder.Decode(record.Bytes)));
+                }
+                foreach (string clip in new[] { "62247a006", "62247a007" })
+                {
+                    Equal("The present unsupported Hardy variant is not fabricated as playable: " + clip, false, playable.Contains(clip));
+                    Equal("The present unsupported Hardy variant has a source/format reason: " + clip, true,
+                        result.Unavailable.Any(item => item.Clip == clip && item.Kind == DiscoveryTauntUnavailableKind.UnsupportedFormat
+                            && item.Reason.Contains("Animation.7z") && item.Reason.Contains("additional channel", StringComparison.OrdinalIgnoreCase)));
+                }
+                Equal("The absent 6-7 canonical body is never fabricated as playable", false, playable.Contains("100000a255"));
+                DiscoveryUnavailableTaunt unavailable = result.Unavailable.Single(item => item.Clip == "100000a255");
+                Equal("The absent 6-7 reference keeps its exact searchable unavailable identity", DiscoveryTauntUnavailableKind.MissingAnimation, unavailable.Kind);
+                Equal("Searching 6-7 finds its current definition instead of a neighboring ID", true,
+                    DiscoveryTauntSearch.Matches(DiscoveryTauntSearch.BuildText(unavailable.Name, unavailable.Names, null, unavailable.Clip), "6-7"));
+            }
+            Equal("Verified pack import leaves the bundled source manifest unchanged", manifestHash, Hash(sourceManifest));
+            Equal("Verified pack import leaves the user's Discovery definitions unchanged", tableHash, Hash(sourceTable));
+            Equal("The prepared resource import remains current after writing its isolated overlay", true, prepared.IsCurrent(CancellationToken.None));
+            File.WriteAllText(output, JsonSerializer.Serialize(new {
+                pack = Path.GetFullPath(zipPath), sha256 = pack.Sha256, records = pack.Count, unsupported_metadata = pack.UnsupportedCount,
+                definitions = result.Definitions, playable = result.Available, imported = result.Imported,
+                verified_imported = result.VerifiedImported, missing = result.Missing, unsupported = result.Unsupported,
+                unresolved_archive_requests = prepared.Missing.Count, warnings = result.Warnings.Count, checks = passed,
+                source_manifest_unchanged = true, source_CAM_unchanged = true,
+                windows_gui_executed = false, blender_render_completed = false
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            Console.WriteLine("PASS " + passed + " actual verified taunt pack checks. Report: " + output);
+        }
     }
 
     private static void UnitTests(string root)
@@ -118,7 +260,269 @@ internal static class Program
         ScopeTests(root);
         DiagnosticTests(root);
         FallbackTests(root);
+        PreparationTests(root);
+        VerifiedPackTests(root);
         SearchTests();
+    }
+
+    private static VerifiedTauntRecordPack Pack(byte[] body, string clip, bool wrongHash = false,
+        bool missingEntry = false, string role = "body", string unsupportedClip = null)
+    {
+        using (var bytes = new MemoryStream())
+        {
+            using (var zip = new ZipArchive(bytes, ZipArchiveMode.Create, true))
+            {
+                string sha = Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant();
+                var manifest = new { version = 1, camSha256 = new string('a', 64),
+                    archive = new { name = "Animation.7z", sha256 = new string('b', 64) },
+                    unsupported = unsupportedClip == null ? new object[0] : new object[] {
+                        new { clip = unsupportedClip, role = "body", reason = "Additional channel sections are not supported yet.",
+                            size = 160, sha256 = new string('c', 64), sources = new[] { new { archiveMember = "Animation/Body/Other.clips" } } } },
+                    records = new[] { new { clip, role, size = body.Length,
+                        sha256 = wrongHash ? new string('0', 64) : sha,
+                        sources = new[] { new { archiveMember = "Animation/Body/Taunt.clips", containerCrc32 = "12345678",
+                            containerUncompressedOffset = 0, recordOffset = 40, length = body.Length, sha256 = sha } } } } };
+                using (var writer = new StreamWriter(zip.CreateEntry("manifest.json").Open())) writer.Write(JsonSerializer.Serialize(manifest));
+                if (!missingEntry)
+                    using (Stream output = zip.CreateEntry("records/" + clip + ".clip").Open()) output.Write(body, 0, body.Length);
+            }
+            bytes.Position = 0;
+            return VerifiedTauntRecordPack.Read(bytes);
+        }
+    }
+
+    private static void VerifiedPackTests(string root)
+    {
+        const string clip = "17330a000";
+        byte[] body = Motion(clip, 24);
+        Array.Copy(BitConverter.GetBytes(25f), 0, body, 0xA8 + 4, 4);
+        VerifiedTauntRecord record;
+        using (VerifiedTauntRecordPack absent = VerifiedTauntRecordPack.Read(null))
+        {
+            Equal("An optional absent verified resource leaves source builds usable", 0, absent.Count);
+            Equal("An absent verified resource fabricates no motion", false, absent.TryRead(clip, out record));
+            Equal("An intentionally absent optional resource is not an error", 0, absent.Warnings.Count);
+        }
+        using (VerifiedTauntRecordPack pack = Pack(body, clip))
+        {
+            Equal("The verified pack reads one explicitly identified body record", 1, pack.Count);
+            Equal("A verified record passes its exact ID, length and SHA-256 checks", true, pack.TryRead(clip, out record));
+            Equal("A verified record retains its canonical animation identity", clip, record.Clip);
+            Equal("A verified record retains its exact payload hash", Convert.ToHexString(SHA256.HashData(body)).ToLowerInvariant(), record.Sha256);
+            Equal("A verified record retains its original archive-member provenance", true, record.Provenance.Contains("Animation/Body/Taunt.clips"));
+            Equal("The resource has a reproducible whole-pack SHA-256", 64, pack.Sha256.Length);
+            Equal("The pack cannot substitute an adjacent variant", false, pack.TryRead("17330a001", out record));
+
+            var f = FallbackFixtureAt(root, "verified-pack-exact");
+            var prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            Equal("Verified pack coverage avoids a redundant game-archive lookup", 0, prepared.Missing.Count);
+            DiscoveryTauntImport built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks);
+            Equal("The exact verified fallback is counted separately", 1, built.VerifiedImported);
+            Equal("Bundled-like verified fallback does not relabel itself as recovered archive data", 0, built.ArchiveImported);
+            Equal("The import report identifies the whole verified pack hash", pack.Sha256, built.VerifiedPackHash);
+            string npz = Path.Combine(built.Root, "data", "gamepack", "decoded", clip + ".npz");
+            Equal("Verified fallback writes its exact body poses rather than a different cached archive record", true,
+                DiscoveryMotionNpz.MatchesPoses(npz, DiscoveryMotionDecoder.Decode(body)));
+            Equal("A verified fallback preserves the actual Discovery taunt name", "Enigma 4",
+                JsonDocument.Parse(File.ReadAllText(Path.Combine(built.Library, "taunts.json"))).RootElement.GetProperty("taunts")[0].GetProperty("name").GetString());
+
+            f = FallbackFixtureAt(root, "verified-pack-loose-edit");
+            string directory = Directory.CreateDirectory(Path.Combine(f.Data, "Animation")).FullName;
+            byte[] edit = Motion(clip, 60); Array.Copy(BitConverter.GetBytes(50f), 0, edit, 0xA8 + 4, 4);
+            string loose = Path.Combine(directory, "Edited.clip"); File.WriteAllBytes(loose, edit);
+            prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+            Equal("An extracted loose mod always overrides the shipped verified body", 0, built.VerifiedImported);
+            Equal("The loose override keeps its actual edited poses", true,
+                DiscoveryMotionNpz.MatchesPoses(Path.Combine(built.Root, "data", "gamepack", "decoded", clip + ".npz"), DiscoveryMotionDecoder.Decode(edit)));
+            Equal("A verified fallback never rewrites the user's loose animation bytes", true, File.ReadAllBytes(loose).SequenceEqual(edit));
+            File.Delete(loose); Container(Path.Combine(directory, "Edited.clips"), edit);
+            prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+            Equal("An extracted container also overrides the shipped verified body", 0, built.VerifiedImported);
+            Equal("Container override poses remain exact", true,
+                DiscoveryMotionNpz.MatchesPoses(Path.Combine(built.Root, "data", "gamepack", "decoded", clip + ".npz"), DiscoveryMotionDecoder.Decode(edit)));
+            File.Delete(Path.Combine(directory, "Edited.clips"));
+            Write(edit, 0x60, 1u); File.WriteAllBytes(loose, edit);
+            prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+            Equal("An unsupported active extracted mod is never silently replaced by shipped stock motion", 0, built.VerifiedImported);
+            Equal("An unsupported active mod retains its decoder diagnostic", DiscoveryTauntUnavailableKind.UnsupportedFormat, built.Unavailable.Single().Kind);
+
+            f = FallbackFixtureAt(root, "verified-pack-bundled-priority");
+            File.WriteAllText(Path.Combine(f.Library, "taunts.json"), JsonSerializer.Serialize(new { taunts = new[] {
+                new { key = "bundled_enigma", name = "Bundled Enigma 4", clip, seconds = 0.1 }
+            } }));
+            byte[] bundled = Motion(clip, 30);
+            DiscoveryMotionNpz.Write(Path.Combine(f.Decoded, clip + ".npz"), DiscoveryMotionDecoder.Decode(bundled));
+            prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+            Equal("Existing bundled playable motion stays authoritative over the verified pack", 0, built.VerifiedImported);
+            Equal("A verified pack does not rename an existing bundled renderer key", "bundled_enigma", ManifestKey(Path.Combine(built.Library, "taunts.json")));
+            Equal("A verified pack preserves bundled decoded poses exactly", true,
+                DiscoveryMotionNpz.MatchesPoses(Path.Combine(built.Root, "data", "gamepack", "decoded", clip + ".npz"), DiscoveryMotionDecoder.Decode(bundled)));
+        }
+
+        foreach (string defect in new[] { "hash", "header", "missing", "facial" })
+        {
+            byte[] candidate = defect == "header" ? Motion("17331a000", 24) : body;
+            using (VerifiedTauntRecordPack pack = Pack(candidate, clip, defect == "hash", defect == "missing", defect == "facial" ? "facial" : "body"))
+            {
+                Equal("The verified reader rejects a record with invalid " + defect + " evidence", false, pack.TryRead(clip, out record));
+                Equal("Invalid verified " + defect + " evidence is explained", true, pack.Warnings.Count > 0);
+                var f = FallbackFixtureAt(root, "verified-pack-invalid-" + defect);
+                var prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+                Equal("Invalid verified " + defect + " evidence leaves the exact animation eligible for archive search", true, prepared.Missing.SequenceEqual(new[] { clip }));
+                var built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+                Equal("Invalid verified " + defect + " evidence cannot create a playable motion", 0, built.VerifiedImported);
+                Equal("Invalid verified " + defect + " evidence retains the unavailable character's exact taunt identity", clip, built.Unavailable.Single().Clip);
+                Equal("Invalid verified " + defect + " warnings reach the import report", true, built.Warnings.Any(warning => warning.StartsWith("Verified", StringComparison.Ordinal)));
+            }
+        }
+
+        using (VerifiedTauntRecordPack pack = Pack(Motion("17331a000", 30), "17331a000", unsupportedClip: clip))
+        {
+            Equal("Audited unsupported bodies retain metadata without embedding a playable raw record", 1, pack.UnsupportedCount);
+            Equal("Unsupported body metadata cannot produce fake playable bytes", false, pack.TryRead(clip, out record));
+            string reason;
+            Equal("An unsupported body can explain its exact source archive and canonical ID", true,
+                pack.TryGetUnsupported(clip, out reason) && reason.Contains("Animation.7z") && reason.Contains(clip));
+            var f = FallbackFixtureAt(root, "verified-pack-unsupported-metadata");
+            var prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, null, pack);
+            Equal("Unsupported pack metadata never suppresses search for an actual compatible archive record", true, prepared.Missing.SequenceEqual(new[] { clip }));
+            var built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage);
+            Equal("Found unsupported archive body is classified as a format limitation", DiscoveryTauntUnavailableKind.UnsupportedFormat, built.Unavailable.Single().Kind);
+            Equal("Found unsupported archive body is not mislabeled as a lookup miss", 0, built.Missing);
+            Equal("Found unsupported body has an explicit unsupported count", 1, built.Unsupported);
+            Equal("Unsupported diagnostics retain source archive and exact variant identity", true,
+                built.Unavailable.Single().Reason.Contains("Animation.7z") && built.Unavailable.Single().Reason.Contains(clip));
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks);
+            Equal("A real compatible recovered archive body outranks unsupported pack metadata", 1, built.ArchiveImported);
+            Equal("A recovered compatible body removes the unsupported metadata row", 0, built.Unavailable.Count);
+        }
+    }
+
+    private static void PreparationTests(string root)
+    {
+        const string clip = "17330a000";
+        var f = FallbackFixtureAt(root, "prepared-stable");
+        string animations = Directory.CreateDirectory(Path.Combine(f.Data, "Animation")).FullName;
+        string unused = Path.Combine(animations, "Unrelated.clips");
+        Container(unused, Motion("62541a000", 60));
+        DiscoveryTauntLibrary.Preparation prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        Equal("Prepared lookup keeps the exact unresolved variant", true, prepared.Missing.SequenceEqual(new[] { clip }));
+        Equal("Prepared lookup retains the source data root", f.Data, prepared.DataRoot);
+        Equal("An unchanged prepared lookup can be used for the matching build", true, prepared.IsCurrent(CancellationToken.None));
+        var progress = new List<string>();
+        DiscoveryTauntImport built;
+        // FileShare.None blocks a second table open. Metadata remains readable;
+        // this unrelated record is not needed for actual requested-body reads.
+        using (var locked = new FileStream(unused, FileMode.Open, FileAccess.Read, FileShare.None))
+            built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks, progress.Add);
+        Equal("Prepared build does not reopen every unrelated container table", false, built.ScanIncomplete);
+        Equal("Prepared build still reads the exact recovered taunt body", 1, built.ArchiveImported);
+        Equal("Large library builds report their current taunt preparation work", true, progress.Any(value => value.Contains("Preparing taunt")));
+        string manifest = Path.Combine(built.Library, "taunts.json");
+        string firstManifest = File.ReadAllText(manifest);
+        DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks);
+        Equal("Rebuilding the same preparation cannot duplicate aliases or append cache-key suffixes", firstManifest, File.ReadAllText(manifest));
+        Equal("Overlay writes do not invalidate unchanged Discovery sources", true, prepared.IsCurrent(CancellationToken.None));
+
+        f = FallbackFixtureAt(root, "prepared-new-loose");
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        string edited = Directory.CreateDirectory(Path.Combine(f.Data, "New Export")).FullName;
+        byte[] changed = Motion(clip, 24); Array.Copy(BitConverter.GetBytes(50f), 0, changed, 0xA8 + 4, 4);
+        File.WriteAllBytes(Path.Combine(edited, "Newest.clip"), changed);
+        Equal("A loose override added during archive lookup invalidates its older preparation", false, prepared.IsCurrent(CancellationToken.None));
+        bool staleRejected = false;
+        try { DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks); }
+        catch (DiscoveryTauntSourcesChangedException) { staleRejected = true; }
+        Equal("A stale preparation is rejected before an archive body can replace the new active edit", true, staleRejected);
+        Equal("Rejecting a stale preparation creates no partial engine overlay", false, Directory.Exists(Path.Combine(f.Storage, "taunt-data")));
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        Equal("A refreshed preparation no longer requests an archive for the exact new loose edit", 0, prepared.Missing.Count);
+        built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks);
+        Equal("The refreshed preparation preserves loose-mod priority over its old fallback", 0, built.ArchiveImported);
+        Equal("The refreshed preparation decodes the newly exported body exactly", true,
+            DiscoveryMotionNpz.MatchesPoses(Path.Combine(built.Root, "data", "gamepack", "decoded", clip + ".npz"), DiscoveryMotionDecoder.Decode(changed)));
+
+        f = FallbackFixtureAt(root, "prepared-table-change");
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        byte[] table = File.ReadAllBytes(f.Table); Write(table, 136, 17331u); File.WriteAllBytes(f.Table, table);
+        File.SetLastWriteTimeUtc(f.Table, DateTime.UtcNow.AddMinutes(1));
+        Equal("Changed CAM definitions invalidate preflight even when the binary table has the same length", false, prepared.IsCurrent(CancellationToken.None));
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        Equal("A refreshed CAM preparation uses the new exact canonical animation ID", true, prepared.Missing.SequenceEqual(new[] { "17331a000" }));
+        DateTime unchangedTime = File.GetLastWriteTimeUtc(f.Table);
+        table = File.ReadAllBytes(f.Table); Write(table, 136, 17332u); File.WriteAllBytes(f.Table, table);
+        File.SetLastWriteTimeUtc(f.Table, unchangedTime);
+        Equal("An edited CAM table cannot hide a changed ID behind unchanged file metadata", false, prepared.IsCurrent(CancellationToken.None));
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        File.AppendAllText(Path.Combine(f.Library, "taunts.json"), " ");
+        Equal("Changed bundled manifest invalidates a prepared overlay identity", false, prepared.IsCurrent(CancellationToken.None));
+
+        using (var cancellation = new CancellationTokenSource())
+        {
+            cancellation.Cancel(); bool canceled = false;
+            try { DiscoveryTauntLibrary.Prepare(f.App, f.Data, cancellation.Token); }
+            catch (OperationCanceledException) { canceled = true; }
+            Equal("Canceled library preflight stops before reading motion tables or creating an overlay", true, canceled);
+            canceled = false;
+            try { prepared.IsCurrent(cancellation.Token); }
+            catch (OperationCanceledException) { canceled = true; }
+            Equal("Source validation also honors an already canceled lookup", true, canceled);
+        }
+
+        f = FallbackFixtureAt(root, "prepared-change-during-build");
+        DiscoveryTauntImport active = DiscoveryTauntLibrary.Build(f.App, f.Storage, f.Data, f.Fallbacks);
+        string activeManifest = Path.Combine(active.Library, "taunts.json");
+        string activeDecoded = Path.Combine(active.Root, "data", "gamepack", "decoded", clip + ".npz");
+        string activeManifestHash = Hash(activeManifest), activeDecodedHash = Hash(activeDecoded);
+        DateTime activeManifestTime = File.GetLastWriteTimeUtc(activeManifest), activeDecodedTime = File.GetLastWriteTimeUtc(activeDecoded);
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        DirectoryLinks.BeforeEnsureJunction = () => {
+            string directory = Directory.CreateDirectory(Path.Combine(f.Data, "Late Overrides")).FullName;
+            File.WriteAllBytes(Path.Combine(directory, "Late.clip"), Motion(clip, 24));
+        };
+        try { built = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks); }
+        finally { DirectoryLinks.BeforeEnsureJunction = null; }
+        Equal("An override appearing during library construction is caught by post-build validation", false, prepared.IsCurrent(CancellationToken.None));
+        Equal("A pending prepared refresh uses a separate engine root from the active library", false, active.Root == built.Root);
+        Equal("Rejecting a late-changing prepared refresh preserves the active manifest bytes", activeManifestHash, Hash(activeManifest));
+        Equal("Rejecting a late-changing prepared refresh preserves the active decoded animation bytes", activeDecodedHash, Hash(activeDecoded));
+        Equal("A rejected prepared refresh leaves the active manifest timestamp unchanged", activeManifestTime, File.GetLastWriteTimeUtc(activeManifest));
+        Equal("A rejected prepared refresh leaves the active decoded timestamp unchanged", activeDecodedTime, File.GetLastWriteTimeUtc(activeDecoded));
+        Equal("A fresh preparation sees an override that appeared during the prior build", 0,
+            DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None).Missing.Count);
+        DiscoveryTauntLibrary.Preparation nextPreparation = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None);
+        DiscoveryTauntImport replacement = DiscoveryTauntLibrary.BuildPrepared(nextPreparation, f.Storage, f.Fallbacks);
+        Equal("A retry uses a separate root from both the prior active library and stale attempt", true,
+            replacement.Root != active.Root && replacement.Root != built.Root);
+        Equal("A successful prepared replacement still preserves the prior active manifest", activeManifestHash, Hash(activeManifest));
+        Equal("A successful prepared replacement still preserves the prior active decoded animation", activeDecodedHash, Hash(activeDecoded));
+
+        f = FallbackFixtureAt(root, "prepared-external-revision");
+        long sourceRevision = 7;
+        prepared = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, () => sourceRevision);
+        active = DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks);
+        activeManifest = Path.Combine(active.Library, "taunts.json");
+        activeDecoded = Path.Combine(active.Root, "data", "gamepack", "decoded", clip + ".npz");
+        activeManifestHash = Hash(activeManifest); activeDecodedHash = Hash(activeDecoded);
+        Equal("A prepared lookup accepts an unchanged external archive-source lease", true, prepared.IsCurrent(CancellationToken.None));
+        sourceRevision++;
+        Equal("An observed CAK source change invalidates preparation even with unchanged extracted motion files", false, prepared.IsCurrent(CancellationToken.None));
+        staleRejected = false;
+        try { DiscoveryTauntLibrary.BuildPrepared(prepared, f.Storage, f.Fallbacks); }
+        catch (DiscoveryTauntSourcesChangedException) { staleRejected = true; }
+        Equal("A changed external source lease blocks a stale prepared build", true, staleRejected);
+        Equal("An external-source rejection preserves active manifest bytes", activeManifestHash, Hash(activeManifest));
+        Equal("An external-source rejection preserves active decoded animation bytes", activeDecodedHash, Hash(activeDecoded));
+        nextPreparation = DiscoveryTauntLibrary.Prepare(f.App, f.Data, CancellationToken.None, () => sourceRevision);
+        Equal("A fresh lookup captures the latest external source revision", true, nextPreparation.IsCurrent(CancellationToken.None));
+        replacement = DiscoveryTauntLibrary.BuildPrepared(nextPreparation, f.Storage, f.Fallbacks);
+        Equal("A current external-source lease permits an isolated replacement build", true, replacement.Root != active.Root && replacement.ArchiveImported == 1);
+        Equal("A valid replacement still preserves the prior active manifest", activeManifestHash, Hash(activeManifest));
+        Equal("A valid replacement still preserves the prior active decoded animation", activeDecodedHash, Hash(activeDecoded));
     }
 
     private sealed class FallbackFixture

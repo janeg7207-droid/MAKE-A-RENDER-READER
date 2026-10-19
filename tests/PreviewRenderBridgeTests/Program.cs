@@ -28,6 +28,9 @@ internal static class Program
             await JunctionAndOutputIsolation();
             await DiscoveryOverlayInvalidation();
             await CapturedTauntThumbnails();
+            await CapturedPngCompletionContexts();
+            await BatchProcessOwnershipAndCancellation();
+            await AutomaticPreviewOutcomes();
             await UnavailableTauntDoesNotStart();
             Console.WriteLine(checks + " preview process bridge checks passed.");
             return 0;
@@ -148,7 +151,7 @@ internal static class Program
             Equal(0, result.Item1);
             Equal(true, owner.LastArgs.SequenceEqual(args));
             Equal(callback, owner.LastCallback);
-            Equal(started, owner.LastStarted);
+            Equal(true, owner.LastStarted != null);
             Equal(false, owner.Timings.Last().Preview);
             Equal(false, owner.Timings.Last().Cached);
         }
@@ -295,6 +298,129 @@ internal static class Program
         finally { DiscoveryTauntBridge.OnCapture = null; FolderBridge.DiscoveryEngineRoot = null; }
     }
 
+    private static async Task CapturedPngCompletionContexts()
+    {
+        FakeOwner owner = Create("png-completion");
+        int captured = 0;
+        string[] capturedArgs = null;
+        List<string> capturedLines = null;
+        FolderBridge.OnPngCapture = (actualOwner, script, args, lines) => {
+            Equal(owner, actualOwner); Equal(owner.Script, script);
+            captured++;
+            capturedArgs = args.ToArray(); capturedLines = lines.ToList();
+        };
+        try
+        {
+            var fresh = await Run(owner);
+            Equal(0, fresh.Item1); Equal(1, captured); Equal(1, owner.Calls);
+            Equal(true, capturedArgs.SequenceEqual(new[] { owner.Folder, "Taunt1", owner.Output, "quick=1" }));
+            Equal(true, capturedLines.SequenceEqual(fresh.Item2));
+            Equal(owner.Preview, PreviewPath(capturedLines));
+            var cached = await Run(owner);
+            Equal(0, cached.Item1); Equal(2, captured); Equal(1, owner.Calls);
+            Equal(true, capturedLines.SequenceEqual(cached.Item2));
+            Equal(true, PreviewPath(capturedLines).StartsWith(FolderBridge.StoragePath, StringComparison.Ordinal));
+
+            owner.Code = 1;
+            var failed = await Run(owner, null, null, "hair=failed-png");
+            Equal(1, failed.Item1); Equal(2, captured);
+            owner.Code = 0; owner.ReturnGmr = true;
+            string[] makeArgs = new[] { owner.Folder, "Taunt1", owner.Output, "hair=black", "attire=Alt/Attire.mcd" };
+            var made = await FolderBridge.RunPreviewProcess(owner, owner.Script, makeArgs, null, null);
+            Equal(0, made.Item1); Equal(3, captured);
+            Equal(true, capturedArgs.SequenceEqual(makeArgs));
+            Equal(true, capturedLines.SequenceEqual(made.Item2));
+            using (JsonDocument data = JsonDocument.Parse(capturedLines.Last(line => line.StartsWith("RESULT ")).Substring(7)))
+                Equal(Path.Combine(owner.Output, "924_PAC.gmr"), data.RootElement.GetProperty("gmr").GetString());
+
+            // Export failures are secondary: both a native success and a cache hit
+            // must still reach native Go so it can display the completed image.
+            owner.ReturnGmr = false;
+            FolderBridge.OnPngCapture = (actualOwner, script, args, lines) => { captured++; throw new IOException("PNG output unavailable"); };
+            var exportFailed = await Run(owner, null, null, "hair=png-error");
+            Equal(0, exportFailed.Item1); Equal(4, captured);
+            int nativeCalls = owner.Calls;
+            var exportFailedFromCache = await Run(owner, null, null, "hair=png-error");
+            Equal(0, exportFailedFromCache.Item1); Equal(5, captured); Equal(nativeCalls, owner.Calls);
+            Equal(true, owner.Timings.Last().Cached);
+            Equal(false, owner.Busy);
+
+            owner.Throw = new IOException("native render failed");
+            try { await Run(owner, null, null, "hair=native-error"); throw new Exception("Expected the native render error"); }
+            catch (IOException error) { Equal(owner.Throw, error); }
+            Equal(5, captured); Equal(false, owner.Busy);
+        }
+        finally { FolderBridge.OnPngCapture = null; }
+    }
+
+    private static async Task BatchProcessOwnershipAndCancellation()
+    {
+        FakeOwner owner = Create("batch-process");
+        var order = new List<string>();
+        Process tracked = null;
+        FolderBridge.OnBatchStarted = (actualOwner, process) => {
+            Equal(owner, actualOwner); tracked = process; order.Add("batch");
+        };
+        try
+        {
+            var rendered = await Run(owner, null, process => { Equal(tracked, process); order.Add("native"); });
+            Equal(0, rendered.Item1); Equal(1, owner.Calls);
+            Equal("batch,native", string.Join(",", order));
+            order.Clear();
+            await Run(owner, null, process => order.Add("cached process should not start"));
+            Equal(0, order.Count); Equal(1, owner.Calls);
+
+            FolderBridge.OnBatchCancellation = actualOwner => ReferenceEquals(actualOwner, owner);
+            string[][] operations = {
+                new[] { owner.Folder, "Taunt1", owner.Output },
+                new[] { owner.Folder, "Taunt1", owner.Output, "prepare=model" },
+                new[] { owner.Folder, "Taunt1", owner.Output, "quick=1", "hair=uncached-cancel" }
+            };
+            foreach (string[] operation in operations)
+            {
+                var result = await FolderBridge.RunPreviewProcess(owner, owner.Script, operation, null,
+                    process => { throw new Exception("A canceled batch cannot start another child."); });
+                Equal(1, result.Item1); Equal(true, result.Item2.Any(line => line.Contains("Batch canceled")));
+                Equal(1, owner.Calls); Equal(false, owner.Busy);
+            }
+            FolderBridge.OnBatchCancellation = null;
+            var next = await Run(owner, null, process => order.Add("next"), "hair=new-batch");
+            Equal(0, next.Item1); Equal(2, owner.Calls); Equal("batch,next", string.Join(",", order));
+        }
+        finally { FolderBridge.OnBatchCancellation = null; FolderBridge.OnBatchStarted = null; }
+    }
+
+    private static async Task AutomaticPreviewOutcomes()
+    {
+        FakeOwner owner = Create("automatic-outcome");
+        int observed = 0, lastCode = -1;
+        List<string> lastLines = null;
+        FolderBridge.OnAutomaticOutcome = (actualOwner, script, args, code, lines) => {
+            Equal(owner, actualOwner); Equal(owner.Script, script);
+            Equal(owner.Folder, args.First());
+            observed++; lastCode = code; lastLines = lines.ToList();
+        };
+        try
+        {
+            var fresh = await Run(owner);
+            Equal(1, observed); Equal(0, lastCode); Equal(true, fresh.Item2.SequenceEqual(lastLines));
+            var cached = await Run(owner);
+            Equal(2, observed); Equal(1, owner.Calls); Equal(0, lastCode);
+            Equal(true, cached.Item2.SequenceEqual(lastLines));
+            Equal(true, PreviewPath(lastLines).StartsWith(FolderBridge.StoragePath, StringComparison.Ordinal));
+            owner.Code = 7;
+            var failed = await Run(owner, null, null, "hair=failed-auto");
+            Equal(3, observed); Equal(7, lastCode); Equal(true, failed.Item2.SequenceEqual(lastLines));
+            owner.Code = 0;
+            FolderBridge.OnAutomaticOutcome = (actualOwner, script, args, code, lines) => { observed++; throw new IOException("observer error"); };
+            Equal(0, (await Run(owner, null, null, "hair=observer-error")).Item1);
+            Equal(4, observed);
+            Equal(0, (await Run(owner, null, null, "hair=observer-error")).Item1);
+            Equal(5, observed); Equal(true, owner.Timings.Last().Cached); Equal(false, owner.Busy);
+        }
+        finally { FolderBridge.OnAutomaticOutcome = null; }
+    }
+
     private static Task<ValueTuple<int, List<string>>> Run(FakeOwner owner, Action<string> callback = null, Action<Process> started = null, params string[] options)
     {
         return FolderBridge.RunPreviewProcess(owner, owner.Script, new[] { owner.Folder, "Taunt1", owner.Output, "quick=1" }.Concat(options), callback, started);
@@ -330,7 +456,7 @@ internal static class Program
         public string[] LastArgs;
         public Action<string> LastCallback;
         public Action<Process> LastStarted;
-        public bool Busy, Malformed, FailFreeze;
+        public bool Busy, Malformed, FailFreeze, ReturnGmr;
         public int Calls, Code, ExternalLines, ExternalStarts;
         public Exception Throw;
         public Action AfterRun;
@@ -344,7 +470,10 @@ internal static class Program
             started?.Invoke(new Process());
             await Task.Yield();
             File.WriteAllBytes(Preview, Png);
-            var lines = new List<string> { "STAGE 8/9 Preview", Malformed ? "RESULT {broken" : "RESULT " + JsonSerializer.Serialize(new { name = "PAC", id = 924, frames = 59, preview = Preview }) };
+            string result = ReturnGmr
+                ? JsonSerializer.Serialize(new { name = "PAC", id = 924, frames = 59, preview = Preview, gmr = Path.Combine(Output, "924_PAC.gmr") })
+                : JsonSerializer.Serialize(new { name = "PAC", id = 924, frames = 59, preview = Preview });
+            var lines = new List<string> { "STAGE 8/9 Preview", Malformed ? "RESULT {broken" : "RESULT " + result };
             foreach (string line in lines) callback?.Invoke(line);
             AfterRun?.Invoke();
             return new ValueTuple<int, List<string>>(Code, lines);
@@ -382,6 +511,16 @@ namespace GorillaStudio.NameFolders
         internal static string DiscoveryEngineRoot;
         internal static string StoragePath;
         internal static string StorageDirectory { get { return StoragePath; } }
+        internal static Action<object, string, IEnumerable<string>, IEnumerable<string>> OnPngCapture;
+        internal static Func<object, bool> OnBatchCancellation;
+        internal static Action<object, Process> OnBatchStarted;
+        internal static Action<object, string, IEnumerable<string>, int, IEnumerable<string>> OnAutomaticOutcome;
+        internal static bool BatchRenderCancellationRequested(object owner) { return OnBatchCancellation?.Invoke(owner) == true; }
+        internal static void TrackBatchRenderProcess(object owner, Process process) { OnBatchStarted?.Invoke(owner, process); }
+        internal static void ObserveAutomaticTauntPreviewResult(object owner, string script, IEnumerable<string> args, int code, IEnumerable<string> lines)
+        { OnAutomaticOutcome?.Invoke(owner, script, args, code, lines); }
+        public static void CaptureCompletedPngResult(object owner, string script, IEnumerable<string> args, IEnumerable<string> engineLines)
+        { OnPngCapture?.Invoke(owner, script, args, engineLines); }
         internal static void SetPerformanceBusy(object owner, bool busy)
         {
             var fake = owner as Program.FakeOwner;

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace GorillaStudio.NameFolders
 {
@@ -53,6 +54,9 @@ namespace GorillaStudio.NameFolders
     {
         private readonly Dictionary<ulong, DiscoveryMotionAsset> assets = new Dictionary<ulong, DiscoveryMotionAsset>();
         private readonly List<string> searchRoots = new List<string>();
+        private readonly List<DirectorySnapshot> directories = new List<DirectorySnapshot>();
+        private readonly List<MotionSnapshot> sources = new List<MotionSnapshot>();
+        private bool snapshotComparable = true;
         public IReadOnlyList<string> SearchRoots { get { return searchRoots.AsReadOnly(); } }
         public List<string> Warnings { get; } = new List<string>();
         public bool ScanIncomplete { get; private set; }
@@ -75,57 +79,172 @@ namespace GorillaStudio.NameFolders
         }
 
         public static DiscoveryMotionAssets Read(string discoveryRoot)
+        { return Read(discoveryRoot, CancellationToken.None); }
+
+        public static DiscoveryMotionAssets Read(string discoveryRoot, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var result = new DiscoveryMotionAssets();
             string root = System.IO.Path.GetFullPath(discoveryRoot);
             result.searchRoots.Add(root);
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var pending = new Stack<string>();
-            pending.Push(root);
-            var containers = new List<string>();
-            var loose = new List<string>();
+            var pending = new Stack<PendingDirectory>();
+            pending.Push(new PendingDirectory { Path = root, BoundPath = root });
+            var containers = new List<MotionSnapshot>();
+            var loose = new List<MotionSnapshot>();
             while (pending.Count > 0)
             {
-                string directory = pending.Pop();
+                cancellationToken.ThrowIfCancellationRequested();
+                PendingDirectory next = pending.Pop();
+                string directory = next.Path;
                 if (string.Equals(System.IO.Path.GetFileName(directory.TrimEnd(System.IO.Path.DirectorySeparatorChar,
                     System.IO.Path.AltDirectorySeparatorChar)), "Animation", StringComparison.OrdinalIgnoreCase))
                     result.AnimationRootFound = true;
-                string resolved;
+                DirectorySnapshot snapshot;
                 try {
-                    if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) result.HasLinkedSources = true;
-                    resolved = DirectoryLinks.Resolve(directory);
+                    FileAttributes attributes = File.GetAttributes(next.BoundPath);
+                    string resolved = DirectoryLinks.Resolve(next.BoundPath);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0 || !SamePath(directory, resolved)) result.HasLinkedSources = true;
+                    snapshot = new DirectorySnapshot { Path = directory, Resolved = resolved, Attributes = attributes };
+                    result.directories.Add(snapshot);
                 }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { result.Warn(directory, error); continue; }
-                if (!seen.Add(resolved)) continue;
+                catch (Exception error) when (SourceError(error))
+                { result.snapshotComparable = false; result.Warn(directory, error); continue; }
+                if (!seen.Add(snapshot.Resolved)) continue;
                 try
                 {
-                    foreach (string path in Directory.GetFiles(directory))
+                    long before = Directory.GetLastWriteTimeUtc(snapshot.Resolved).Ticks;
+                    snapshot.Children = CollectNames(Directory.EnumerateDirectories(snapshot.Resolved), cancellationToken, false);
+                    var motionNames = new List<string>();
+                    foreach (string boundFile in Directory.EnumerateFiles(snapshot.Resolved))
                     {
-                        if ((string.Equals(System.IO.Path.GetExtension(path), ".clip", StringComparison.OrdinalIgnoreCase)
-                            || string.Equals(System.IO.Path.GetExtension(path), ".clips", StringComparison.OrdinalIgnoreCase))
-                            && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) result.HasLinkedSources = true;
-                        if (string.Equals(System.IO.Path.GetExtension(path), ".clips", StringComparison.OrdinalIgnoreCase)) containers.Add(path);
-                        else if (string.Equals(System.IO.Path.GetExtension(path), ".clip", StringComparison.OrdinalIgnoreCase)) loose.Add(path);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (!IsMotion(boundFile)) continue;
+                        string name = System.IO.Path.GetFileName(boundFile), logical = System.IO.Path.Combine(directory, name);
+                        motionNames.Add(name);
+                        MotionSnapshot source = MotionSnapshot.Capture(logical, boundFile);
+                        if ((source.Attributes & FileAttributes.ReparsePoint) != 0 || !SamePath(logical, source.Resolved)) result.HasLinkedSources = true;
+                        result.sources.Add(source);
+                        if (string.Equals(System.IO.Path.GetExtension(name), ".clips", StringComparison.OrdinalIgnoreCase)) containers.Add(source);
+                        else loose.Add(source);
                     }
-                    foreach (string path in Directory.GetDirectories(directory)) pending.Push(path);
+                    snapshot.Motions = motionNames.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray();
+                    snapshot.Enumerated = true;
+                    foreach (string name in snapshot.Children)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        pending.Push(new PendingDirectory { Path = System.IO.Path.Combine(directory, name),
+                            BoundPath = System.IO.Path.Combine(snapshot.Resolved, name) });
+                    }
+                    if (before != Directory.GetLastWriteTimeUtc(snapshot.Resolved).Ticks) result.snapshotComparable = false;
                 }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { result.Warn(directory, error); }
+                catch (Exception error) when (SourceError(error))
+                { result.snapshotComparable = false; result.Warn(directory, error); }
             }
-            foreach (string path in containers.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)) result.AddFile(path, false);
+            foreach (MotionSnapshot source in containers.OrderBy(value => value.Path, StringComparer.OrdinalIgnoreCase))
+            { cancellationToken.ThrowIfCancellationRequested(); result.AddFile(source, false, cancellationToken); }
             // Discovery exports edited individual records beside the original
             // containers. The newest loose record takes precedence over stock.
-            var dated = new List<KeyValuePair<string, DateTime>>();
-            foreach (string path in loose)
-            {
-                try { dated.Add(new KeyValuePair<string, DateTime>(path, File.GetLastWriteTimeUtc(path))); }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException)
-                { result.Warn(path, error); }
-            }
-            foreach (string path in dated.OrderBy(value => value.Value).ThenBy(value => value.Key, StringComparer.OrdinalIgnoreCase).Select(value => value.Key))
-                result.AddFile(path, true);
+            foreach (MotionSnapshot source in loose.OrderBy(value => value.Written).ThenBy(value => value.Path, StringComparer.OrdinalIgnoreCase))
+            { cancellationToken.ThrowIfCancellationRequested(); result.AddFile(source, true, cancellationToken); }
+            cancellationToken.ThrowIfCancellationRequested();
             return result;
+        }
+
+        /// <summary>Audits the captured paths without reopening any animation table or payload.</summary>
+        public bool IsCurrent(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!snapshotComparable) return false;
+            try
+            {
+                foreach (DirectorySnapshot directory in directories)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!SamePath(directory.Resolved, DirectoryLinks.Resolve(directory.Path))
+                        || File.GetAttributes(directory.Path) != directory.Attributes) return false;
+                    if (!directory.Enumerated) continue; // A second alias/cycle still has its target audited above.
+                    if (!NamesMatch(directory.Children, Directory.EnumerateDirectories(directory.Resolved), cancellationToken, false)
+                        || !NamesMatch(directory.Motions, Directory.EnumerateFiles(directory.Resolved), cancellationToken, true)) return false;
+                }
+                foreach (MotionSnapshot source in sources)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!source.Matches(true)) return false;
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                return true;
+            }
+            catch (Exception error) when (SourceError(error)) { return false; }
+        }
+
+        private static bool NamesMatch(string[] expected, IEnumerable<string> current, CancellationToken cancellationToken, bool motionOnly)
+        { return expected.SequenceEqual(CollectNames(current, cancellationToken, motionOnly), StringComparer.Ordinal); }
+
+        private static string[] CollectNames(IEnumerable<string> current, CancellationToken cancellationToken, bool motionOnly)
+        {
+            var names = new List<string>();
+            foreach (string path in current)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!motionOnly || IsMotion(path)) names.Add(System.IO.Path.GetFileName(path));
+            }
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            return names.ToArray();
+        }
+
+        private static bool IsMotion(string path)
+        {
+            string extension = System.IO.Path.GetExtension(path);
+            return string.Equals(extension, ".clip", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(extension, ".clips", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool SamePath(string first, string second)
+        { return string.Equals(System.IO.Path.GetFullPath(first).TrimEnd('\\', '/'), System.IO.Path.GetFullPath(second).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase); }
+
+        private static bool SourceError(Exception error)
+        { return error is IOException || error is UnauthorizedAccessException || error is System.Security.SecurityException || error is System.ComponentModel.Win32Exception; }
+
+        private sealed class PendingDirectory { internal string Path, BoundPath; }
+        private sealed class DirectorySnapshot
+        {
+            internal string Path, Resolved;
+            internal FileAttributes Attributes;
+            internal bool Enumerated;
+            internal string[] Children, Motions;
+        }
+
+        private sealed class MotionSnapshot
+        {
+            internal string Path, Resolved;
+            internal long Length, Created, Written;
+            internal FileAttributes Attributes, TargetAttributes;
+
+            internal static MotionSnapshot Capture(string logical, string bound)
+            {
+                var entry = new FileInfo(bound);
+                FileAttributes attributes = entry.Attributes;
+                bool link = (attributes & FileAttributes.ReparsePoint) != 0;
+                // The directory walk has already resolved this physical parent.
+                // Normal files need no additional Windows handle/path lookup.
+                string resolved = link ? DirectoryLinks.Resolve(bound) : System.IO.Path.GetFullPath(bound);
+                var file = link ? new FileInfo(resolved) : entry;
+                if (!file.Exists) throw new FileNotFoundException("A Discovery motion file disappeared during its scan.", logical);
+                return new MotionSnapshot { Path = logical, Resolved = resolved, Length = file.Length,
+                    Created = file.CreationTimeUtc.Ticks, Written = file.LastWriteTimeUtc.Ticks,
+                    Attributes = attributes, TargetAttributes = file.Attributes };
+            }
+
+            internal bool Matches(bool logical)
+            {
+                bool link = (Attributes & FileAttributes.ReparsePoint) != 0;
+                if (logical && link && (File.GetAttributes(Path) != Attributes || !SamePath(Resolved, DirectoryLinks.Resolve(Path)))) return false;
+                var file = new FileInfo(logical && !link ? Path : Resolved);
+                return file.Exists && file.Length == Length && file.CreationTimeUtc.Ticks == Created
+                    && file.LastWriteTimeUtc.Ticks == Written && file.Attributes == TargetAttributes
+                    && (!logical || link || file.Attributes == Attributes);
+            }
         }
 
         private void Warn(string path, Exception error)
@@ -134,11 +253,14 @@ namespace GorillaStudio.NameFolders
             Warnings.Add(path + ": " + error.Message);
         }
 
-        private void AddFile(string path, bool loose)
+        private void AddFile(MotionSnapshot source, bool loose, CancellationToken cancellationToken)
         {
             try
             {
-                using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!source.Matches(false)) { snapshotComparable = false; throw new IOException("A Discovery motion file changed during its scan."); }
+                var entries = new List<DiscoveryMotionAsset>();
+                using (var file = new FileStream(source.Resolved, FileMode.Open, FileAccess.Read, FileShare.Read))
                 using (var reader = new BinaryReader(file))
                 {
                     if (file.Length < 24) throw new InvalidDataException("A Discovery motion file is truncated.");
@@ -146,29 +268,44 @@ namespace GorillaStudio.NameFolders
                     {
                         if (file.Length > 128 * 1024 * 1024 || file.Length < 160) throw new InvalidDataException("A loose Discovery clip has an invalid size.");
                         ulong id = reader.ReadUInt64();
-                        assets[id] = new DiscoveryMotionAsset { Id = id, Path = path, Offset = 0, Length = (int)file.Length, Loose = true };
-                        return;
+                        entries.Add(new DiscoveryMotionAsset { Id = id, Path = source.Path, Offset = 0, Length = (int)file.Length, Loose = true });
                     }
-                    if (reader.ReadUInt64() != 0 || reader.ReadUInt64() != 0) throw new InvalidDataException("A Discovery motion container has an invalid header.");
-                    uint count = reader.ReadUInt32();
-                    uint repeated = reader.ReadUInt32();
-                    if (count == 0 && repeated == 0 && file.Length == 32 && reader.ReadUInt64() == 0) return;
-                    if (count == 0 || count > 100000 || count != repeated || 24L + count * 16L > file.Length)
-                        throw new InvalidDataException("A Discovery motion container has an invalid record table.");
-                    var entries = new List<DiscoveryMotionAsset>();
-                    for (uint index = 0; index < count; index++)
+                    else
                     {
-                        ulong id = reader.ReadUInt64();
-                        uint length = reader.ReadUInt32(), offset = reader.ReadUInt32();
-                        if (length < 160 || length > 128 * 1024 * 1024 || offset < 24L + count * 16L || offset > file.Length - length)
-                            throw new InvalidDataException("A Discovery motion record is outside its container.");
-                        entries.Add(new DiscoveryMotionAsset { Id = id, Path = path, Offset = offset, Length = (int)length });
+                        if (reader.ReadUInt64() != 0 || reader.ReadUInt64() != 0) throw new InvalidDataException("A Discovery motion container has an invalid header.");
+                        uint count = reader.ReadUInt32(), repeated = reader.ReadUInt32();
+                        bool empty = count == 0 && repeated == 0 && file.Length == 32 && reader.ReadUInt64() == 0;
+                        if (!empty)
+                        {
+                            if (count == 0 || count > 100000 || count != repeated || 24L + count * 16L > file.Length)
+                                throw new InvalidDataException("A Discovery motion container has an invalid record table.");
+                            for (uint index = 0; index < count; index++)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                ulong id = reader.ReadUInt64();
+                                uint length = reader.ReadUInt32(), offset = reader.ReadUInt32();
+                                if (length < 160 || length > 128 * 1024 * 1024 || offset < 24L + count * 16L || offset > file.Length - length)
+                                    throw new InvalidDataException("A Discovery motion record is outside its container.");
+                                entries.Add(new DiscoveryMotionAsset { Id = id, Path = source.Path, Offset = offset, Length = (int)length });
+                            }
+                        }
                     }
-                    foreach (DiscoveryMotionAsset entry in entries) assets[entry.Id] = entry;
                 }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!source.Matches(false)) { snapshotComparable = false; throw new IOException("A Discovery motion file changed during its scan."); }
+                foreach (DiscoveryMotionAsset entry in entries)
+                { cancellationToken.ThrowIfCancellationRequested(); assets[entry.Id] = entry; }
             }
-            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidDataException)
-            { Warn(path, error); }
+            catch (Exception error) when (SourceError(error) || error is InvalidDataException)
+            {
+                if (!(error is InvalidDataException)) snapshotComparable = false;
+                else
+                {
+                    try { if (!source.Matches(false)) snapshotComparable = false; }
+                    catch (Exception stampError) when (SourceError(stampError)) { snapshotComparable = false; }
+                }
+                Warn(source.Path, error);
+            }
         }
     }
 }

@@ -29,6 +29,8 @@ namespace GorillaStudio.NameFolders
         public int Available { get; set; }
         public int Imported { get; set; }
         public int ArchiveImported { get; set; }
+        public int VerifiedImported { get; set; }
+        public string VerifiedPackHash { get; set; }
         public int ArchiveCount { get; set; }
         public int Missing { get; set; }
         public int Unsupported { get; set; }
@@ -61,6 +63,8 @@ namespace GorillaStudio.NameFolders
                 + "; imported: " + Imported + "; recovered from archives: " + ArchiveImported + ".");
             text.AppendLine("Not located: " + Missing + "; decoder rejections: " + Unsupported
                 + "; source read errors: " + ReadFailures + "; preview cache errors: " + CacheFailures + ".");
+            text.AppendLine("Imported from verified Animation data: " + VerifiedImported + ".");
+            if (!string.IsNullOrWhiteSpace(VerifiedPackHash)) text.AppendLine("Verified record pack SHA-256: " + VerifiedPackHash);
             text.AppendLine("Scan complete: " + (!ScanIncomplete ? "yes" : "no"));
             text.AppendLine("Archive lookup performed: " + (ArchivesSearched ? "yes" : "no") + "; archives found: " + ArchiveCount + ".");
             if (!string.IsNullOrWhiteSpace(ArchiveStatus)) text.AppendLine("Archive result: " + ArchiveStatus);
