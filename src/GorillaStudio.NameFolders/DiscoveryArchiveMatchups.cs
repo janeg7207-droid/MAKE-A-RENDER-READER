@@ -20,6 +20,8 @@ namespace GorillaStudio.NameFolders
         public string ArchivePath { get; internal set; }
         public string SourcePath { get; internal set; }
         public bool IsLoose { get; internal set; }
+        public string SourceSha256 { get; internal set; }
+        internal string[] LooseSourcePaths, LooseSourceRoots;
     }
 
     public sealed class DiscoveryArchiveMatchupResult
@@ -27,6 +29,9 @@ namespace GorillaStudio.NameFolders
         public Dictionary<ulong, DiscoveryArchiveMatchupAsset> Assets { get; } = new Dictionary<ulong, DiscoveryArchiveMatchupAsset>();
         public List<ulong> Conflicts { get; } = new List<ulong>();
         public List<string> Warnings { get; } = new List<string>();
+        // Proven export copies must not be patched at their wrapper locations,
+        // including copies shadowed by an active canonical edit or in conflict.
+        public List<string> WrappedSourcePaths { get; } = new List<string>();
         public int ArchiveCount { get; internal set; }
         public string Status { get; internal set; }
     }
@@ -39,6 +44,12 @@ namespace GorillaStudio.NameFolders
         {
             internal DiscoveryArchiveLookupIndex Index;
             internal string Path;
+        }
+        private sealed class LooseAsset
+        {
+            internal DiscoveryArchiveMatchupAsset Asset;
+            internal string Root;
+            internal bool Wrapped, ActiveCanonical, AmbiguousSuffix;
         }
 
         public static Task<DiscoveryArchiveMatchupResult> FindAsync(string appRoot, string gameRoot, string discoveryRoot,
@@ -76,14 +87,18 @@ namespace GorillaStudio.NameFolders
             if (required.Count == 0) { result.Status = "No nonzero Discovery matchup references need resolving."; return result; }
             // The user's selected extracted Discovery folder contains their active edits.
             // Do not replace an unambiguous edited screen with an older archived copy.
-            ReadLoose(discoveryRoot, required, cache, result, token);
-            var missing = new HashSet<ulong>(required.Where(hash => !result.Assets.ContainsKey(hash) && !result.Conflicts.Contains(hash)));
-            if (missing.Count > 0 && !string.IsNullOrWhiteSpace(gameRoot)
+            var loose = new Dictionary<ulong, List<LooseAsset>>();
+            var canonical = new HashSet<ulong>();
+            var invalidCanonical = new HashSet<ulong>();
+            var seenFiles = new HashSet<string>(System.IO.Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            ReadLoose(discoveryRoot, required, cache, result, loose, canonical, invalidCanonical, seenFiles, true, token);
+            var otherLoose = new HashSet<ulong>(required.Where(hash => !canonical.Contains(hash)));
+            if (otherLoose.Count > 0 && !string.IsNullOrWhiteSpace(gameRoot)
                 && !string.Equals(gameRoot, discoveryRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                ReadLoose(gameRoot, missing, cache, result, token);
-                missing.ExceptWith(result.Assets.Keys); missing.ExceptWith(result.Conflicts);
-            }
+                ReadLoose(gameRoot, otherLoose, cache, result, loose, canonical, invalidCanonical, seenFiles, false, token);
+            CacheLoose(loose, invalidCanonical, cache, result, token);
+            var missing = new HashSet<ulong>(required.Where(hash => !result.Assets.ContainsKey(hash)
+                && !result.Conflicts.Contains(hash) && !invalidCanonical.Contains(hash)));
             if (missing.Count > 0)
             {
                 var lookup = await DiscoveryArchiveRenders.ReadAssetIndexesAsync(appRoot, gameRoot, discoveryRoot, cache, progress, runner, token).ConfigureAwait(false);
@@ -160,6 +175,17 @@ namespace GorillaStudio.NameFolders
                     catch (Exception error) when (Expected(error)) { result.Warnings.Add("Matchup " + pair.Key.ToString("X16", CultureInfo.InvariantCulture) + ": " + error.Message); }
                 }
             }
+            // Other archive lookups can take time. Recheck every loose source
+            // that established equivalence, rather than publishing stale cache
+            // bytes after an export was changed or removed during that work.
+            foreach (var pair in result.Assets.Where(pair => pair.Value.IsLoose).ToList())
+                if (!LooseSourceUnchanged(pair.Value))
+                {
+                    result.Assets.Remove(pair.Key);
+                    if (!result.Conflicts.Contains(pair.Key)) result.Conflicts.Add(pair.Key);
+                    result.Warnings.Add("Matchup " + pair.Key.ToString("X16", CultureInfo.InvariantCulture)
+                        + ": A contributing loose matchup source changed while references were being resolved: " + pair.Value.SourcePath);
+                }
             result.Status = result.Assets.Count + " of " + required.Count + " referenced Discovery matchup project(s) are readable."
                 + (result.Conflicts.Count == 0 ? "" : " " + result.Conflicts.Count + " have ambiguous sources.")
                 + (required.Count > result.Assets.Count + result.Conflicts.Count ? " Unresolved references require their extracted projects or readable game/mod archives." : "")
@@ -167,42 +193,91 @@ namespace GorillaStudio.NameFolders
             return result;
         }
 
-        private static void ReadLoose(string root, HashSet<ulong> required, string cache, DiscoveryArchiveMatchupResult result, CancellationToken token)
+        private static void ReadLoose(string root, HashSet<ulong> required, string cache, DiscoveryArchiveMatchupResult result,
+            Dictionary<ulong, List<LooseAsset>> files, HashSet<ulong> canonical, HashSet<ulong> invalidCanonical,
+            HashSet<string> seenFiles, bool selectedData, CancellationToken token)
         {
             if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root) || required.Count == 0) return;
             string full = System.IO.Path.GetFullPath(root).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-            var files = new Dictionary<ulong, List<DiscoveryArchiveMatchupAsset>>();
             foreach (string path in Walk(full, cache, result.Warnings, token))
             {
                 token.ThrowIfCancellationRequested();
-                if (!string.Equals(System.IO.Path.GetExtension(path), ".jsfb", StringComparison.OrdinalIgnoreCase)) continue;
-                string asset; ulong hash;
+                if (!string.Equals(System.IO.Path.GetExtension(path), ".jsfb", StringComparison.OrdinalIgnoreCase) || !seenFiles.Add(path)) continue;
                 string relative = path.Substring(full.Length).TrimStart(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar).Replace('\\', '/');
-                if (TryAssetPath(relative, out asset) && required.Contains(hash = HashPath(asset))) { }
+                string normalized;
+                // Validate wrapper components too: a valid UI suffix cannot
+                // make an unsafe prefix or an alternate stream into a source.
+                if (!TryAssetPath(relative, out normalized)) continue;
+                ulong directHash = HashPath(normalized);
+                bool direct = required.Contains(directHash);
+                var claims = new List<KeyValuePair<ulong, string>>();
+                if (direct) claims.Add(new KeyValuePair<ulong, string>(directHash, normalized));
                 else
                 {
-                    string stem = System.IO.Path.GetFileNameWithoutExtension(path);
-                    if (stem.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) stem = stem.Substring(2);
-                    if (stem.Length != 16 || !ulong.TryParse(stem, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out hash) || !required.Contains(hash)) continue;
-                    asset = null;
+                    string[] parts = normalized.Split('/');
+                    for (int index = 1; index < parts.Length - 1; index++)
+                        if (string.Equals(parts[index], "UI", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string suffix = string.Join("/", parts.Skip(index));
+                            ulong hash = HashPath(suffix);
+                            if (required.Contains(hash)) claims.Add(new KeyValuePair<ulong, string>(hash, suffix));
+                        }
+                    if (claims.Count == 0)
+                    {
+                        string stem = System.IO.Path.GetFileNameWithoutExtension(path); ulong hash;
+                        if (stem.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) stem = stem.Substring(2);
+                        if (stem.Length != 16 || !ulong.TryParse(stem, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out hash) || !required.Contains(hash)) continue;
+                        claims.Add(new KeyValuePair<ulong, string>(hash, null));
+                    }
                 }
+                bool active = selectedData && direct;
+                if (active) canonical.Add(directHash);
                 try
                 {
-                    if (!IsScre(path)) { result.Warnings.Add("Referenced loose matchup is not a valid Scre project: " + relative); continue; }
-                    List<DiscoveryArchiveMatchupAsset> matches;
-                    if (!files.TryGetValue(hash, out matches)) files.Add(hash, matches = new List<DiscoveryArchiveMatchupAsset>());
-                    matches.Add(new DiscoveryArchiveMatchupAsset { Hash = hash, AssetPath = asset, SourcePath = path, IsLoose = true });
+                    if (!IsScre(path))
+                    {
+                        if (active) invalidCanonical.Add(directHash);
+                        result.Warnings.Add((active ? "The active canonical Discovery matchup is invalid and was left unchanged; fallback copies were not promoted: "
+                            : "Referenced loose matchup is not a valid Scre project: ") + relative);
+                        continue;
+                    }
+                    bool wrapped = !direct && claims.Any(claim => claim.Value != null);
+                    if (wrapped && !result.WrappedSourcePaths.Contains(path)) result.WrappedSourcePaths.Add(path);
+                    foreach (var claim in claims)
+                    {
+                        List<LooseAsset> matches;
+                        if (!files.TryGetValue(claim.Key, out matches)) files.Add(claim.Key, matches = new List<LooseAsset>());
+                        matches.Add(new LooseAsset { Root = full, Asset = new DiscoveryArchiveMatchupAsset { Hash = claim.Key,
+                            AssetPath = claim.Value, SourcePath = path, IsLoose = true }, Wrapped = wrapped,
+                            ActiveCanonical = active, AmbiguousSuffix = claims.Count > 1 });
+                    }
                 }
-                catch (Exception error) when (Expected(error)) { result.Warnings.Add(error.Message); }
+                catch (Exception error) when (Expected(error))
+                { if (active) invalidCanonical.Add(directHash); result.Warnings.Add(error.Message); }
             }
+        }
+
+        private static void CacheLoose(Dictionary<ulong, List<LooseAsset>> files, HashSet<ulong> invalidCanonical,
+            string cache, DiscoveryArchiveMatchupResult result, CancellationToken token)
+        {
             foreach (var pair in files)
             {
+                token.ThrowIfCancellationRequested();
+                if (invalidCanonical.Contains(pair.Key)) continue;
                 try
                 {
-                    var hashes = pair.Value.Select(value => FileHash(value.SourcePath)).Distinct(StringComparer.Ordinal).ToList();
+                    // The selected dataset's canonical edit controls the game.
+                    // Export wrappers provide recovery sources, never overrides.
+                    List<LooseAsset> candidates = pair.Value.Any(value => value.ActiveCanonical)
+                        ? pair.Value.Where(value => !value.Wrapped).ToList() : pair.Value;
+                    if (candidates.Any(value => value.AmbiguousSuffix))
+                    { result.Conflicts.Add(pair.Key); result.Warnings.Add("A loose export has multiple matching UI suffixes for required matchup references; no virtual root was guessed: "
+                        + candidates.First(value => value.AmbiguousSuffix).Asset.SourcePath); continue; }
+                    var hashes = candidates.Select(value => FileHash(value.Asset.SourcePath)).Distinct(StringComparer.Ordinal).ToList();
                     if (hashes.Count > 1)
                     { result.Conflicts.Add(pair.Key); result.Warnings.Add("Different loose Scre projects claim matchup reference " + pair.Key.ToString("X16", CultureInfo.InvariantCulture) + "."); continue; }
-                    var selected = pair.Value.OrderBy(value => value.AssetPath == null ? 1 : 0).ThenBy(value => value.SourcePath, StringComparer.Ordinal).First();
+                    var selected = candidates.OrderBy(value => value.ActiveCanonical ? 0 : 1).ThenBy(value => value.Asset.AssetPath == null ? 1 : 0)
+                        .ThenBy(value => value.Asset.SourcePath, StringComparer.Ordinal).First().Asset;
                     string output = System.IO.Path.Combine(cache, "loose-matchup-projects", hashes[0], pair.Key.ToString("x16", CultureInfo.InvariantCulture) + ".jsfb");
                     if (!CachedScreen(output))
                     {
@@ -211,10 +286,33 @@ namespace GorillaStudio.NameFolders
                         if (FileHash(output) != hashes[0] || !IsScre(output)) throw new IOException("The loose matchup project changed while being cached.");
                         File.WriteAllText(output + ".sha256", hashes[0]);
                     }
-                    selected.Path = output; result.Assets.Add(pair.Key, selected);
+                    selected.Path = output; selected.SourceSha256 = hashes[0];
+                    selected.LooseSourcePaths = candidates.Select(value => value.Asset.SourcePath).ToArray();
+                    selected.LooseSourceRoots = candidates.Select(value => value.Root).ToArray();
+                    if (!LooseSourceUnchanged(selected)) throw new IOException("A contributing loose matchup source changed while being cached.");
+                    result.Assets.Add(pair.Key, selected);
                 }
                 catch (Exception error) when (Expected(error)) { result.Warnings.Add("Could not cache referenced matchup: " + error.Message); }
             }
+        }
+
+        // This is also checked immediately before setup promotes a wrapped
+        // export into its proven canonical game path. Shadowed wrappers are
+        // deliberately absent from the snapshot of an active canonical edit.
+        public static bool LooseSourceUnchanged(DiscoveryArchiveMatchupAsset asset)
+        {
+            if (asset == null || !asset.IsLoose || string.IsNullOrEmpty(asset.SourceSha256)
+                || asset.LooseSourcePaths == null || asset.LooseSourceRoots == null
+                || asset.LooseSourcePaths.Length == 0 || asset.LooseSourcePaths.Length != asset.LooseSourceRoots.Length) return false;
+            try
+            {
+                if (!File.Exists(asset.Path) || FileHash(asset.Path) != asset.SourceSha256 || !IsScre(asset.Path)) return false;
+                for (int index = 0; index < asset.LooseSourcePaths.Length; index++)
+                    if (DiscoveryArchiveRenders.AssetPathLinked(asset.LooseSourcePaths[index], asset.LooseSourceRoots[index])
+                        || !File.Exists(asset.LooseSourcePaths[index]) || FileHash(asset.LooseSourcePaths[index]) != asset.SourceSha256) return false;
+                return true;
+            }
+            catch (Exception error) when (Expected(error)) { return false; }
         }
 
         private static IEnumerable<string> Walk(string root, string cache, List<string> warnings, CancellationToken token)
@@ -224,6 +322,10 @@ namespace GorillaStudio.NameFolders
             {
                 token.ThrowIfCancellationRequested(); string directory = pending.Pop();
                 if (directory.Equals(cache, StringComparison.OrdinalIgnoreCase) || directory.StartsWith(cache + System.IO.Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) continue;
+                string name = System.IO.Path.GetFileName(directory);
+                if (!directory.Equals(root, StringComparison.OrdinalIgnoreCase) && (name.Equals("backup", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("backups", StringComparison.OrdinalIgnoreCase) || name.Equals("Gorilla Studio Layout Backups", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("GorillaRenderBatchBackups", StringComparison.OrdinalIgnoreCase))) continue;
                 string[] files, children;
                 try
                 {

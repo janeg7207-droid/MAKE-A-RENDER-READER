@@ -75,6 +75,122 @@ internal static class Program
             Check(hashResult.PreparedPaths[hash] == hashFile && hashResult.Layouts.Patched == 1 && hashResult.AddedScreens == 0, "An exact hash-named Discovery export is patched where it exists without guessing an install name");
             Check(!File.Exists(Path.Combine(hashFolder, Asset.Replace('/', Path.DirectorySeparatorChar))), "A hash-only export does not create a fictitious named project");
 
+            string wrappedData = Path.Combine(temporary, "wrapped source Discovery");
+            Table(wrappedData, new[] { Tuple.Create(1806, hash, Asset) });
+            string wrappedSource = Path.Combine(wrappedData, "Pack", "BakeMe", Asset.Replace('/', Path.DirectorySeparatorChar));
+            string canonicalDestination = Path.Combine(wrappedData, Asset.Replace('/', Path.DirectorySeparatorChar));
+            Copy(original, wrappedSource); var wrappedBefore = Snapshot(wrappedData);
+            var wrappedCheck = await RunFor(wrappedData, true);
+            Check(wrappedCheck.Resolution.Assets.TryGetValue(hash, out var wrappedAsset) && wrappedAsset.IsLoose
+                && wrappedAsset.SourcePath == wrappedSource && string.Equals(wrappedAsset.AssetPath, Asset, StringComparison.OrdinalIgnoreCase)
+                && wrappedCheck.FoundInArchives == 0 && wrappedCheck.ScreensToAdd == 1 && wrappedCheck.ResolvedScreens == 0,
+                "A wrapped loose matchup resolves its exact canonical project path and reports that the canonical copy is still needed");
+            Check(Snapshot(wrappedData).SequenceEqual(wrappedBefore) && !File.Exists(canonicalDestination),
+                "Checking a wrapped matchup source preserves its bytes and creates no canonical destination");
+            var wrappedSetup = await RunFor(wrappedData, false);
+            Check(wrappedSetup.AddedScreens == 1 && wrappedSetup.PreparedPaths[hash] == canonicalDestination
+                && wrappedSetup.Layouts.Patched == 1 && wrappedSetup.Layouts.AddedSlots == 52 && wrappedSetup.Layouts.Failed.Count == 0,
+                "A wrapped matchup is copied to its proven canonical path and only that canonical project receives fifty-two missing slots");
+            string canonicalBackup = Path.Combine(wrappedSetup.Layouts.BackupDirectory, Asset.Replace('/', Path.DirectorySeparatorChar) + ".bak");
+            Check(Hash(wrappedSource) == sourceHash && File.Exists(canonicalBackup) && Hash(canonicalBackup) == sourceHash
+                && !File.Exists(Path.Combine(wrappedSetup.Layouts.BackupDirectory, "Pack", "BakeMe", Asset.Replace('/', Path.DirectorySeparatorChar) + ".bak")),
+                "Canonical repair backs up the newly copied original while leaving the wrapped package source untouched");
+            string canonicalAfter = Hash(canonicalDestination);
+            var wrappedAgain = await RunFor(wrappedData, false);
+            Check(wrappedAgain.Resolution.Assets.TryGetValue(hash, out var canonicalAsset) && canonicalAsset.IsLoose
+                && canonicalAsset.SourcePath == canonicalDestination && !wrappedAgain.Resolution.Conflicts.Contains(hash)
+                && wrappedAgain.PreparedPaths[hash] == canonicalDestination && wrappedAgain.AddedScreens == 0,
+                "A repaired canonical override wins over the older wrapped source on repeated setup");
+            Check(wrappedAgain.Layouts.Patched == 0 && wrappedAgain.Layouts.AddedSlots == 0 && wrappedAgain.Layouts.AddedMovies == 0
+                && wrappedAgain.Layouts.Already == 1 && !wrappedAgain.BakeRequired
+                && Hash(canonicalDestination) == canonicalAfter && Hash(wrappedSource) == sourceHash,
+                "Repeating wrapped-source setup is idempotent and never patches the original package copy");
+
+            foreach (bool deleteSource in new[] { false, true })
+            {
+                string changeName = deleteSource ? "deleted" : "modified";
+                string staleRoot = Path.Combine(temporary, changeName + " wrapped source Discovery");
+                Table(staleRoot, new[] { Tuple.Create(1806, hash, Asset), Tuple.Create(1900, nextHash, next) });
+                string staleWrappedSource = Path.Combine(staleRoot, "Pack", "BakeMe", Asset.Replace('/', Path.DirectorySeparatorChar));
+                string staleDestination = Path.Combine(staleRoot, Asset.Replace('/', Path.DirectorySeparatorChar));
+                Copy(original, staleWrappedSource);
+                byte[] modifiedSource = File.ReadAllBytes(original).Concat(new byte[] { 0xAB, 0xCD }).ToArray();
+                bool sourceChangedAfterCaching = false;
+                var staleSetup = await DiscoveryMatchupSetup.RunAsync(app, game, staleRoot, Path.Combine(temporary, changeName + "-source-cache"), false, null,
+                    async (command, token) => {
+                        var execution = await Runner(command, token);
+                        if (!sourceChangedAfterCaching && command.Arguments[0] == "list-files")
+                        {
+                            if (deleteSource) File.Delete(staleWrappedSource); else File.WriteAllBytes(staleWrappedSource, modifiedSource);
+                            sourceChangedAfterCaching = true;
+                        }
+                        return execution;
+                    }, CancellationToken.None);
+                string staleReference = hash.ToString("X16");
+                bool staleRejected = sourceChangedAfterCaching && !staleSetup.PreparedPaths.ContainsKey(hash) && !File.Exists(staleDestination)
+                    && staleSetup.Missing.Any(message => message.Contains(staleReference))
+                    && staleSetup.Issues.Concat(staleSetup.Warnings).Any(message => message.Contains(staleReference));
+                if (!staleRejected) Console.Error.WriteLine("Stale wrapped-source diagnostics: " + System.Text.Json.JsonSerializer.Serialize(new {
+                    SourceChangedAfterCaching = sourceChangedAfterCaching, Prepared = staleSetup.PreparedPaths.ContainsKey(hash),
+                    CanonicalExists = File.Exists(staleDestination), staleSetup.Missing, staleSetup.Issues, staleSetup.Warnings
+                }));
+                Check(staleRejected,
+                    "A " + changeName + " wrapped source is rejected after caching instead of copying stale project bytes");
+                Check((deleteSource ? !File.Exists(staleWrappedSource) : File.ReadAllBytes(staleWrappedSource).SequenceEqual(modifiedSource))
+                    && Directory.GetFiles(staleRoot, "*.tmp", SearchOption.AllDirectories).Length == 0,
+                    "Rejecting a " + changeName + " wrapped source preserves its current state and leaves no temporary files");
+            }
+
+            string conflictingWrapped = Path.Combine(temporary, "conflicting wrapped Discovery");
+            Table(conflictingWrapped, new[] { Tuple.Create(1806, hash, Asset) });
+            string firstWrapped = Path.Combine(conflictingWrapped, "FirstPack", "BakeMe", Asset.Replace('/', Path.DirectorySeparatorChar));
+            string secondWrapped = Path.Combine(conflictingWrapped, "UI", "Projects", "Exports", "SecondPack", Asset.Replace('/', Path.DirectorySeparatorChar));
+            Copy(original, firstWrapped); Copy(original, secondWrapped);
+            File.WriteAllBytes(secondWrapped, File.ReadAllBytes(secondWrapped).Concat(new byte[] { 0xAB }).ToArray());
+            var conflictingWrappedBefore = Snapshot(conflictingWrapped);
+            var conflictingWrappedSetup = await RunFor(conflictingWrapped, false);
+            Check(conflictingWrappedSetup.Resolution.Conflicts.Contains(hash) && conflictingWrappedSetup.Missing.Any(message => message.Contains("conflicting"))
+                && conflictingWrappedSetup.PreparedPaths.Count == 0 && conflictingWrappedSetup.AddedScreens == 0
+                && !File.Exists(Path.Combine(conflictingWrapped, Asset.Replace('/', Path.DirectorySeparatorChar))),
+                "Different wrapped exports for one matchup remain unresolved without creating a guessed canonical copy");
+            Check(conflictingWrappedSetup.Layouts.Patched == 0 && conflictingWrappedSetup.Layouts.AddedSlots == 0
+                && conflictingWrappedSetup.Layouts.AddedMovies == 0 && Snapshot(conflictingWrapped).SequenceEqual(conflictingWrappedBefore)
+                && !Directory.Exists(Path.Combine(conflictingWrapped, "UI", "Assets")),
+                "Conflicting package sources remain unchanged even when one sits inside the ordinary UI Projects scan");
+
+            string unlinked = Path.Combine(temporary, "unlinked custom Discovery");
+            Table(unlinked, Array.Empty<Tuple<int, ulong, string>>());
+            string unlinkedCard = Path.Combine(unlinked, "CustomScreens", "My arena", "live_card.jsfb");
+            string unrelatedMenu = Path.Combine(unlinked, "CustomScreens", "Other menus", "unrelated_menu.jsfb");
+            Copy(original, unlinkedCard);
+            byte[] unrelatedBefore = RenameMatchupRoot(File.ReadAllBytes(original), "menuone"); Write(unrelatedMenu, unrelatedBefore);
+            var unlinkedBefore = Snapshot(unlinked);
+            var unlinkedCheck = await RunFor(unlinked, true);
+            Check(unlinkedCheck.Catalog.RequiredHashes.Count == 0 && unlinkedCheck.Catalog.ScreenFiles.Count == 2,
+                "Unlinked Scre candidates outside UI Projects are discovered without inventing arena references");
+            Check(unlinkedCheck.Layouts.Patched == 1 && unlinkedCheck.Layouts.AddedSlots == 52
+                && unlinkedCheck.Layouts.Failed.Count == 0 && unlinkedCheck.Layouts.Unsupported.Count == 0,
+                "Integrated check finds the proven custom-location matchup's fifty-two missing movie slots");
+            Check(Snapshot(unlinked).SequenceEqual(unlinkedBefore) && !Directory.Exists(Path.Combine(unlinked, "UI"))
+                && !Directory.Exists(Path.Combine(unlinked, "Gorilla Studio Layout Backups")),
+                "Checking unlinked custom-location candidates preserves every source byte and creates no movie or backup folders");
+            var unlinkedSetup = await RunFor(unlinked, false);
+            Check(unlinkedSetup.Layouts.Patched == 1 && unlinkedSetup.Layouts.AddedSlots == 52
+                && unlinkedSetup.Layouts.AddedMovies == 101 && unlinkedSetup.Layouts.Failed.Count == 0 && unlinkedSetup.BakeRequired,
+                "Integrated setup repairs a proven unlinked custom-location matchup and supplies its player movies");
+            string unlinkedBackup = Path.Combine(unlinkedSetup.Layouts.BackupDirectory, "CustomScreens", "My arena", "live_card.jsfb.bak");
+            Check(File.Exists(unlinkedBackup) && Hash(unlinkedBackup) == sourceHash && Hash(original) == sourceHash,
+                "The custom-location repair keeps an exact backup and preserves the bundled RAW source");
+            Check(File.ReadAllBytes(unrelatedMenu).SequenceEqual(unrelatedBefore)
+                && !File.Exists(Path.Combine(unlinkedSetup.Layouts.BackupDirectory, "CustomScreens", "Other menus", "unrelated_menu.jsfb.bak")),
+                "An unlinked custom outer-root menu receives no matchup authority and remains unchanged");
+            string repairedUnlinkedHash = Hash(unlinkedCard);
+            var unlinkedAgain = await RunFor(unlinked, false);
+            Check(unlinkedAgain.Layouts.Patched == 0 && unlinkedAgain.Layouts.AddedSlots == 0
+                && unlinkedAgain.Layouts.AddedMovies == 0 && unlinkedAgain.Layouts.Already == 1 && !unlinkedAgain.BakeRequired
+                && Hash(unlinkedCard) == repairedUnlinkedHash && File.ReadAllBytes(unrelatedMenu).SequenceEqual(unrelatedBefore),
+                "Repeating integrated custom-location setup is idempotent and still preserves unrelated menus");
+
             string conflicting = Path.Combine(temporary, "conflicting Discovery"); Directory.CreateDirectory(conflicting);
             Table(conflicting, new[] { Tuple.Create(1806, hash, Asset) });
             Copy(original, Path.Combine(conflicting, "first", hash.ToString("x16") + ".jsfb"));
@@ -82,6 +198,38 @@ internal static class Program
             File.AppendAllText(Path.Combine(conflicting, "second", hash.ToString("x16") + ".jsfb"), "different");
             var conflict = await RunFor(conflicting, true);
             Check(conflict.Resolution.Conflicts.Contains(hash) && conflict.Missing.Any(message => message.Contains("conflicting")) && conflict.PreparedPaths.Count == 0, "Conflicting loose exports remain unresolved instead of choosing an arbitrary model/card source");
+
+            string invalidExisting = Path.Combine(temporary, "invalid existing Discovery");
+            Table(invalidExisting, new[] { Tuple.Create(1806, hash, Asset) });
+            string invalidDestination = Path.Combine(invalidExisting, Asset.Replace('/', Path.DirectorySeparatorChar));
+            byte[] invalidBytes = Encoding.UTF8.GetBytes("my damaged custom screen"); Write(invalidDestination, invalidBytes);
+            var invalidBefore = Snapshot(invalidExisting);
+            var invalidSetup = await RunFor(invalidExisting, false);
+            Check(invalidSetup.Warnings.Any(message => message.Contains("active canonical Discovery matchup is invalid") && message.Contains("fallback copies were not promoted"))
+                && invalidSetup.Missing.Count == 1 && invalidSetup.PreparedPaths.Count == 0 && invalidSetup.AddedScreens == 0,
+                "An already invalid canonical matchup is reported and blocks fallback promotion without escaping as an exception");
+            Check(Snapshot(invalidExisting).SequenceEqual(invalidBefore) && File.ReadAllBytes(invalidDestination).SequenceEqual(invalidBytes),
+                "An invalid custom matchup destination remains byte-for-byte unchanged despite an available archive source");
+
+            string changedDestinationRoot = Path.Combine(temporary, "destination changed after lookup Discovery");
+            Table(changedDestinationRoot, new[] { Tuple.Create(1806, hash, Asset) });
+            string changedDestination = Path.Combine(changedDestinationRoot, Asset.Replace('/', Path.DirectorySeparatorChar));
+            byte[] changedBytes = Encoding.UTF8.GetBytes("new damaged custom screen created during lookup");
+            bool changedDuringLookup = false;
+            var changedSetup = await DiscoveryMatchupSetup.RunAsync(app, game, changedDestinationRoot, Path.Combine(temporary, "destination-change-cache"), false, null,
+                async (command, token) => {
+                    var execution = await Runner(command, token);
+                    if (command.Arguments[0] == "unpack-file" && Argument(command, "--file") == Asset)
+                    { Write(changedDestination, changedBytes); changedDuringLookup = true; }
+                    return execution;
+                }, CancellationToken.None);
+            Check(changedDuringLookup && changedSetup.Issues.Any(message => message.Contains("existing Discovery project is invalid"))
+                && changedSetup.Missing.Count == 1 && changedSetup.PreparedPaths.Count == 0 && changedSetup.AddedScreens == 0,
+                "An invalid destination created after archive lookup becomes a setup issue instead of escaping the report");
+            Check(File.ReadAllBytes(changedDestination).SequenceEqual(changedBytes)
+                && !Directory.Exists(Path.Combine(changedDestinationRoot, "UI", "Assets"))
+                && !Directory.Exists(Path.Combine(changedDestinationRoot, "Gorilla Studio Layout Backups")),
+                "A destination changed during lookup is preserved without guessed overwrite, layout backup or placeholder movies");
 
             string malicious = Path.Combine(temporary, "unsafe Discovery"); Directory.CreateDirectory(malicious);
             Table(malicious, new[] { Tuple.Create(2001, DiscoveryArchiveMatchups.HashPath("../escape.jsfb"), "../escape.jsfb") });
@@ -140,6 +288,23 @@ internal static class Program
     private static string Argument(DiscoveryArchiveCommand command, string key) { return command.Arguments[Array.IndexOf(command.Arguments, key) + 1]; }
     private static string Archive(string name, params string[] paths)
     { string path = Path.Combine(game, "cakes", name); Write(path, Encoding.UTF8.GetBytes(name)); archiveRows[path] = paths.ToList(); return path; }
+
+    private static byte[] RenameMatchupRoot(byte[] originalBytes, string name)
+    {
+        byte[] result = (byte[])originalBytes.Clone();
+        var screen = new FlatBufferFile(result, "Scre");
+        foreach (int node in screen.Tables(screen.Root, 3))
+        {
+            int field = screen.Field(node, 1);
+            if (field == 0) continue;
+            int text = checked(field + (int)screen.U32(field)); int length = checked((int)screen.U32(text));
+            if (Encoding.UTF8.GetString(result, text + 4, length) != "matchup") continue;
+            byte[] replacement = Encoding.UTF8.GetBytes(name);
+            if (replacement.Length != length) throw new InvalidOperationException("The fixture name must preserve the native root string's encoded length.");
+            Buffer.BlockCopy(replacement, 0, result, text + 4, replacement.Length); return result;
+        }
+        throw new InvalidOperationException("The actual RAW fixture has no matchup root to rename.");
+    }
 
     // A tiny schema fixture, using the measured StCr root field 1 and row's exact
     // uint32 IDs/string references/uint64 field 4. Scre content remains real data.

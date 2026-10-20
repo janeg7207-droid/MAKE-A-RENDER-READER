@@ -116,6 +116,52 @@ internal static class Program
             Check(File.ReadAllBytes(Path.Combine(explicitRepair.BackupDirectory, "UI", "Projects", "Custom", "aew_screen.jsfb.bak")).SequenceEqual(customBefore),
                 "A catalog-authorized custom screen retains its exact original backup");
 
+            string candidateData = Path.Combine(temporary, "candidate-custom-folder");
+            string candidateFile = Path.Combine(candidateData, "CustomScreens", "season_card.jsfb");
+            string candidateMenu = Path.Combine(candidateData, "CustomScreens", "unrelated_menu.jsfb");
+            string candidateNoise = Path.Combine(candidateData, "CustomScreens", "not_a_screen.jsfb");
+            Directory.CreateDirectory(Path.GetDirectoryName(candidateFile));
+            File.WriteAllBytes(candidateFile, before); File.WriteAllBytes(candidateMenu, customBefore); File.WriteAllText(candidateNoise, "Unrelated data");
+            string[] candidatePaths = { candidateFile, candidateMenu, candidateNoise };
+            string[] candidateInitialFiles = Files(candidateData);
+            var candidateCheck = MatchCardLayouts.Apply(app, candidateData, true, null, candidatePaths);
+            Check(candidateCheck.Patched == 1 && candidateCheck.AddedSlots == 52 && candidateCheck.Failed.Count == 0 && candidateCheck.Unsupported.Count == 0,
+                "A non-authoritative catalog candidate outside UI Projects is checked by its proven matchup hierarchy");
+            Check(File.ReadAllBytes(candidateFile).SequenceEqual(before) && Files(candidateData).SequenceEqual(candidateInitialFiles),
+                "Checking custom-folder candidates leaves all screen bytes and directories unchanged");
+            var candidateRepair = MatchCardLayouts.Apply(app, candidateData, false, null, candidatePaths);
+            Check(candidateRepair.Patched == 1 && candidateRepair.AddedSlots == 52 && candidateRepair.Failed.Count == 0 && candidateRepair.Unsupported.Count == 0 && candidateRepair.BakeRequired,
+                "A custom-folder candidate receives the supported missing player slots without explicit reference authority");
+            Check(File.ReadAllBytes(Path.Combine(candidateRepair.BackupDirectory, "CustomScreens", "season_card.jsfb.bak")).SequenceEqual(before),
+                "A repaired candidate retains its exact original bytes in the normal layout backup");
+            Check(File.ReadAllBytes(candidateMenu).SequenceEqual(customBefore) && File.ReadAllText(candidateNoise) == "Unrelated data",
+                "Catalog candidacy grants no custom outer-root authority to unrelated menus or non-screen files");
+            byte[] candidateAfter = File.ReadAllBytes(candidateFile);
+            var candidateAgain = MatchCardLayouts.Apply(app, candidateData, false, null, candidatePaths);
+            Check(candidateAgain.Patched == 0 && candidateAgain.Already == 1 && candidateAgain.AddedSlots == 0 && candidateAgain.AddedMovies == 0
+                && !candidateAgain.BakeRequired && File.ReadAllBytes(candidateFile).SequenceEqual(candidateAfter),
+                "Repeating candidate setup is idempotent and requires no additional bake");
+            string excludedData = Path.Combine(temporary, "excluded-exports");
+            string excludedFile = Path.Combine(excludedData, "UI", "Projects", "Exports", "Pack", "UI", "Projects", "original_card.jsfb");
+            Directory.CreateDirectory(Path.GetDirectoryName(excludedFile)); File.WriteAllBytes(excludedFile, before);
+            var excludedCheck = MatchCardLayouts.Apply(app, excludedData, false, null, new[] { excludedFile }, new[] { excludedFile });
+            Check(excludedCheck.Patched == 0 && excludedCheck.Already == 0 && excludedCheck.AddedMovies == 0 && excludedCheck.Failed.Count == 0
+                && excludedCheck.Unsupported.Count == 0 && File.ReadAllBytes(excludedFile).SequenceEqual(before)
+                && !Directory.Exists(Path.Combine(excludedData, "UI", "Assets")),
+                "A verified exported source is excluded from both default UI scanning and catalog candidates without gaining repair authority");
+            string outsideCandidate = Path.Combine(temporary, "outside-candidate.jsfb"); File.WriteAllBytes(outsideCandidate, before);
+            string linkedCandidate = Path.Combine(candidateData, "CustomScreens", "linked_candidate.jsfb"); File.CreateSymbolicLink(linkedCandidate, outsideCandidate);
+            var unsafeCandidates = MatchCardLayouts.Apply(app, candidateData, false, null,
+                new[] { "", outsideCandidate, linkedCandidate, Path.Combine(candidateData, "CustomScreens", "missing.jsfb"), Path.GetDirectoryName(candidateFile) });
+            Check(unsafeCandidates.Failed.Count == 5 && unsafeCandidates.Patched == 0 && unsafeCandidates.AddedMovies == 0
+                && File.ReadAllBytes(outsideCandidate).SequenceEqual(before) && File.ReadAllBytes(candidateFile).SequenceEqual(candidateAfter),
+                "Empty, outside, linked, missing and directory candidate paths are rejected without changing files");
+            var unsafeExclusions = MatchCardLayouts.Apply(app, candidateData, true, null, null, new[] { outsideCandidate, linkedCandidate });
+            Check(unsafeExclusions.Failed.Count == 2 && unsafeExclusions.Patched == 0 && unsafeExclusions.AddedMovies == 0
+                && File.ReadAllBytes(outsideCandidate).SequenceEqual(before) && File.ReadAllBytes(candidateFile).SequenceEqual(candidateAfter),
+                "Outside and linked exclusion paths are rejected without following or changing their targets");
+            File.Delete(linkedCandidate);
+
             string unsupportedData = Path.Combine(temporary, "unsupported-custom");
             string unsupportedFile = Path.Combine(unsupportedData, "Custom", "exact_screen.jsfb");
             Directory.CreateDirectory(Path.GetDirectoryName(unsupportedFile));

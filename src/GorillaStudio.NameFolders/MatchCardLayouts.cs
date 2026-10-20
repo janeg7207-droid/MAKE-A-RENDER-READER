@@ -51,6 +51,25 @@ namespace GorillaStudio.NameFolders
         /// </summary>
         public static MatchCardLayoutsReport Apply(string appRoot, string discoveryRoot, bool checkOnly, IEnumerable<string> explicitScreenPaths)
         {
+            return Apply(appRoot, discoveryRoot, checkOnly, explicitScreenPaths, null);
+        }
+
+        /// <summary>
+        /// Catalog candidates extend discovery to other folders, but must retain
+        /// the proven matchup hierarchy. Only explicit referenced screens may
+        /// authorize a custom outer node name.
+        /// </summary>
+        public static MatchCardLayoutsReport Apply(string appRoot, string discoveryRoot, bool checkOnly,
+            IEnumerable<string> explicitScreenPaths, IEnumerable<string> candidateScreenPaths)
+        {
+            return Apply(appRoot, discoveryRoot, checkOnly, explicitScreenPaths, candidateScreenPaths, null);
+        }
+
+        // Verified pack-export sources must remain unchanged after their canonical
+        // project is copied. Exclusions only remove paths; they grant no authority.
+        public static MatchCardLayoutsReport Apply(string appRoot, string discoveryRoot, bool checkOnly,
+            IEnumerable<string> explicitScreenPaths, IEnumerable<string> candidateScreenPaths, IEnumerable<string> excludedScreenPaths)
+        {
             var report = new MatchCardLayoutsReport { IsCheck = checkOnly };
             try
             {
@@ -82,21 +101,11 @@ namespace GorillaStudio.NameFolders
                 if (Directory.Exists(projects))
                     foreach (string file in WalkFiles(projects))
                         if (file.EndsWith(".jsfb", StringComparison.OrdinalIgnoreCase) && HasScreenHeader(file)) files.Add(file);
-                foreach (string path in explicitScreenPaths ?? Enumerable.Empty<string>())
-                {
-                    try
-                    {
-                        if (string.IsNullOrWhiteSpace(path)) throw new IOException("A catalog screen path is empty.");
-                        string portable = path.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
-                        string full = Path.GetFullPath(Path.IsPathRooted(portable) ? portable : Path.Combine(root, portable));
-                        string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                        if (!full.StartsWith(prefix, PathComparison))
-                            throw new IOException("A catalog screen path is outside the selected Discovery folder: " + path);
-                        ValidateInputPath(root, full);
-                        files.Add(full); explicitFiles.Add(full);
-                    }
-                    catch (Exception error) when (Expected(error)) { report.Failed.Add(error.Message); }
-                }
+                AddCatalogPaths(root, explicitScreenPaths, files, explicitFiles, report);
+                AddCatalogPaths(root, candidateScreenPaths, files, null, report);
+                var excludedFiles = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+                AddCatalogPaths(root, excludedScreenPaths, excludedFiles, null, report);
+                files.ExceptWith(excludedFiles);
                 int recognized = 0;
                 foreach (string file in files)
                 {
@@ -150,6 +159,28 @@ namespace GorillaStudio.NameFolders
         {
             return screen.Nodes.Any(node => node.Path.Count >= 2 && Layouts.Contains(node.Path[node.Path.Count - 1])
                 && node.Path.Take(node.Path.Count - 1).Contains("matchup"));
+        }
+
+        private static void AddCatalogPaths(string root, IEnumerable<string> paths, SortedSet<string> files,
+            HashSet<string> explicitFiles, MatchCardLayoutsReport report)
+        {
+            foreach (string path in paths ?? Enumerable.Empty<string>())
+            {
+                try
+                {
+                    if (string.IsNullOrWhiteSpace(path)) throw new IOException("A catalog screen path is empty.");
+                    string portable = path.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
+                    string full = Path.GetFullPath(Path.IsPathRooted(portable) ? portable : Path.Combine(root, portable));
+                    string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                    if (!full.StartsWith(prefix, PathComparison))
+                        throw new IOException("A catalog screen path is outside the selected Discovery folder: " + path);
+                    ValidateInputPath(root, full);
+                    if (!File.Exists(full)) throw new IOException("A catalog screen path is not an existing file: " + path);
+                    files.Add(full);
+                    if (explicitFiles != null) explicitFiles.Add(full);
+                }
+                catch (Exception error) when (Expected(error)) { report.Failed.Add(error.Message); }
+            }
         }
 
         private static bool PlayerGroup(Node node, string layout, bool explicitScreen)

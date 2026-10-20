@@ -46,6 +46,7 @@ internal static class Program
             Equal("No archives never starts native tools", 0, commands.Count);
             result = await DiscoveryArchiveMatchups.FindAsync(app, game, data, new[] { 0UL }, cache, null, Run, CancellationToken.None);
             Equal("Zero references produce no lookup", true, result.Status.Contains("No nonzero"));
+            await WrappedLooseProjects();
 
             string loose = Path.Combine(data, Asset.Replace('/', Path.DirectorySeparatorChar));
             Write(loose, Scre('A'));
@@ -172,6 +173,118 @@ internal static class Program
     }
 
     private static Task<DiscoveryArchiveMatchupResult> Find() { return DiscoveryArchiveMatchups.FindAsync(app, game, data, new[] { hash }, cache, null, Run, CancellationToken.None); }
+    private static async Task WrappedLooseProjects()
+    {
+        string folder = Path.Combine(root, "wrapped-fixture"), selected = Path.Combine(folder, "data"), installed = Path.Combine(folder, "game"), stored = Path.Combine(root, "wrapped-cache");
+        Directory.CreateDirectory(selected); Directory.CreateDirectory(installed);
+        const string canonical = "UI/Projects/ShowAssets/matchups/matchup_AEW_custom.jsfb";
+        ulong required = DiscoveryArchiveMatchups.HashPath(canonical);
+        string wrapped = Path.Combine(selected, "Mods", "AEW", canonical.Replace('/', Path.DirectorySeparatorChar));
+        Write(wrapped, Scre('W'));
+        Task<DiscoveryArchiveMatchupResult> Lookup(params ulong[] requiredHashes) => DiscoveryArchiveMatchups.FindAsync(app, installed, selected,
+            requiredHashes.Length == 0 ? new[] { required } : requiredHashes, stored, null,
+            (command, token) => { throw new Exception("A loose wrapped export must not start Bakery."); }, CancellationToken.None);
+        DateTime stamp = File.GetLastWriteTimeUtc(wrapped);
+        var result = await Lookup();
+        Equal("A wrapped Discovery export resolves its exact UI virtual path", 1, result.Assets.Count);
+        Equal("Wrapped provenance retains the exact canonical virtual path", canonical, result.Assets[required].AssetPath);
+        Equal("Wrapped provenance retains the original physical source", wrapped, result.Assets[required].SourcePath);
+        Equal("Wrapped exports are recorded for in-place patch exclusion", true, result.WrappedSourcePaths.Contains(wrapped));
+        Equal("Wrapped source bytes remain untouched", true, File.ReadAllBytes(wrapped).SequenceEqual(Scre('W')));
+        Equal("Wrapped source timestamp remains untouched", stamp, File.GetLastWriteTimeUtc(wrapped));
+        Equal("A stable loose source passes the publication guard", true, DiscoveryArchiveMatchups.LooseSourceUnchanged(result.Assets[required]));
+        Equal("Loose provenance captures its content checksum", 64, result.Assets[required].SourceSha256.Length);
+
+        string gameWrapped = Path.Combine(installed, "discovery", "other_dataset", canonical.Replace('/', Path.DirectorySeparatorChar));
+        Write(gameWrapped, Scre('G')); File.Delete(wrapped);
+        result = await Lookup();
+        Equal("Wrapped exports under an installed game's dataset resolve", gameWrapped, result.Assets[required].SourcePath);
+        Equal("Game wrapper recovers the exact UI path", canonical, result.Assets[required].AssetPath);
+        Write(wrapped, Scre('W')); result = await Lookup();
+        Equal("Differing wrappers across selected data and game cannot choose load order", 0, result.Assets.Count);
+        Equal("Differing wrapper claims are explicit conflicts", required, result.Conflicts.Single());
+        Equal("Conflicting wrappers are all recorded for exclusion", 2, result.WrappedSourcePaths.Count);
+        Write(gameWrapped, Scre('W')); result = await Lookup();
+        Equal("Identical wrappers are deduplicated", 1, result.Assets.Count);
+        Equal("Identical wrappers are not conflicts", 0, result.Conflicts.Count);
+        Equal("Every identical contributing export is preserved in metadata", 2, result.WrappedSourcePaths.Count);
+        var snapshot = result.Assets[required];
+        Write(gameWrapped, Scre('X'));
+        Equal("Changing an unselected identical contributor invalidates publication", false, DiscoveryArchiveMatchups.LooseSourceUnchanged(snapshot));
+        Write(gameWrapped, Scre('W')); File.Delete(wrapped);
+        Equal("Deleting a contributing source invalidates publication", false, DiscoveryArchiveMatchups.LooseSourceUnchanged(snapshot));
+        Write(wrapped, Scre('W'));
+
+        string active = Path.Combine(selected, canonical.Replace('/', Path.DirectorySeparatorChar));
+        Write(active, Scre('C')); result = await Lookup();
+        Equal("Selected dataset's canonical edit outranks differing exports", active, result.Assets[required].SourcePath);
+        Equal("Canonical content wins without replacing the active source", true, File.ReadAllBytes(result.Assets[required].Path).SequenceEqual(Scre('C')));
+        Equal("Shadowed selected-data wrappers remain excluded from patching", true, result.WrappedSourcePaths.Contains(wrapped));
+        Equal("Canonical edit does not become a wrapper conflict", 0, result.Conflicts.Count);
+        snapshot = result.Assets[required]; Write(wrapped, Scre('Z'));
+        Equal("An unused wrapper cannot invalidate the canonical override", true, DiscoveryArchiveMatchups.LooseSourceUnchanged(snapshot));
+        Write(active, new byte[32]); result = await Lookup();
+        Equal("Invalid active canonical screens block fallback promotion", 0, result.Assets.Count);
+        Equal("An invalid active edit gives an actionable warning", true, result.Warnings.Any(value => value.Contains("active canonical") && value.Contains("invalid")));
+        Equal("An invalid active edit is preserved", 32L, new FileInfo(active).Length);
+        File.Delete(active); File.Delete(wrapped); File.Delete(gameWrapped);
+
+        string unsafePrefix = Path.Combine(selected, "Mods", "Bad?", canonical.Replace('/', Path.DirectorySeparatorChar));
+        Write(unsafePrefix, Scre('U'));
+        string nonUi = Path.Combine(selected, "Mods", "MyUI", "Projects", "ShowAssets", "matchups", "matchup_AEW_custom.jsfb");
+        Write(nonUi, Scre('U'));
+        string backup = Path.Combine(selected, "Gorilla Studio Layout Backups", canonical.Replace('/', Path.DirectorySeparatorChar));
+        Write(backup, Scre('B')); Write(wrapped + ".bak", Scre('B'));
+        string outside = Path.Combine(folder, "outside"); Write(Path.Combine(outside, canonical.Replace('/', Path.DirectorySeparatorChar)), Scre('L'));
+        string linkedDirectory = Path.Combine(selected, "linked-pack"); Directory.CreateSymbolicLink(linkedDirectory, outside);
+        Directory.CreateDirectory(Path.GetDirectoryName(wrapped)); File.CreateSymbolicLink(wrapped, Path.Combine(outside, canonical.Replace('/', Path.DirectorySeparatorChar)));
+        result = await Lookup();
+        Equal("Unsafe prefixes, backups, non-UI names and linked exports do not resolve", 0, result.Assets.Count);
+        Equal("Unproven or linked exports create no wrapped metadata", 0, result.WrappedSourcePaths.Count);
+        Equal("External linked screen remains untouched", true, File.ReadAllBytes(Path.Combine(outside, canonical.Replace('/', Path.DirectorySeparatorChar))).SequenceEqual(Scre('L')));
+        File.Delete(wrapped); Directory.Delete(linkedDirectory);
+
+        const string outerSuffix = "UI/Projects/Inner/UI/Projects/ambiguous.jsfb";
+        const string innerSuffix = "UI/Projects/ambiguous.jsfb";
+        ulong outerHash = DiscoveryArchiveMatchups.HashPath(outerSuffix), innerHash = DiscoveryArchiveMatchups.HashPath(innerSuffix);
+        string ambiguous = Path.Combine(selected, "Exports", outerSuffix.Replace('/', Path.DirectorySeparatorChar)); Write(ambiguous, Scre('A'));
+        result = await Lookup(outerHash, innerHash);
+        Equal("Multiple exact required UI suffixes are not arbitrarily chosen", 0, result.Assets.Count);
+        Equal("Every ambiguous suffix is reported", 2, result.Conflicts.Count);
+        Equal("Ambiguous exported source is protected from in-place patching", true, result.WrappedSourcePaths.Contains(ambiguous));
+        Equal("Ambiguous virtual-root resolution is explained", true, result.Warnings.Any(value => value.Contains("multiple matching UI suffixes")));
+        Write(Path.Combine(selected, innerSuffix.Replace('/', Path.DirectorySeparatorChar)), Scre('I'));
+        result = await Lookup(outerHash, innerHash);
+        Equal("An explicit canonical path overrides its ambiguous export", true, result.Assets.ContainsKey(innerHash));
+        Equal("The other ambiguous suffix remains unresolved", outerHash, result.Conflicts.Single());
+
+        // Reuse a cached wrapped result, then change a nonselected equivalent
+        // source while a different required hash invokes the archive reader.
+        Write(wrapped, Scre('W')); Write(gameWrapped, Scre('W'));
+        result = await Lookup();
+        string unrelated = "UI/Projects/Other/matchup.jsfb"; ulong unrelatedHash = DiscoveryArchiveMatchups.HashPath(unrelated);
+        Write(Path.Combine(installed, "oo2core_9_win64.dll"), new byte[] { 3 });
+        Write(Path.Combine(installed, "mod.cak"), new byte[] { 4 });
+        bool changed = false;
+        result = await DiscoveryArchiveMatchups.FindAsync(app, installed, selected, new[] { required, unrelatedHash }, stored, null,
+            (command, token) =>
+            {
+                string[] a = command.Arguments;
+                if (a[0] == "list-files")
+                {
+                    Write(gameWrapped, Scre('X')); changed = true;
+                    string output = a.Length == 6 ? a[4] : Path.Combine(Path.GetDirectoryName(a[2]), Path.GetFileNameWithoutExtension(a[2]) + "_files.txt");
+                    File.WriteAllText(output, Line(unrelatedHash, unrelated));
+                }
+                else Write(Path.Combine(a[6], unrelated.Replace('/', Path.DirectorySeparatorChar)), Scre('O'));
+                return Task.FromResult(new DiscoveryArchiveProcessResult { ExitCode = 0, Output = "fixture complete" });
+            }, CancellationToken.None);
+        Equal("The interleaved archive lookup ran the mutation fixture", true, changed);
+        Equal("A late change to an unselected contributor prevents stale publication", false, result.Assets.ContainsKey(required));
+        Equal("A changed loose contributor is reported as unresolved conflict", true, result.Conflicts.Contains(required));
+        Equal("The unrelated exact archive project still resolves", true, result.Assets.ContainsKey(unrelatedHash));
+        Equal("Late loose-source mutation is explained", true, result.Warnings.Any(value => value.Contains("contributing loose matchup source changed")));
+    }
     private static Task<DiscoveryArchiveProcessResult> Run(DiscoveryArchiveCommand command, CancellationToken token)
     {
         token.ThrowIfCancellationRequested(); commands.Add(command);
