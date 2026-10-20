@@ -1,6 +1,6 @@
 # Gorilla Studio v1.0.2 — Discovery Roster Experiment
 
-Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.7.4**; the original application is Gorilla Studio v1.0.2.
+Select a wrestler from the roster to load their matched model, default attire and linked roster picture automatically, then choose a taunt and use **Preview → MAKE → Install**. Picture lookup follows current Discovery references into extracted images or indexed game/mod CAK assets, and displays a decoded image without a Blender preview. The loader reads profiles, names and exact character asset mappings, including newly added IDs. Fast rendering is automatic. The helper is version **1.7.5**; the original application is Gorilla Studio v1.0.2.
 
 ## Download
 
@@ -63,6 +63,10 @@ Loading the wrestler displays a found picture in **Game picture (now)** immediat
 The uploaded Discovery copy contains **1,139 picture references**, including **653 absent from the bundled picture names**, but no original roster image files. Picture references alone can link the moving selection render; a static picture display requires the extracted image file. An empty **Game picture (now)** panel is therefore separate from the old false “no picture found” result.
 
 Preview and MAKE now repair hair shaders that stayed white when strand textures used hash filenames or were missing. The repair uses the selected dark/light colours, including blond or white, and preserves available strand transparency and roughness. Auto retains meaningful natural hair colours. A fallback tints identified hair meshes without changing shared body materials, and also runs when a cached Blender model is loaded. Missing strand coverage cannot be reconstructed from colour alone. Dean Ambrose NXT (logical ID 699) is present in the supplied roster. His exact model was not located among the extracted assets inspected here, so his appearance still needs a preview check on the user's PC.
+
+The shared renderer also checks **In-ring gear / Entrance gear** against the exact flags on each imported attire mesh. Source and mesh identities come from the original importer, so duplicate material names or changes in object order cannot select the wrong layer. Inactive pieces are hidden without changing vertices, weights, shape keys or source files. Existing manual hides remain in force. Older private model caches are rebuilt once with a retained backup; completed preview caches recognize the new renderer. The first preview after this update may therefore prepare the model again. Interrupted rebuilds recover their previous cache on the next attempt, and native mesh metadata is published atomically.
+
+This is a gear-visibility repair, not a universal collision system. The current importer still does not apply HPL body-hide masks: their mode and activation rules have not been verified from the supplied files. Masks with uncertain meaning are left unchanged. Skin can still intersect clothing when a body mask is needed, clothes do not fit the body, or animation weights are wrong. Adam Cole using Jeff Hardy 2 has not been reproduced because his full base model and selected attire were not supplied.
 
 ## App updates
 
@@ -155,6 +159,8 @@ Existing explicit model associations remain authoritative. Fresh matches prefer 
 
 ENG.sdb supplies readable character names. Keep your current file in Sdb/ENG.sdb. Roster loading validates each string independently: an invalid offset, missing declared terminator, invalid UTF-8 text or conflicting duplicate key leaves that key unavailable while validated names remain usable. Warnings appear inside the roster window. Missing localized strings display as “Wrestler <ID>”; actual roster IDs stay unchanged. An unreadable SDB header or index produces explicit warnings and ID-based names. The loader does not guess string offsets, substitute localization keys as names, or rewrite your source SDB.
 
+**Batch MAKE**, Browse/drop and the older roster entry point use that same name recovery. Batch names appear before model indexing finishes, and MAKE becomes available after indexing. Invalid localized names produce inline warnings while valid names and real wrestler IDs remain selectable. Closing the batch dialog cancels its pending roster/model lookup.
+
 Only **JSON and JSFB** are accepted by **Load roster file…**. SDB is read automatically as companion name data. JSON supports arrays such as [{"id":1506,"name":"Flammer"}], common roster wrappers, and name-to-ID or ID-to-name maps. Actual wrestler IDs must be 1–65535. The included rosters/Discovery_roster.json is a portable name/ID export; point the loader at your Discovery folder to discover its models.
 
 Dropping a character folder also opens the picker, keeping that folder as the model source. The selected logical roster ID controls the target slot and render links; the physical source ID controls stock-body extraction. For example, the supplied mapping associates physical folder 312_CM_Punk with roster ID 1481.
@@ -164,7 +170,7 @@ Saved manual entries and model choices reopen with the same roster. Freshly scan
 ## Validation
 
 - The supplied data loads **1,457 roster profiles**, with **1,308 localized names**, and finds all **10 extracted model folders**. Eight model associations are proven by exact mapping hashes, Brock Lesnar matches by name, and one unmatched physical Hollywood Hogan model remains unassigned. Video examples NICK JACKSON '14 (204), DAX HARWOOD (211), and CASH WHEELER (213) match the uploaded SDB.
-- **6,944 portable checks** are recorded across 57 suites/modes. This release ran 16 affected suite/modes (1187 checks); the 41 unchanged suites retain prior passing versions. New checks cover roster handoff, per-key SDB recovery, staged model bindings, library cancellation, available animations before archive recovery, source changes and guarded render requests. The library suite ran fixture mode; full uploaded-data integration retains prior validation. Detailed counts and limits are in TEST_RESULTS.json.
+- **8,026 checks** are recorded across 65 suites/modes. This release ran 10 affected modes (1,244 checks); the 55 unchanged suites retain prior passing versions. Actual Linux Blender 4.3.2 tests import all ten supplied attires and check 115 exact source meshes; other tests cover tolerant batch loading, cache recovery, the standalone updater entry and existing hair/speed behavior. This does not verify Adam Cole, Blender 5.2 images, Windows timing or game playback. Detailed counts and limits are in TEST_RESULTS.json.
 - Actual Discovery tables confirm Demon Finn 626's two active costume mappings, their default and CARNAGE labels, and exclusion of regular Finn 576 and inactive variant five. Fixtures cover separate complete model sources, exact costume identity, stale mappings and batch output isolation. The supplied ten extracted model folders do not include either Demon model; their actual Windows loading and rendered images remain unverified.
 - Growth tests append valid new profiles and SDB strings to a separate copy of the actual data: **1,457 → 1,458 → 1,459** profiles. A copied real model binds to new logical ID 4000 with physical source 1506; edited JSON files reload new characters; high new ID 65527 preserves existing reserved IDs. Uploaded originals remain unchanged.
 - Portable importer/session, binary mapping, and extraction-output tests cover profile decoding, malformed data, ambiguous paths, saved settings, legacy entries and explicit slot selection. Both the .NET Framework 4.8 helper and patcher build without warnings or errors.
@@ -184,6 +190,11 @@ Detailed results are included in TEST_RESULTS.json inside the ZIPs.
 
 Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Linux is supported; running requires Windows.
 
+    python tools/build_renderer_bundle.py
+    python tools/build_renderer_bundle.py --check
+    python tests/validate_geometry_import.py
+    python tests/validate_geometry_cache.py
+    python tests/validate_renderer_bundle.py --blender /path/to/blender --output /path/to/bundle-report.json
     dotnet build src/GorillaStudio.NameFolders/GorillaStudio.NameFolders.csproj -c Release
     dotnet build tools/GorillaStudioPatcher/GorillaStudioPatcher.csproj -c Release
     dotnet build tools/GorillaStudioUpdater/GorillaStudioUpdater.csproj -c Release
@@ -201,6 +212,7 @@ Requires the .NET 8 SDK and the supplied original v1.0.2 release. Building on Li
     dotnet run --project tests/RenderBenchmarkTests -c Release
     dotnet run --project tests/RosterLaunchTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/RosterPreparationTests -c Release
+    dotnet run --project tests/BatchRosterLoadingTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/RosterQuickLoadTests -c Release -- /path/to/discovery_data
     dotnet run --project tests/DiscoverySdbTests -c Release -- /path/to/Sdb/ENG.sdb
     dotnet run --project tests/ModelInventoryBindingTests -c Release

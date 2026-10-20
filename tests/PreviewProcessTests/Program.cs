@@ -140,6 +140,35 @@ internal static class Program
             FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", new[] { "hair=auto", "hair=white" });
             Equal("The final explicit hair setting wins", "selected", process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"]);
         }
+        foreach (string[] gearArguments in new[] {
+            new[] { "folder", "taunt", "out" },
+            new[] { "folder", "taunt", "out", "hide=lambert1" },
+            new[] { "folder", "taunt", "out", "hide=lambert1", "hide=coat" },
+            new[] { "folder", "taunt", "out", "hide=coat", "hide=lambert1" },
+            new[] { "folder", "taunt", "out", "hide=Lambert1" },
+            new[] { "folder", "taunt", "out", "prepare=model", "hide=lambert1" }
+        })
+        using (var process = new Process())
+        {
+            string original = string.Join("|", gearArguments);
+            process.StartInfo.EnvironmentVariables["GORILLA_GEAR_CHOICE"] = "stale";
+            process.StartInfo.EnvironmentVariables["GORILLA_GEOMETRY_REVISION"] = "stale";
+            FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", gearArguments);
+            string finalHide = null;
+            foreach (string value in gearArguments) if (value.StartsWith("hide=", StringComparison.Ordinal)) finalHide = value.Substring(5);
+            Equal("Exact native gear mode reaches Blender: " + original, finalHide == "lambert1" ? "entrance" : "ring",
+                process.StartInfo.EnvironmentVariables["GORILLA_GEAR_CHOICE"]);
+            Equal("Geometry caches receive the current repair revision", "1", process.StartInfo.EnvironmentVariables["GORILLA_GEOMETRY_REVISION"]);
+            Equal("Gear forwarding preserves the original arguments", original, string.Join("|", gearArguments));
+        }
+        using (var process = new Process())
+        {
+            FolderBridge.ConfigurePreviewProcess(null, process, "roster_lookup.py", new[] { "hide=lambert1" });
+            Equal("Non-renderer processes receive no geometry migration flag", false,
+                process.StartInfo.EnvironmentVariables.ContainsKey("GORILLA_GEOMETRY_REVISION"));
+            Equal("Non-renderer processes receive no gear override", false,
+                process.StartInfo.EnvironmentVariables.ContainsKey("GORILLA_GEAR_CHOICE"));
+        }
         FolderBridge.DataLoading = true;
         try
         {

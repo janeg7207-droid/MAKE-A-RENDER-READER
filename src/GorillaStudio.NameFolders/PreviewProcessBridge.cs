@@ -26,11 +26,21 @@ namespace GorillaStudio.NameFolders
                 "gorilla_render", StringComparison.OrdinalIgnoreCase))
             {
                 nativeProcess.StartInfo.EnvironmentVariables.Remove("GORILLA_HAIR_CHOICE");
+                nativeProcess.StartInfo.EnvironmentVariables["GORILLA_GEOMETRY_REVISION"] = "1";
+                string hide = null;
                 if (args != null)
                     foreach (string argument in args)
+                    {
                         if (argument != null && argument.StartsWith("hair=", StringComparison.Ordinal))
                             nativeProcess.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"] =
                                 string.Equals(argument.Substring(5), "auto", StringComparison.OrdinalIgnoreCase) ? "auto" : "selected";
+                        if (argument != null && argument.StartsWith("hide=", StringComparison.Ordinal))
+                            hide = argument.Substring(5);
+                    }
+                // This is the native pipeline's exact gear-mode rule. Its
+                // expanded Blender hide list no longer retains that choice.
+                nativeProcess.StartInfo.EnvironmentVariables["GORILLA_GEAR_CHOICE"] =
+                    string.Equals(hide, "lambert1", StringComparison.Ordinal) ? "entrance" : "ring";
             }
             string setting;
             if (PreviewCache.IsPreviewRequest(script, args))

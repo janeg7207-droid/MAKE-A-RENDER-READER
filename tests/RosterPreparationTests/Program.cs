@@ -184,12 +184,21 @@ internal static class Program
         // Preserve the existing synchronous entry points used by the native IL
         // hook; do not replace their modal contract with an async operation.
         State.Reset(); State.ExpectWorkers = false;
+        State.MetadataWarnings.Add("An invalid SDB name was skipped; valid rows remain usable.");
         Equal(true, FolderBridge.PrepareRoster(State.Root, null) != null);
-        Equal(0, State.QuickOpenCount);
-        Equal(1, State.FullOpenCount);
+        Equal(1, State.QuickOpenCount);
+        Equal(0, State.FullOpenCount);
+        Equal(1, State.PickerMetadataWarnings.Count);
         Equal(State.UiThread, State.PickerThread);
         Equal(true, State.Commits.All(thread => thread == State.UiThread));
         Equal(true, State.DiskThreads.All(thread => thread == State.UiThread));
+        State.Reset(); State.ExpectWorkers = false;
+        State.MetadataWarnings.Add("A malformed SDB row does not block a dropped character folder.");
+        Equal(true, FolderBridge.PrepareFolder(State.Root) != null);
+        Equal(1, State.QuickOpenCount);
+        Equal(0, State.FullOpenCount);
+        Equal(State.MetadataWarnings.Single(), State.PickerMetadataWarnings.Single());
+        Equal(State.UiThread, State.MetadataWarningsThread);
         State.Reset(); FolderBridge.SetPreparedForTest("already-prepared");
         Equal("already-prepared", FolderBridge.PrepareFolder("already-prepared"));
         Equal(0, State.PickerCount);
@@ -349,6 +358,8 @@ namespace GorillaStudio.NameFolders
     {
         internal static RosterSessionData Open(string source, List<RosterEntry> saved)
         { return RosterLaunch.Open(source, saved, null, null); }
+        internal static RosterSessionData OpenQuick(string source, List<RosterEntry> saved)
+        { return RosterLaunch.OpenQuick(source, saved, null, null); }
     }
     internal static class RosterLaunch
     {

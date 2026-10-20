@@ -34,7 +34,7 @@ namespace GorillaStudio.NameFolders
                     throw new DirectoryNotFoundException("Choose an existing wrestler folder.");
                 string source = DirectoryLinks.Resolve(folder);
                 string baseName = new DirectoryInfo(source).Name;
-                RosterSessionData session = RosterSession.Open(source, ReadRoster());
+                RosterSessionData session = RosterSession.OpenQuick(source, ReadRoster());
                 List<RosterEntry> entries = session.Entries;
                 int? existing = FolderNames.ExistingId(baseName);
                 if (session.DiscoveryTable == null && existing.HasValue && !entries.Exists(e => e.Id == existing.Value
@@ -53,7 +53,7 @@ namespace GorillaStudio.NameFolders
         internal static string PrepareRoster(string discoveryRoot, string rosterFile)
         {
             string bundled = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json");
-            RosterSessionData session = RosterLaunch.Open(discoveryRoot, ReadRoster(), rosterFile, bundled);
+            RosterSessionData session = RosterLaunch.OpenQuick(discoveryRoot, ReadRoster(), rosterFile, bundled);
             string source = RosterAccess.RootFor(session.DiscoveryTable) ?? RosterAccess.RootFor(discoveryRoot)
                 ?? AppDomain.CurrentDomain.BaseDirectory;
             return ChooseRosterModel(source, session, rosterFile);

@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows;
@@ -148,6 +149,8 @@ namespace GorillaStudio.NameFolders
             actions.Children.Add(open); actions.Children.Add(details); actions.Children.Add(installAll); actions.Children.Add(use); actions.Children.Add(start); actions.Children.Add(stop);
             Grid.SetRow(actions, 5); grid.Children.Add(actions);
             bool running = false, cancel = false, loaded = false, showingResults = false, closeRequested = false, closed = false;
+            var rosterLoadingCancellation = new CancellationTokenSource();
+            CancellationToken rosterLoadingToken = rosterLoadingCancellation.Token;
             BatchRenderLifetime renderLifetime = null;
             Task cancelTask = Task.CompletedTask;
             Action requestCancel = () =>
@@ -302,7 +305,7 @@ namespace GorillaStudio.NameFolders
             CancelEventHandler ownerClosing = (sender, args) => { if (running) { args.Cancel = true; closeRequested = true; requestCancel(); } };
             owner.Closing += ownerClosing;
             dialog.Closing += (sender, args) => { if (running) { args.Cancel = true; closeRequested = true; requestCancel(); } };
-            dialog.Closed += (sender, args) => { closed = true; owner.Closing -= ownerClosing; batchWindows.Remove(owner); };
+            dialog.Closed += (sender, args) => { closed = true; rosterLoadingCancellation.Cancel(); owner.Closing -= ownerClosing; batchWindows.Remove(owner); };
             use.Click += async (sender, args) =>
             {
                 var job = (list.SelectedItem as ListBoxItem)?.Tag as BatchRenderJob;
@@ -512,8 +515,8 @@ namespace GorillaStudio.NameFolders
                 {
                     string root = RememberedRoot(owner), rosterFile = RememberedRosterFile();
                     List<RosterEntry> saved = ReadRoster();
-                    RosterSessionData session = await Task.Run(() => RosterLaunch.Open(root, saved, rosterFile,
-                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json")));
+                    RosterSessionData session = await Task.Run(() => BatchRosterLoading.Open(root, saved, rosterFile,
+                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json"), rosterLoadingToken), rosterLoadingToken);
                     if (closed) return;
                     table = session.DiscoveryTable;
                     rows = session.Entries.Where(entry => entry.Id > 0 && entry.Id <= 65535 && !string.IsNullOrWhiteSpace(entry.Name))
@@ -521,19 +524,27 @@ namespace GorillaStudio.NameFolders
                     string currentId = type.GetField("TargetSlot", InstanceMembers)?.GetValue(owner) as string;
                     var currentRows = rows.Where(row => row.Entry.Id.ToString(CultureInfo.InvariantCulture) == currentId).ToList();
                     if (currentRows.Count == 1) currentRows[0].Selected = true;
-                    inventory = await Task.Run(() => BatchModelInventory(session, root));
+                    // Display names/IDs as soon as metadata is ready. Model
+                    // indexing keeps running off the dispatcher, and MAKE stays
+                    // disabled until that inventory is complete.
+                    status.Text = BatchRosterLoading.LoadingStatus(session);
+                    refresh();
+                    inventory = await Task.Run(() => BatchModelInventory(session, root, rosterLoadingToken), rosterLoadingToken);
                     if (closed) return;
-                    loaded = true; status.Text = rows.Count.ToString(CultureInfo.InvariantCulture) + " roster entries · " + inventory.Count.ToString(CultureInfo.InvariantCulture) + " model folders indexed. Select wrestlers above.";
+                    loaded = true; status.Text = BatchRosterLoading.ReadyStatus(session, inventory.Count);
                     refresh();
                 }
-                catch (Exception error) { status.Text = "Could not load the batch roster: " + BatchError(error).Message; }
+                catch (OperationCanceledException) when (closed) { }
+                catch (Exception error) { if (!closed) status.Text = "Could not load the batch roster: " + BatchError(error).Message; }
             };
-            dialog.ShowDialog();
+            try { dialog.ShowDialog(); }
+            finally { rosterLoadingCancellation.Cancel(); rosterLoadingCancellation.Dispose(); }
             await Task.CompletedTask;
         }
 
-        private static List<ModelCandidate> BatchModelInventory(RosterSessionData session, string fallbackRoot)
+        private static List<ModelCandidate> BatchModelInventory(RosterSessionData session, string fallbackRoot, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string data = session.DiscoveryTable == null ? fallbackRoot : DiscoveryProfiles.DataRoot(session.DiscoveryTable);
             string context = session.DiscoveryTable ?? data;
             var roots = new List<string>();
@@ -555,7 +566,11 @@ namespace GorillaStudio.NameFolders
             unique = unique.Where(path => !unique.Any(other => !string.Equals(path, other, StringComparison.OrdinalIgnoreCase)
                 && path.StartsWith(other.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))).ToList();
             var models = new Dictionary<string, ModelCandidate>(StringComparer.OrdinalIgnoreCase);
-            foreach (string root in unique) foreach (ModelCandidate model in ModelLibrary.Scan(root)) models[model.Folder] = model;
+            foreach (string root in unique)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (ModelCandidate model in ModelLibrary.Scan(root, cancellationToken)) models[model.Folder] = model;
+            }
             return models.Values.ToList();
         }
 
