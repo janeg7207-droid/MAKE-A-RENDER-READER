@@ -32,7 +32,8 @@ namespace GorillaStudio.NameFolders
                 if (onLine != null) onLine(message);
                 return new ValueTuple<int, List<string>>(1, new List<string> { message });
             }
-            SelectAttireArguments(owner, script, ref arguments);
+            bool randyPreview = RandyPreviewProcessScope.IsRequest(owner, script, arguments);
+            if (!randyPreview) SelectAttireArguments(owner, script, ref arguments);
             bool preview = PreviewCache.IsPreviewRequest(script, arguments);
             bool fast = preview ? FastPreviewEnabled : FastRenderEnabled;
             bool cached = false, frozen = false;
@@ -40,7 +41,9 @@ namespace GorillaStudio.NameFolders
             try
             {
                 try { SetPerformanceBusy(owner, true); frozen = true; } catch { }
-                PreviewRequest request = preview && frozen ? PreviewRequest.Capture(owner, script, arguments, fast) : null;
+                // Dedicated Randy previews have their own source-checked cache.
+                // Do not scan the selected wrestler's entire Discovery context.
+                PreviewRequest request = preview && frozen && !randyPreview ? PreviewRequest.Capture(owner, script, arguments, fast) : null;
                 string key = request == null ? null : await Task.Run(() => request.Fingerprint());
                 PreviewCacheStore store = null;
                 if (key != null && request.EngineRootUnchanged())
@@ -53,9 +56,12 @@ namespace GorillaStudio.NameFolders
                         {
                             cached = true;
                             if (onLine != null) foreach (string line in lines) onLine(line);
-                            try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, lines); } catch { }
-                            try { CaptureCompletedPngResult(owner, script, arguments, lines); } catch { }
-                            try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, 0, lines); } catch { }
+                            if (!randyPreview)
+                            {
+                                try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, lines); } catch { }
+                                try { CaptureCompletedPngResult(owner, script, arguments, lines); } catch { }
+                                try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, 0, lines); } catch { }
+                            }
                             return new ValueTuple<int, List<string>>(0, lines);
                         }
                     }
@@ -67,7 +73,7 @@ namespace GorillaStudio.NameFolders
                     TrackBatchRenderProcess(owner, process);
                     if (started != null) started(process);
                 });
-                try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, result.Item1, result.Item2); } catch { }
+                if (!randyPreview) try { ObserveAutomaticTauntPreviewResult(owner, script, arguments, result.Item1, result.Item2); } catch { }
                 if (store != null && result.Item1 == 0 && fast == FastPreviewEnabled)
                 {
                     // Rendering can prepare files or the user can edit a texture while
@@ -75,11 +81,11 @@ namespace GorillaStudio.NameFolders
                     string after = await Task.Run(() => request.Fingerprint());
                     if (key == after) await Task.Run(() => store.Save(key, result.Item2));
                 }
-                if (preview && result.Item1 == 0)
+                if (!randyPreview && preview && result.Item1 == 0)
                 {
                     try { DiscoveryTauntBridge.CapturePreview(owner, script, arguments, result.Item2); } catch { }
                 }
-                if (result.Item1 == 0)
+                if (!randyPreview && result.Item1 == 0)
                     try { CaptureCompletedPngResult(owner, script, arguments, result.Item2); } catch { }
                 return result;
             }

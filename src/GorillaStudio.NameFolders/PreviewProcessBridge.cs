@@ -9,6 +9,7 @@ namespace GorillaStudio.NameFolders
     {
         static partial void ObservePlaybackSetup(object owner, Process process, string script, IEnumerable<string> args);
         static partial void ConfigureAlternateAttireProcess(object owner, Process process, string script, IEnumerable<string> args);
+        static partial void ObserveSkeletonFailureProcess(object owner, Process process, string script, IEnumerable<string> args);
 
         // Called immediately before the original engine process starts. The engine
         // appends GORILLA_EXTRA after its renderer arguments, so these last values
@@ -19,8 +20,12 @@ namespace GorillaStudio.NameFolders
             if (nativeProcess == null) return;
             string loadingFailure = DiscoveryDataProcessFailure(owner, script, args);
             if (loadingFailure != null) throw new InvalidOperationException(loadingFailure);
-            ConfigureAlternateAttireProcess(owner, nativeProcess, script, args);
-            ObservePlaybackSetup(owner, nativeProcess, script, args);
+            if (!RandyPreviewProcessScope.IsRequest(owner, script, args))
+            {
+                ConfigureAlternateAttireProcess(owner, nativeProcess, script, args);
+                ObservePlaybackSetup(owner, nativeProcess, script, args);
+                ObserveSkeletonFailureProcess(owner, nativeProcess, script, args);
+            }
             DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);
             if (!string.IsNullOrWhiteSpace(script) && string.Equals(Path.GetFileNameWithoutExtension(script.Replace('\\', '/')),
                 "gorilla_render", StringComparison.OrdinalIgnoreCase))

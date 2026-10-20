@@ -6,6 +6,7 @@ bytes; this suite verifies cache ownership and transaction semantics only.
 """
 import contextlib
 import hashlib
+import gzip
 import importlib.util
 import io
 import json
@@ -110,6 +111,7 @@ def run_suite():
             raise RuntimeError("native failure")
         reject(lambda: cache.run_with_geometry_cache(options, failed_fresh), "native failure")
         check(not Path(options["blend"]).exists(), "A failed first import leaves no partial cache for native reuse")
+        check(not (Path(options["blend"]).parent / "meshes.json").exists(), "A failed first import leaves no orphan native mesh manifest")
         options = case("missing-save")
         old = Path(options["blend"]).read_bytes()
         reject(lambda: cache.run_with_geometry_cache(options, lambda: None), "not saved successfully")
@@ -129,7 +131,10 @@ def run_suite():
             save(options)
             (Path(options["char_dir"]) / options["attire_mcd"]).write_bytes(b"new source changed during import")
         reject(lambda: cache.run_with_geometry_cache(options, changed), "sources changed")
-        check(Path(options["blend"]).read_bytes() == old, "Changed source cannot publish a new cache revision")
+        check(Path(options["blend"]).read_bytes().endswith(b"new cached model"), "A source-change validation failure preserves the successfully saved model")
+        check(not (Path(options["blend"]).parent / cache.SIDECAR).exists()
+              and (Path(options["blend"]).parent / cache.JOURNAL).exists(),
+              "A changed source publishes no revision and retains its paired recovery journal")
         options = case("marker-failure")
         blend = Path(options["blend"])
         old = blend.read_bytes()
@@ -143,7 +148,10 @@ def run_suite():
                 cache.run_with_geometry_cache(options, lambda: save(options))
         except OSError as error:
             check("sidecar failure" in str(error), "Sidecar commit error remains visible")
-        check(blend.read_bytes() == old, "Failed sidecar publication restores the old cache")
+        check(blend.read_bytes().endswith(b"new cached model") and cache._mesh_manifest(blend.parent / "meshes.json"),
+              "Failed optional sidecar publication keeps a valid saved model and native mesh manifest together")
+        check(not (blend.parent / cache.SIDECAR).exists() and (blend.parent / cache.JOURNAL).exists(),
+              "A sidecar failure publishes no revision and keeps its exact rollback journal")
         check(not list(blend.parent.glob(".geometry-*json")), "Failed marker temporary files are removed")
         options = case("no-hardlinks")
         old = Path(options["blend"]).read_bytes()
@@ -265,6 +273,78 @@ cache.run_with_geometry_cache(options,interrupted)
             json.dump(json.loads(previous), open(mesh_path, "w"))
             return "native-json-saved"
         check(cache.run_with_geometry_cache(options, valid_json) == "native-json-saved", "The native json.dump(open(...)) pattern publishes its complete original schema")
+        options = case("coherent-failure")
+        blend = Path(options["blend"])
+        old_blend = blend.read_bytes()
+        old_manifest = (blend.parent / "meshes.json").read_bytes()
+        def changed_pair_failure():
+            save(options)
+            (blend.parent / "meshes.json").write_text(json.dumps([{"name": "Different mesh", "full": "Different mesh:skinned", "verts": 9, "materials": []}]))
+            raise RuntimeError("native import failed")
+        reject(lambda: cache.run_with_geometry_cache(options, changed_pair_failure), "native import failed")
+        check(blend.read_bytes() == old_blend and (blend.parent / "meshes.json").read_bytes() == old_manifest,
+              "A failed import restores its model and mesh manifest as the same original pair")
+        options = case("completion-order")
+        blend = Path(options["blend"])
+        class OrderedOutput(io.StringIO):
+            def write(self, value):
+                if value == "MESHES_DONE":
+                    check((blend.parent / cache.SIDECAR).exists(), "Native completion is emitted only after the cache revision is committed")
+                return super().write(value)
+        output = OrderedOutput()
+        def completed():
+            print("MESHES_DONE", 1)
+            check("MESHES_DONE" not in output.getvalue(), "Native completion stays buffered during the native callback")
+            save(options)
+            raise SystemExit(0)
+        try:
+            with contextlib.redirect_stdout(output):
+                cache.run_with_geometry_cache(options, completed)
+        except SystemExit as error:
+            check(error.code == 0, "Buffered native success keeps SystemExit(0)")
+        check("MESHES_DONE 1" in output.getvalue(), "Committed native mesh preparation publishes its original completion marker")
+        options = case("failed-completion")
+        blend = Path(options["blend"])
+        output = io.StringIO()
+        replace = os.replace
+        def fail_sidecar(source, target):
+            if Path(target).name == cache.SIDECAR:
+                raise OSError("sidecar publication failed")
+            return replace(source, target)
+        def completed_before_fault():
+            save(options)
+            print("MESHES_DONE", 1)
+            raise SystemExit(0)
+        try:
+            with contextlib.redirect_stdout(output), mock.patch.object(cache.os, "replace", side_effect=fail_sidecar):
+                cache.run_with_geometry_cache(options, completed_before_fault)
+        except OSError as error:
+            check("publication failed" in str(error), "An auxiliary metadata failure remains visible")
+        check("MESHES_DONE" not in output.getvalue(), "An uncommitted import cannot send the native engine into skeleton preparation")
+        check(blend.exists() and cache._mesh_manifest(blend.parent / "meshes.json"), "An auxiliary metadata failure never deletes the working saved model beside its manifest")
+        options = case("invalid-aux-metadata")
+        blend = Path(options["blend"])
+        output = io.StringIO()
+        def native_saved_bad_metadata():
+            save(options)
+            (blend.parent / "meshes.json").write_text("[invalid producer metadata")
+            print("MESHES_DONE", 1)
+            raise SystemExit(0)
+        with contextlib.redirect_stdout(output):
+            reject(lambda: cache.run_with_geometry_cache(options, native_saved_bad_metadata), "not saved successfully")
+        check(blend.exists() and not (blend.parent / "meshes.json").exists(),
+              "A valid native model is kept while malformed auxiliary metadata is removed for native regeneration")
+        check("MESHES_DONE" not in output.getvalue(), "Malformed auxiliary metadata cannot publish native import completion")
+        gzip_blend = root / "gzip.blend"
+        with gzip.open(gzip_blend, "wb") as stream:
+            stream.write(b"BLENDER-v403 native format header fixture")
+        check(cache._blend_file(gzip_blend), "Legacy gzip-compressed Blender headers are recognized by bounded decompression")
+        for name, content in (("gzip-bad.blend", bytes.fromhex("1f8b0800") + b"not a gzip stream"),
+                              ("gzip-truncated.blend", bytes.fromhex("1f8b0800")),
+                              ("zstd-bad.blend", bytes.fromhex("28b52ffd") + b"not a zstd Blender file")):
+            candidate = root / name
+            candidate.write_bytes(content)
+            check(not cache._blend_file(candidate), "A compressed magic alone does not establish a valid Blender cache: " + name)
         print(json.dumps({"checks_passed": checks, "native_Blender_executed": False,
                           "MCD_model_import_executed": False, "abrupt_process_exit_recovery": True,
                           "scope": "Cache transaction, ownership, crash recovery and atomic native mesh metadata fixtures"}))

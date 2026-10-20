@@ -250,9 +250,7 @@ namespace GorillaStudio.NameFolders
                     RecordAnimationReport(window, game, discoveryRoot, result);
                     Apply(window, result);
                     appliedResult?.Invoke(result);
-                    object selected = Field<ListBox>(window, "TauntList")?.SelectedItem;
-                    string selectedKey = selected == null ? null : Convert.ToString(selected.GetType().GetProperty("Key")?.GetValue(selected, null));
-                    window.GetType().GetMethod("Prepare", Members, null, new[] { typeof(string) }, null)?.Invoke(window, new object[] { selectedKey });
+                    window.GetType().GetMethod("Prepare", Members, null, new[] { typeof(string) }, null)?.Invoke(window, new object[] { null });
                 });
             }
             finally
@@ -563,41 +561,7 @@ namespace GorillaStudio.NameFolders
 
         private static void ShowPreviewHint(Window window)
         {
-            var list = Field<ListBox>(window, "TauntList");
-            object selected = list == null ? null : list.SelectedItem;
-            if (selected == null) return;
-            string key = Convert.ToString(selected.GetType().GetProperty("Key").GetValue(selected, null));
-            if (DiscoveryTauntSearch.IsUnavailableKey(key))
-            {
-                Field<DispatcherTimer>(window, "PreviewTimer")?.Stop();
-                var image = Field<Image>(window, "TauntPreview");
-                if (image != null) image.Source = null;
-                var unavailable = Field<TextBlock>(window, "PreviewMaking");
-                if (unavailable != null)
-                {
-                    unavailable.Text = Convert.ToString(selected.GetType().GetProperty("Note").GetValue(selected, null));
-                    unavailable.Visibility = Visibility.Visible;
-                }
-                return;
-            }
-            bool discovery = key.StartsWith("discovery", StringComparison.Ordinal) || key.Contains("_discovery_");
-            string library = window.GetType().GetField("Library", Members)?.GetValue(window) as string;
-            // Bundled thumbnails are retained exactly. A missing stock atlas
-            // can be supplied by the same actual wrestler preview as a newly
-            // discovered taunt, without changing any existing native atlas.
-            if (!discovery && !string.IsNullOrWhiteSpace(library)
-                && File.Exists(Path.Combine(library, "previews_game", key + ".png"))) return;
-            if (ShowDiscoveryPreview(window, key)) return;
-            Field<DispatcherTimer>(window, "PreviewTimer")?.Stop();
-            var preview = Field<Image>(window, "TauntPreview");
-            if (preview != null) preview.Source = null;
-            var making = Field<TextBlock>(window, "PreviewMaking");
-            if (making != null)
-            {
-                making.Text = FolderBridge.AutomaticTauntPreviewStatus(window, key)
-                    ?? "No preview yet. Select this taunt\nor press Preview for your wrestler.";
-                making.Visibility = Visibility.Visible;
-            }
+            FolderBridge.ShowRandyTauntPreviewHint(window);
         }
 
         internal static bool ShowCapturedWrestlerPreview(Window window, string key)

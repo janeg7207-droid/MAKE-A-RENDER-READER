@@ -193,6 +193,8 @@ namespace GorillaStudio.NameFolders
             try
             {
                 var source = (PngExportField(owner, "ResultImage") as Image)?.Source as BitmapSource;
+                if (IsRandyTauntPreviewImage(owner, source))
+                    throw new InvalidOperationException("This is Randy's taunt preview. MAKE your selected wrestler before saving its PNG.");
                 if (!PngSingleFrame(source)) throw new InvalidOperationException("Wait for a single preview pose to appear, then save it.");
                 PngExportContext context = controls.LastResult;
                 string origin = PngBitmapPath(source);
@@ -318,8 +320,13 @@ namespace GorillaStudio.NameFolders
         {
             if (controls.Closed) return;
             var source = (PngExportField(owner, "ResultImage") as Image)?.Source as BitmapSource;
+            bool randy = IsRandyTauntPreviewImage(owner, source);
+            controls.Save.ToolTip = randy ? "This is Randy's taunt preview. MAKE your selected wrestler to save its PNG."
+                : "Save the currently displayed pose at its original pixel size, including its alpha channel.";
+            ToolTipService.SetShowOnDisabled(controls.Save, true);
             if (controls.LastResult != null && !ReferenceEquals(controls.LastResult.ImageRoot, PngBitmapRoot(source))) controls.LastResult = null;
             controls.Save.IsEnabled = controls.LastResult != null && controls.Saving == 0 && !PngOwnerBusy(owner)
+                && !randy
                 && PngContextMatches(owner, controls.LastResult)
                 && PngSingleFrame(source);
             controls.Open.IsEnabled = !string.IsNullOrWhiteSpace(PngExportField(owner, "Output") as string);

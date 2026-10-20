@@ -33,6 +33,7 @@ internal static class Program
             await AutomaticPreviewOutcomes();
             await UnavailableTauntDoesNotStart();
             await LoadingDataDoesNotUseOldRenderOrCache();
+            await RandyIsolation();
             Console.WriteLine(checks + " preview process bridge checks passed.");
             return 0;
         }
@@ -453,6 +454,58 @@ internal static class Program
         return FolderBridge.RunPreviewProcess(owner, owner.Script, new[] { owner.Folder, "Taunt1", owner.Output, "quick=1" }.Concat(options), callback, started);
     }
 
+    private static async Task RandyIsolation()
+    {
+        FakeOwner owner = Create("randy-isolation");
+        object other = new object();
+        string[] args = { owner.Folder, "Taunt1", owner.Output, "quick=1", "slot=161" };
+        int selectedAttire = 0, captures = 0, scanned = 0;
+        FolderBridge.OnSelectAttire = () => selectedAttire++;
+        FolderBridge.OnPngCapture = (a, b, c, d) => captures++;
+        FolderBridge.OnAutomaticOutcome = (a, b, c, d, e) => captures++;
+        DiscoveryTauntBridge.OnCapture = (a, b, c, d) => captures++;
+        DirectoryLinks.BeforeResolve = path => scanned++;
+        try
+        {
+            Equal(false, RandyPreviewProcessScope.IsRequest(owner, owner.Script, args));
+            using (RandyPreviewProcessScope.Begin(owner, owner.Folder, owner.Output))
+            {
+                Equal(true, RandyPreviewProcessScope.IsRequest(owner, owner.Script, args));
+                Equal(false, RandyPreviewProcessScope.IsRequest(other, owner.Script, args));
+                Equal(false, RandyPreviewProcessScope.IsRequest(owner, "extract_stock.py", args));
+                foreach (string change in new[] { "quick=0", "slot=924", "prepare=model", "prepare" })
+                    Equal(false, RandyPreviewProcessScope.IsRequest(owner, owner.Script, args.Concat(new[] { change })));
+                Equal(false, RandyPreviewProcessScope.IsRequest(owner, owner.Script, new[] { owner.Folder, "Taunt1", root, "quick=1", "slot=161" }));
+                bool duplicate = false;
+                try { using (RandyPreviewProcessScope.Begin(owner, owner.Folder, owner.Output)) { } }
+                catch (InvalidOperationException) { duplicate = true; }
+                Equal(true, duplicate);
+                Equal(0, (await FolderBridge.RunPreviewProcess(owner, owner.Script, args, null, null)).Item1);
+                Equal(0, (await FolderBridge.RunPreviewProcess(owner, owner.Script, args, null, null)).Item1);
+                Equal(2, owner.Calls); // Only the dedicated Randy cache may reuse this result.
+                Equal(0, selectedAttire); Equal(0, captures); Equal(0, scanned);
+                Equal(false, owner.Timings.Last().Cached);
+
+                // A MAKE request in the same window remains a selected-wrestler operation.
+                Equal(0, (await FolderBridge.RunPreviewProcess(owner, owner.Script, args.Concat(new[] { "quick=0" }), null, null)).Item1);
+                Equal(1, selectedAttire); Equal(2, captures);
+            }
+            Equal(false, RandyPreviewProcessScope.IsRequest(owner, owner.Script, args));
+            using (RandyPreviewProcessScope.Begin(owner, owner.Folder, owner.Output))
+                Equal(true, RandyPreviewProcessScope.IsRequest(owner, owner.Script, args));
+            bool relative = false;
+            try { using (RandyPreviewProcessScope.Begin(owner, "relative", owner.Output)) { } }
+            catch (ArgumentException) { relative = true; }
+            Equal(true, relative);
+        }
+        finally
+        {
+            FolderBridge.OnSelectAttire = null; FolderBridge.OnPngCapture = null;
+            FolderBridge.OnAutomaticOutcome = null; DiscoveryTauntBridge.OnCapture = null;
+            DirectoryLinks.BeforeResolve = null;
+        }
+    }
+
     private static FakeOwner Create(string name)
     {
         string app = Path.Combine(root, name);
@@ -542,6 +595,9 @@ namespace GorillaStudio.NameFolders
         internal static string StoragePath;
         internal static string StorageDirectory { get { return StoragePath; } }
         internal static Action<object, string, IEnumerable<string>, IEnumerable<string>> OnPngCapture;
+        internal static Action OnSelectAttire;
+        static partial void SelectAttireArguments(object owner, string script, ref string[] arguments)
+        { OnSelectAttire?.Invoke(); }
         internal static Func<object, bool> OnBatchCancellation;
         internal static Action<object, Process> OnBatchStarted;
         internal static Action<object, string, IEnumerable<string>, int, IEnumerable<string>> OnAutomaticOutcome;

@@ -187,7 +187,7 @@ namespace GorillaStudio.NameFolders
             var resultImage = AttireField(owner, "ResultImage") as Image;
             if (resultImage != null) resultImage.Source = null;
             var resultInfo = AttireField(owner, "ResultInfo") as TextBlock;
-            if (resultInfo != null) resultInfo.Text = "Attire changed. Press Preview to check this model, then MAKE to install it.";
+            if (resultInfo != null) resultInfo.Text = "Attire changed. Preview shows the taunt on Randy; MAKE uses this selected attire.";
             int generation = ++controls.Generation;
             _ = ReprepareAlternateAttire(owner, controls, folder, validated, generation);
         }
@@ -205,10 +205,7 @@ namespace GorillaStudio.NameFolders
                     () =>
                     {
                         SetAttireField(owner, "PrepWanted", null); SetAttireField(owner, "PrepDone", null);
-                        object taunt = (AttireField(owner, "TauntList") as ListBox)?.SelectedItem;
-                        string key = taunt == null ? null : taunt.GetType().GetProperty("Key", InstanceMembers)?.GetValue(taunt, null) as string;
-                        if (key == null && taunt != null) key = taunt.GetType().GetField("Key", InstanceMembers)?.GetValue(taunt) as string;
-                        owner.GetType().GetMethod("Prepare", InstanceMembers, null, new[] { typeof(string) }, null)?.Invoke(owner, new object[] { key });
+                        owner.GetType().GetMethod("Prepare", InstanceMembers, null, new[] { typeof(string) }, null)?.Invoke(owner, new object[] { null });
                     });
             }
             catch (Exception error) when (AttireError(error))

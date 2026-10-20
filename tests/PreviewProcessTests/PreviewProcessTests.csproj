@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewProcessBridge.cs" Link="PreviewProcessBridge.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/RandyPreviewProcessScope.cs" Link="RandyPreviewProcessScope.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryDataRenderGuard.cs" Link="DiscoveryDataRenderGuard.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
   </ItemGroup>

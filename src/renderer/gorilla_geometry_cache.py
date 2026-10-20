@@ -6,6 +6,7 @@ remain recoverable beside the rebuilt file.
 """
 
 import builtins
+import gzip
 import contextlib
 import hashlib
 import importlib
@@ -15,6 +16,7 @@ from pathlib import Path, PureWindowsPath
 import shutil
 import sys
 import uuid
+import zlib
 
 
 REVISION = "1"
@@ -22,6 +24,12 @@ SIDECAR = "model.geometry.json"
 LOCKFILE = ".gorilla-geometry.lock"
 JOURNAL = "model.geometry.pending.json"
 _MAX_JSON = 16 * 1024 * 1024
+_NATIVE_BLEND_PROOFS = {}
+
+
+class GeometryCacheValidationError(RuntimeError):
+    """The native operation finished, but auxiliary cache validation failed."""
+
 
 
 def _file_stamp(path):
@@ -73,9 +81,62 @@ def _blend_file(path):
         if path.is_symlink() or not path.is_file():
             return False
         with path.open("rb") as stream:
-            return stream.read(7) == b"BLENDER"
-    except OSError:
+            header = stream.read(12)
+        if header.startswith(b"BLENDER"):
+            return True
+        if header.startswith(b"\x1f\x8b"):
+            # Older compressed .blend files use gzip. Read only the actual
+            # Blender header, without inflating the complete model in Python.
+            with gzip.open(path, "rb") as stream:
+                return stream.read(12).startswith(b"BLENDER")
+        if not header.startswith(b"\x28\xb5\x2f\xfd"):
+            return False
+        # Modern Blender uses Zstandard. Its native library reader supports
+        # the exact format on Windows and Linux without another Python/DLL
+        # dependency. A matching save/load event already proved a fresh file.
+        stamp = _file_stamp(path)
+        if _NATIVE_BLEND_PROOFS.get(stamp["path"]) == stamp:
+            return True
+        bpy = sys.modules.get("bpy")
+        libraries = getattr(getattr(bpy, "data", None), "libraries", None)
+        if libraries is None or not callable(getattr(libraries, "load", None)):
+            return False
+        with libraries.load(str(path), link=False):
+            pass  # Request no datablocks; the active scene stays unchanged.
+        _NATIVE_BLEND_PROOFS[stamp["path"]] = stamp
+        return True
+    except (OSError, EOFError, RuntimeError, ValueError, zlib.error):
         return False
+
+
+@contextlib.contextmanager
+def _native_file_events(context):
+    bpy = sys.modules.get("bpy")
+    handlers = getattr(getattr(bpy, "app", None), "handlers", None)
+    target = _cache_target(context["blend"])
+    installed = []
+    def remember(*unused):
+        try:
+            filename = getattr(getattr(bpy, "data", None), "filepath", "")
+            if filename and _cache_target(Path(filename)) == target:
+                stamp = _file_stamp(context["blend"])
+                _NATIVE_BLEND_PROOFS[stamp["path"]] = stamp
+        except (OSError, ValueError):
+            pass
+    if handlers is not None:
+        persistent = getattr(handlers, "persistent", None)
+        callback = persistent(remember) if callable(persistent) else remember
+        for name in ("save_post", "load_post"):
+            collection = getattr(handlers, name, None)
+            if collection is not None:
+                collection.append(callback)
+                installed.append((collection, callback))
+    try:
+        yield
+    finally:
+        for collection, callback in installed:
+            if callback in collection:
+                collection.remove(callback)
 
 
 def _base_model(character):
@@ -170,22 +231,26 @@ def _cache_lock(folder):
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _copy_exclusive(source, destination):
+    created = False
+    try:
+        with Path(source).open("rb") as reader, Path(destination).open("xb") as writer:
+            created = True
+            shutil.copyfileobj(reader, writer)
+        shutil.copystat(source, destination)
+    except BaseException:
+        if created:
+            Path(destination).unlink(missing_ok=True)
+        raise
+
+
 def _copy_or_link(source, destination):
     try:
         os.link(source, destination)
     except FileExistsError:
         raise
     except OSError:
-        created = False
-        try:
-            with Path(source).open("rb") as reader, Path(destination).open("xb") as writer:
-                created = True
-                shutil.copyfileobj(reader, writer)
-            shutil.copystat(source, destination)
-        except BaseException:
-            if created:
-                Path(destination).unlink(missing_ok=True)
-            raise
+        _copy_exclusive(source, destination)
 
 
 def _backup(blend):
@@ -260,7 +325,18 @@ def _begin_journal(context, backup):
                "backup": backup.name if backup is not None else None,
                "backup_stamp": _file_stamp(backup) if backup is not None else None,
                "backup_sha256": _sha256(backup) if backup is not None else None}
+    manifest = context["blend"].parent / "meshes.json"
+    if manifest.exists():
+        if not _mesh_manifest(manifest):
+            raise GeometryCacheValidationError("The existing wrestler mesh cache is not valid native metadata.")
+        saved = manifest.with_name("meshes.pre-geometry-v" + REVISION + "-" + uuid.uuid4().hex + ".json")
+        _copy_exclusive(manifest, saved)
+        payload["manifest"] = {"state": "present", "backup": saved.name,
+                               "stamp": _file_stamp(saved), "sha256": _sha256(saved)}
+    else:
+        payload["manifest"] = {"state": "absent"}
     _atomic_json(path, payload, ".geometry-pending-")
+    context["pending"] = payload
 
 
 def _clear_journal(context):
@@ -270,6 +346,40 @@ def _clear_journal(context):
 def _has_journal(context):
     path = context["blend"].parent / JOURNAL
     return path.exists() or path.is_symlink()
+
+
+def _restore_manifest(context, pending):
+    target = context["blend"].parent / "meshes.json"
+    record = pending.get("manifest")
+    if record is None:
+        # Revision 1 before paired metadata backups. Do not reuse a manifest
+        # that might have come from the interrupted new model.
+        target.unlink(missing_ok=True)
+        return
+    if not isinstance(record, dict):
+        raise ValueError("the pending mesh metadata backup is invalid")
+    if record.get("state") == "absent":
+        if target.is_symlink():
+            raise ValueError("the pending mesh metadata target is not a regular file")
+        target.unlink(missing_ok=True)
+        return
+    name = record.get("backup")
+    prefix = "meshes.pre-geometry-v" + REVISION + "-"
+    token = name[len(prefix):-5] if isinstance(name, str) and name.startswith(prefix) and name.endswith(".json") else ""
+    if (record.get("state") != "present" or len(token) != 32
+            or any(value not in "0123456789abcdef" for value in token)
+            or Path(name).name != name or PureWindowsPath(name).name != name):
+        raise ValueError("the pending mesh metadata backup path is invalid")
+    backup = target.parent / name
+    if (not _mesh_manifest(backup) or _file_stamp(backup) != record.get("stamp")
+            or _sha256(backup) != record.get("sha256")):
+        raise ValueError("the preserved mesh metadata backup changed or is unavailable")
+    temporary = target.with_name(".geometry-meshes-" + uuid.uuid4().hex + ".json")
+    try:
+        _copy_exclusive(backup, temporary)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _recover_pending(context):
@@ -305,6 +415,7 @@ def _recover_pending(context):
             if (not _blend_file(backup) or _file_stamp(backup) != pending.get("backup_stamp")
                     or _sha256(backup) != pending.get("backup_sha256")):
                 raise ValueError("the preserved cache backup changed or is unavailable")
+        _restore_manifest(context, pending)
         _rollback(context["blend"], backup)
         _clean_manifest_temporaries(context["blend"].parent)
         _clear_journal(context)
@@ -364,7 +475,7 @@ def _atomic_mesh_manifest(context):
                     stream.close()
                 if successful:
                     if not _mesh_manifest(temporary):
-                        raise RuntimeError("The rebuilt wrestler mesh cache was not saved successfully.")
+                        raise GeometryCacheValidationError("The rebuilt wrestler mesh cache was not saved successfully.")
                     os.replace(temporary, target)
         finally:
             for stream, temporary in writers:
@@ -374,13 +485,60 @@ def _atomic_mesh_manifest(context):
 
 
 def _run_original(context, callback):
-    with _atomic_mesh_manifest(context):
-        return callback()
+    original_print = builtins.print
+    markers = context.setdefault("success_markers", [])
+    def printed(*values, **options):
+        if values and values[0] == "MESHES_DONE" and options.get("file", sys.stdout) is sys.stdout:
+            markers.append((values, dict(options)))
+            return
+        return original_print(*values, **options)
+    builtins.print = printed
+    try:
+        with _native_file_events(context), _atomic_mesh_manifest(context):
+            return callback()
+    finally:
+        builtins.print = original_print
+
+
+def _publish_success(context):
+    for values, options in context.pop("success_markers", []):
+        print(*values, **options)
+
+
+def _run_current(context, callback):
+    try:
+        result = _run_original(context, callback)
+    except SystemExit as error:
+        if error.code is None or error.code == 0:
+            _publish_success(context)
+        raise
+    _publish_success(context)
+    return result
 
 
 def _rollback_transaction(context, backup):
+    pending = context.get("pending")
+    if pending is not None:
+        _restore_manifest(context, pending)
     _rollback(context["blend"], backup)
     _clear_journal(context)
+
+
+def _validation_failed(context, backup):
+    # Native save/load success and a complete manifest are valuable artifacts.
+    # An extra revision-marker failure must never delete a working model and
+    # leave meshes.json pointing at a nonexistent model.blend. Keep this pair
+    # uncommitted and with its recovery journal; suppress MESHES_DONE so the
+    # original engine reports the import failure instead of starting rest on
+    # an incomplete transaction.
+    if _blend_file(context["blend"]):
+        manifest = context["blend"].parent / "meshes.json"
+        if manifest.exists() and not manifest.is_symlink() and not _mesh_manifest(manifest):
+            # A missing manifest makes the native engine regenerate metadata.
+            # An existing malformed manifest would fail before recovery runs.
+            manifest.unlink()
+        return
+    _rollback_transaction(context, backup)
 
 
 def _commit(context, options):
@@ -408,7 +566,7 @@ def run_with_geometry_cache(options, run_original_callable):
     if context is None:
         return run_original_callable()
     if _current(context) and not _has_journal(context):
-        return _run_original(context, run_original_callable)
+        return _run_current(context, run_original_callable)
     blend = context["blend"]
     if not _has_journal(context) and blend.exists() and (not _blend_file(blend) or not _mesh_manifest(blend.parent / "meshes.json")):
         return run_original_callable()
@@ -420,7 +578,7 @@ def run_with_geometry_cache(options, run_original_callable):
             raise RuntimeError("The wrestler model sources changed before its cache rebuild. Try again.")
         _recover_pending(context)
         if _current(context):
-            return _run_original(context, run_original_callable)
+            return _run_current(context, run_original_callable)
         backup = None
         if blend.exists():
             if not _blend_file(blend) or not _mesh_manifest(blend.parent / "meshes.json"):
@@ -443,10 +601,14 @@ def run_with_geometry_cache(options, run_original_callable):
                 try:
                     _commit(context, options)
                 except BaseException:
-                    _rollback_transaction(context, backup)
+                    _validation_failed(context, backup)
                     raise
+                _publish_success(context)
                 raise
             _rollback_transaction(context, backup)
+            raise
+        except GeometryCacheValidationError:
+            _validation_failed(context, backup)
             raise
         except BaseException:
             _rollback_transaction(context, backup)
@@ -454,6 +616,7 @@ def run_with_geometry_cache(options, run_original_callable):
         try:
             _commit(context, options)
         except BaseException:
-            _rollback_transaction(context, backup)
+            _validation_failed(context, backup)
             raise
+        _publish_success(context)
         return result

@@ -26,13 +26,21 @@ namespace GorillaStudio.NameFolders
 
         // The caller supplies a physical model key verified against character mapping.
         // A logical profile ID alone must never choose a different wrestler's stock body.
-        public static async Task<string> RequestGameModelAsync(RosterEntry entry, string stockFolderKey, Action<string> progress)
+        public static Task<string> RequestGameModelAsync(RosterEntry entry, string stockFolderKey, Action<string> progress)
+        { return RequestGameModelAsync(entry, stockFolderKey, progress, null); }
+
+        internal static Task<string> RequestGameModelAsync(RosterEntry entry, string stockFolderKey, Action<string> progress, Action<Process> started)
+        {
+            var window = gameModelWindow == null ? null : gameModelWindow.Target as Window;
+            return RequestGameModelAsync(window, entry, stockFolderKey, progress, started);
+        }
+
+        internal static async Task<string> RequestGameModelAsync(Window window, RosterEntry entry, string stockFolderKey, Action<string> progress, Action<Process> started)
         {
             if (entry == null) throw new ArgumentNullException("entry");
-            var window = gameModelWindow == null ? null : gameModelWindow.Target as Window;
             if (window == null) throw new InvalidOperationException("Open Gorilla Studio before loading a model from the game files.");
             if (!window.Dispatcher.CheckAccess())
-                return await window.Dispatcher.InvokeAsync(new Func<Task<string>>(() => RequestGameModelAsync(entry, stockFolderKey, progress))).Task.Unwrap();
+                return await window.Dispatcher.InvokeAsync(new Func<Task<string>>(() => RequestGameModelAsync(window, entry, stockFolderKey, progress, started))).Task.Unwrap();
 
             Type type = window.GetType();
             var gameField = type.GetField("Game", InstanceMembers);
@@ -89,7 +97,7 @@ namespace GorillaStudio.NameFolders
                 var task = run.Invoke(window, new object[]
                 {
                     Path.Combine(studio, "pipeline", "extract_stock.py"),
-                    new[] { stockFolderKey }, onLine, null
+                    new[] { stockFolderKey }, onLine, started
                 }) as Task;
                 if (task == null) throw new InvalidOperationException("The game's extractor did not return a completion task.");
                 await task;

@@ -128,10 +128,14 @@ internal static class Program
                 handler.TryStart == prepareCall || handler.TryEnd == prepareCall ||
                 handler.HandlerStart == prepareCall || handler.HandlerEnd == prepareCall || handler.FilterStart == prepareCall))
                 throw new InvalidOperationException("The native preparation call is not a safe target-selection hook.");
-            Instruction applyStart = Instruction.Create(OpCodes.Ldarg_0);
+            // Browsing taunts now previews Randy independently. Folder loading
+            // only warms the selected wrestler's model; MAKE prepares its taunt.
+            Instruction applyStart = Instruction.Create(OpCodes.Pop);
             var applyInstructions = new[]
             {
                 applyStart,
+                Instruction.Create(OpCodes.Ldnull),
+                Instruction.Create(OpCodes.Ldarg_0),
                 Instruction.Create(OpCodes.Ldfld, ownerField),
                 Instruction.Create(OpCodes.Call, new Importer(module).Import(applySelection))
             };
@@ -445,6 +449,9 @@ internal static class Program
             called.Name == "ApplySelection").ToArray();
         if (applyCalls.Length != 1) throw new InvalidDataException("The saved executable does not contain exactly one native-target selection call.");
         int applyIndex = moveNext.Body.Instructions.IndexOf(applyCalls[0]);
+        if (applyIndex < 4 || moveNext.Body.Instructions[applyIndex - 4].OpCode != OpCodes.Pop
+            || moveNext.Body.Instructions[applyIndex - 3].OpCode != OpCodes.Ldnull)
+            throw new InvalidDataException("Folder loading does not prepare only the selected model.");
         Instruction prepareCall = moveNext.Body.Instructions[applyIndex + 1];
         if (prepareCall.OpCode != OpCodes.Call || prepareCall.Operand is not IMethod prepare ||
             prepare.Name != "Prepare" || prepare.DeclaringType.FullName != MainWindowType ||
