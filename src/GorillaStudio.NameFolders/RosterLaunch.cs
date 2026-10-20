@@ -11,10 +11,24 @@ namespace GorillaStudio.NameFolders
         public static RosterSessionData Open(string discoveryRoot, IEnumerable<RosterEntry> saved,
             string rosterFile, string bundledRosterFile)
         {
+            return OpenCore(discoveryRoot, saved, rosterFile, bundledRosterFile, false);
+        }
+
+        public static RosterSessionData OpenQuick(string discoveryRoot, IEnumerable<RosterEntry> saved,
+            string rosterFile, string bundledRosterFile)
+        {
+            return OpenCore(discoveryRoot, saved, rosterFile, bundledRosterFile, true);
+        }
+
+        private static RosterSessionData OpenCore(string discoveryRoot, IEnumerable<RosterEntry> saved,
+            string rosterFile, string bundledRosterFile, bool quick)
+        {
             // Work on copies: opening a picker must not change a different remembered
             // roster, and cancelling it must not modify any saved model choices.
             List<RosterEntry> remembered = saved == null ? new List<RosterEntry>()
                 : saved.Where(ValidEntry).Select(Copy).ToList();
+            if (quick) remembered = RosterSession.QuickRemembered(remembered);
+            var warnings = new List<string>();
 
             // An explicitly selected JSON file owns its current names and membership.
             // Reload it on every opening, including additions made since the last run.
@@ -23,7 +37,7 @@ namespace GorillaStudio.NameFolders
                 string currentRoot = RosterAccess.RootFor(discoveryRoot);
                 string table = currentRoot == null ? CommonRosterTable(remembered)
                     : CharacterFolders.FindDiscoveryTable(currentRoot);
-                List<RosterEntry> entries = ReadCurrent(rosterFile, remembered, table);
+                List<RosterEntry> entries = ReadCurrent(rosterFile, remembered, table, quick, warnings);
                 if (string.Equals(Path.GetExtension(rosterFile), ".jsfb", StringComparison.OrdinalIgnoreCase))
                     table = Path.GetFullPath(rosterFile);
                 else
@@ -31,7 +45,7 @@ namespace GorillaStudio.NameFolders
                     BindWithoutDiscovery(entries, remembered);
                     table = CommonRosterTable(entries);
                 }
-                return Session(entries, table);
+                return Session(entries, table, warnings);
             }
 
             // A missing remembered file is recoverable. A discovered but damaged table
@@ -39,7 +53,7 @@ namespace GorillaStudio.NameFolders
             string root = RosterAccess.RootFor(discoveryRoot);
             if (root != null)
             {
-                RosterSessionData session = RosterSession.Open(root, remembered);
+                RosterSessionData session = quick ? RosterSession.OpenQuick(root, remembered) : RosterSession.Open(root, remembered);
                 session.ChooseCharacterFolder = true;
                 return session;
             }
@@ -48,7 +62,7 @@ namespace GorillaStudio.NameFolders
                 return Session(remembered, CommonRosterTable(remembered));
 
             if (!string.IsNullOrWhiteSpace(bundledRosterFile) && File.Exists(bundledRosterFile))
-                return Session(ReadCurrent(bundledRosterFile, remembered, null), null);
+                return Session(ReadCurrent(bundledRosterFile, remembered, null, quick, warnings), null, warnings);
 
             // The empty picker can offer JSON/JSFB import without requiring the user
             // to locate a character model before they can even choose a wrestler.
@@ -73,9 +87,10 @@ namespace GorillaStudio.NameFolders
             return common;
         }
 
-        private static List<RosterEntry> ReadCurrent(string file, List<RosterEntry> saved, string table)
+        private static List<RosterEntry> ReadCurrent(string file, List<RosterEntry> saved, string table,
+            bool quick = false, ICollection<string> warnings = null)
         {
-            try { return RosterSession.Refresh(file, saved, table); }
+            try { return quick ? RosterSession.RefreshQuick(file, saved, table, warnings) : RosterSession.Refresh(file, saved, table); }
             catch (Exception error) when (error is InvalidDataException || error is IOException || error is UnauthorizedAccessException
                 || error is ArgumentException || error is NotSupportedException)
             {
@@ -121,9 +136,10 @@ namespace GorillaStudio.NameFolders
             };
         }
 
-        private static RosterSessionData Session(List<RosterEntry> entries, string table)
+        private static RosterSessionData Session(List<RosterEntry> entries, string table, IEnumerable<string> warnings = null)
         {
-            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = true, DiscoveryTable = table };
+            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = true, DiscoveryTable = table,
+                Warnings = warnings == null ? new List<string>() : warnings.ToList() };
         }
     }
 }

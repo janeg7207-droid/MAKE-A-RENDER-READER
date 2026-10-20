@@ -260,6 +260,81 @@ internal static class Program
                 Fixture missing = DemonFixture("missing-sdb", false); File.Delete(Path.Combine(missing.Root, "Sdb", "ENG.sdb"));
                 DiscoveryAttireCatalogResult result = Find(missing, 626);
                 Equal(2, result.Sources.Count); Equal(true, result.References.All(item => !string.IsNullOrWhiteSpace(item.DisplayName)));
+                Equal(true, result.References.All(item => item.Issue == null && item.Warning.Contains("was not found")));
+                Equal(true, result.Issues.Any(issue => issue.Contains("missing attire labels", StringComparison.OrdinalIgnoreCase)
+                    || issue.Contains("Missing labels use Attire N")));
+            });
+            Check("One corrupt Demon label preserves both exact active models and the default costume", () => {
+                Fixture damaged = DemonFixture("one-bad-label", false);
+                List<DiscoveryAttireReference> before = DiscoveryAttireCatalog.ReadReferences(damaged.Table, 626);
+                DamageSdbRow(damaged, 100, (bytes, row) => Put32(bytes, row, 8));
+                DiscoveryAttireCatalogResult result = Find(damaged, 626);
+                Equal(2, result.References.Count); Equal(2, result.Sources.Count);
+                Equal("Attire 1", result.References.Single(item => item.CostumeIndex == 0).DisplayName);
+                Equal("CARNAGE", result.References.Single(item => item.CostumeIndex == 1).DisplayName);
+                Equal(true, result.References.All(item => item.Issue == null));
+                Equal(true, result.References.All(item => item.Warning.Contains("1 malformed string row(s) of 5")));
+                Equal(true, result.Sources.All(item => item.Warning.Contains("key 0x00000064")));
+                Equal(true, result.Issues.Any(issue => issue.Contains("1 malformed string row(s) of 5")));
+                Equal(ReferenceIdentity(before), ReferenceIdentity(result.References));
+            });
+            Check("An unrelated invalid profile-name string never removes valid attire labels", () => {
+                Fixture damaged = DemonFixture("unrelated-bad-label", false);
+                DamageSdbRow(damaged, 626, (bytes, row) => Put32(bytes, row, uint.MaxValue));
+                DiscoveryAttireCatalogResult result = Find(damaged, 626);
+                Equal(2, result.Sources.Count); Equal("\"DEMON\" FINN BÁLOR", result.Sources.Single(item => item.CostumeIndex == 0).DisplayName);
+                Equal("CARNAGE", result.Sources.Single(item => item.CostumeIndex == 1).DisplayName);
+                Equal(true, result.References.All(item => item.Issue == null));
+                Equal(true, result.Issues.Any(issue => issue.Contains("1 malformed string row(s) of 5")));
+            });
+            Check("Missing optional label keys preserve readable neighbors and use Attire N only for that label", () => {
+                Fixture missing = DemonFixture("missing-label-key", false);
+                string sdb = Path.Combine(missing.Root, "Sdb", "ENG.sdb");
+                Dictionary<uint, string> labels = DiscoveryProfiles.ReadStrings(sdb); labels.Remove(101); WriteSdb(sdb, labels);
+                DiscoveryAttireCatalogResult result = Find(missing, 626);
+                Equal(2, result.Sources.Count);
+                Equal("\"DEMON\" FINN BÁLOR", result.Sources.Single(item => item.CostumeIndex == 0).DisplayName);
+                Equal("Attire 2", result.Sources.Single(item => item.CostumeIndex == 1).DisplayName);
+                Equal(1, result.Sources.Single(item => item.IsDefault).CostumeIndex);
+                Equal(true, result.References.All(item => item.Issue == null));
+            });
+            Check("Invalid UTF-8 and missing label terminators remain nonfatal to exact Demon attire mappings", () => {
+                foreach (string defect in new[] { "utf8", "terminator" })
+                {
+                    Fixture damaged = DemonFixture("bad-label-" + defect, false);
+                    DamageSdbRow(damaged, 101, (bytes, row) => {
+                        int offset = checked((int)BitConverter.ToUInt32(bytes, row));
+                        int length = checked((int)BitConverter.ToUInt32(bytes, row + 4));
+                        if (defect == "utf8") { bytes[offset] = 0xC3; bytes[offset + 1] = 0x28; }
+                        else bytes[offset + length] = 1;
+                    });
+                    DiscoveryAttireCatalogResult result = Find(damaged, 626);
+                    Equal(2, result.Sources.Count); Equal(true, result.References.All(item => item.Issue == null));
+                    Equal("Attire 2", result.Sources.Single(item => item.CostumeIndex == 1).DisplayName);
+                    Equal("\"DEMON\" FINN BÁLOR", result.Sources.Single(item => item.CostumeIndex == 0).DisplayName);
+                    Equal(true, result.Issues.Any(issue => issue.Contains(defect == "utf8" ? "UTF-8" : "terminator")));
+                }
+            });
+            Check("An unreadable optional SDB header retains both active Demon costume references", () => {
+                Fixture damaged = DemonFixture("bad-label-header", false);
+                List<DiscoveryAttireReference> before = DiscoveryAttireCatalog.ReadReferences(damaged.Table, 626);
+                File.WriteAllBytes(Path.Combine(damaged.Root, "Sdb", "ENG.sdb"), new byte[4]);
+                DiscoveryAttireCatalogResult result = Find(damaged, 626);
+                Equal(2, result.Sources.Count); Equal("Attire 1,Attire 2", string.Join(",", result.References.Select(item => item.DisplayName)));
+                Equal(ReferenceIdentity(before), ReferenceIdentity(result.References));
+                Equal(true, result.References.All(item => item.Issue == null && item.Warning.Contains("Header is truncated")));
+                Equal(true, result.Issues.Any(issue => issue.Contains("Header is truncated")));
+            });
+            Check("Conflicting localized names never choose an arbitrary label or alter exact attire identities", () => {
+                Fixture damaged = DemonFixture("conflicting-labels", false);
+                List<DiscoveryAttireReference> before = DiscoveryAttireCatalog.ReadReferences(damaged.Table, 626);
+                DamageSdbRow(damaged, 102, (bytes, row) => Put32(bytes, row + 8, 100));
+                DiscoveryAttireCatalogResult result = Find(damaged, 626);
+                Equal(2, result.Sources.Count); Equal("Attire 1", result.References.Single(item => item.CostumeIndex == 0).DisplayName);
+                Equal("CARNAGE", result.References.Single(item => item.CostumeIndex == 1).DisplayName);
+                Equal(ReferenceIdentity(before), ReferenceIdentity(result.References));
+                Equal(true, result.References.All(item => item.Issue == null));
+                Equal(true, result.Issues.Any(issue => issue.Contains("1 conflicting localization key(s)")));
             });
             ActualData(args.Length == 0 ? "/workspace/discovery-work/discovery_data" : args[0]);
             Console.WriteLine((failed == 0 ? "PASS " : "FAIL ") + passed + " Discovery attire catalog checks" + (failed == 0 ? "" : "; " + failed + " failed"));
@@ -328,6 +403,22 @@ internal static class Program
     private static ulong Hash(string path) { return CharacterMappingReader.ModelPathHash(path); }
     private static DiscoveryAttireCatalogResult Find(Fixture fixture, int id) { return DiscoveryAttireCatalog.Find(new RosterEntry { Id = id, RosterTable = fixture.Table, SourceId = 576 }, fixture.Candidates, fixture.Table, CancellationToken.None); }
     private static string SourceIdentity(DiscoveryAttireSource source) { return Path.GetFullPath(source.SourceFolder).TrimEnd(Path.DirectorySeparatorChar) + "|" + source.RelativePath; }
+    private static string ReferenceIdentity(IEnumerable<DiscoveryAttireReference> references)
+    { return string.Join(";", references.Select(item => item.LogicalId + ":" + item.MappingId + ":" + item.CostumeKey + ":" + item.CostumeIndex + ":" + item.ModelHash + ":" + item.IsDefault)); }
+    private static void DamageSdbRow(Fixture fixture, uint key, Action<byte[], int> damage)
+    {
+        string path = Path.Combine(fixture.Root, "Sdb", "ENG.sdb"); byte[] bytes = File.ReadAllBytes(path);
+        uint count = BitConverter.ToUInt32(bytes, 4);
+        for (int index = 0; index < count; index++)
+        {
+            int row = 8 + index * 12;
+            if (BitConverter.ToUInt32(bytes, row + 8) != key) continue;
+            damage(bytes, row); File.WriteAllBytes(path, bytes); return;
+        }
+        throw new InvalidOperationException("The fixture has no requested label key " + key);
+    }
+    private static void Put32(byte[] bytes, int position, uint value)
+    { for (int index = 0; index < 4; index++) bytes[position + index] = (byte)(value >> (index * 8)); }
     private static void AssertContainedSource(DiscoveryAttireSource source)
     {
         Equal(false, string.IsNullOrWhiteSpace(source.RelativePath)); Equal(false, Path.IsPathRooted(source.RelativePath));

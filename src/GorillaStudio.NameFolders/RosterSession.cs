@@ -11,6 +11,7 @@ namespace GorillaStudio.NameFolders
         public List<RosterEntry> Entries;
         public bool ChooseCharacterFolder;
         public string DiscoveryTable;
+        public List<string> Warnings = new List<string>();
     }
 
     public static class RosterSession
@@ -40,15 +41,37 @@ namespace GorillaStudio.NameFolders
 
         public static List<RosterEntry> Refresh(string rosterFile, IEnumerable<RosterEntry> saved, string rosterTable = null)
         {
-            List<RosterEntry> entries = RosterImport.LoadFile(rosterFile);
-            var remembered = saved == null ? new List<RosterEntry>() : saved.Where(e => e != null).ToList();
+            return RefreshCore(rosterFile, saved, rosterTable, false, null);
+        }
+
+        public static List<RosterEntry> RefreshQuick(string rosterFile, IEnumerable<RosterEntry> saved,
+            string rosterTable = null, ICollection<string> warnings = null)
+        {
+            return RefreshCore(rosterFile, saved, rosterTable, true, warnings);
+        }
+
+        private static List<RosterEntry> RefreshCore(string rosterFile, IEnumerable<RosterEntry> saved,
+            string rosterTable, bool quick, ICollection<string> warnings)
+        {
+            List<RosterEntry> entries = quick ? RosterImport.LoadFileQuick(rosterFile, warnings) : RosterImport.LoadFile(rosterFile);
+            var remembered = quick ? QuickRemembered(saved) : saved == null ? new List<RosterEntry>() : saved.Where(e => e != null).ToList();
             if (string.Equals(Path.GetExtension(rosterFile), ".jsfb", StringComparison.OrdinalIgnoreCase))
-                return MergeDiscovery(entries, Path.GetFullPath(rosterFile), remembered);
+                return MergeDiscovery(entries, Path.GetFullPath(rosterFile), remembered, quick);
             BindImportedModels(entries, remembered, rosterTable);
             return entries;
         }
 
         public static RosterSessionData Open(string source, IEnumerable<RosterEntry> saved)
+        {
+            return OpenCore(source, saved, false);
+        }
+
+        public static RosterSessionData OpenQuick(string source, IEnumerable<RosterEntry> saved)
+        {
+            return OpenCore(source, saved, true);
+        }
+
+        private static RosterSessionData OpenCore(string source, IEnumerable<RosterEntry> saved, bool quick)
         {
             if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source))
                 throw new DirectoryNotFoundException("Choose an existing wrestler or Discovery folder.");
@@ -61,15 +84,18 @@ namespace GorillaStudio.NameFolders
                     table = CharacterFolders.FindDiscoveryTable(parent.FullName);
             }
 
-            var remembered = saved == null ? new List<RosterEntry>() : saved.Where(e => e != null).ToList();
+            var remembered = quick ? QuickRemembered(saved) : saved == null ? new List<RosterEntry>() : saved.Where(e => e != null).ToList();
             if (table == null)
                 return new RosterSessionData { Entries = remembered, ChooseCharacterFolder = false, DiscoveryTable = null };
 
-            List<RosterEntry> entries = MergeDiscovery(RosterImport.LoadFile(table), table, remembered);
-            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = chooseCharacterFolder, DiscoveryTable = Path.GetFullPath(table) };
+            var warnings = new List<string>();
+            List<RosterEntry> imported = quick ? RosterImport.LoadFileQuick(table, warnings) : RosterImport.LoadFile(table);
+            List<RosterEntry> entries = MergeDiscovery(imported, table, remembered, quick);
+            return new RosterSessionData { Entries = entries, ChooseCharacterFolder = chooseCharacterFolder,
+                DiscoveryTable = Path.GetFullPath(table), Warnings = warnings };
         }
 
-        private static List<RosterEntry> MergeDiscovery(List<RosterEntry> entries, string table, List<RosterEntry> remembered)
+        private static List<RosterEntry> MergeDiscovery(List<RosterEntry> entries, string table, List<RosterEntry> remembered, bool quick = false)
         {
             var identities = new HashSet<string>(entries.Select(Identity), StringComparer.OrdinalIgnoreCase);
             var freshById = entries.Where(e => e.Id > 0).GroupBy(e => e.Id).ToDictionary(g => g.Key, g => g.ToList());
@@ -115,7 +141,7 @@ namespace GorillaStudio.NameFolders
                         RosterEntry binding = bindings[0];
                         fresh.Folder = binding.Folder;
                         fresh.SourceId = binding.SourceId > 0 ? binding.SourceId
-                            : CharacterFolders.PhysicalId(binding.Folder) ?? fresh.SourceId;
+                            : quick ? fresh.SourceId : CharacterFolders.PhysicalId(binding.Folder) ?? fresh.SourceId;
                         fresh.IsMod = binding.IsMod;
                         fresh.Source = binding.Source;
                     }
@@ -124,6 +150,28 @@ namespace GorillaStudio.NameFolders
                 if (identities.Add(Identity(entry))) entries.Add(entry);
             }
             return entries;
+        }
+
+        // Inferred model paths are evidence from an older inventory. A quick
+        // metadata read must not present them as current after profiles/mappings
+        // change. Keep row membership, and let the fresh background index bind
+        // models again. Explicit user choices still require the same roster/name.
+        internal static List<RosterEntry> QuickRemembered(IEnumerable<RosterEntry> saved)
+        {
+            var result = new List<RosterEntry>();
+            foreach (RosterEntry entry in saved ?? Enumerable.Empty<RosterEntry>())
+            {
+                if (entry == null) continue;
+                bool chosen = entry.Source != null && entry.Source.StartsWith("Chosen", StringComparison.OrdinalIgnoreCase);
+                result.Add(new RosterEntry { Id = entry.Id, Name = entry.Name, RosterTable = entry.RosterTable,
+                    Folder = chosen ? entry.Folder : null, SourceId = chosen ? entry.SourceId : 0,
+                    // A stock association is derived from the previous mapping,
+                    // even when the local folder was explicitly chosen. Fresh
+                    // metadata supplies it; it must not bypass a renamed slot's
+                    // name check when importing JSON.
+                    StockFolder = null, Source = entry.Source, IsMod = chosen && entry.IsMod });
+            }
+            return result;
         }
 
         public static void RememberSelection(RosterEntry entry, string selectedFolder, bool chooseCharacterFolder)

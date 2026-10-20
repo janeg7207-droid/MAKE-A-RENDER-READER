@@ -97,7 +97,7 @@ namespace GorillaStudio.NameFolders
 
         private static bool AutomaticTauntContextChanging(Window window)
         {
-            if (!window.IsLoaded || rosterWindowsBusy.Contains(window) || pendingRosterSelection != null
+            if (!window.IsLoaded || DiscoveryDataRenderBlocked(window) || rosterWindowsBusy.Contains(window) || pendingRosterSelection != null
                 || combinedGameSetups.Contains(window) || batchWindows.ContainsKey(window)) return true;
             var body = window.GetType().GetField("BodyGrid", InstanceMembers)?.GetValue(window) as UIElement;
             return body != null && !body.IsEnabled;

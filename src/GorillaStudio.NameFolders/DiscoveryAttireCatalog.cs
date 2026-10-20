@@ -84,7 +84,8 @@ namespace GorillaStudio.NameFolders
             }
             if (defaultKey == 0 && active.Count > 0) defaultKey = active[0].Key;
             string root = DiscoveryProfiles.DataRoot(fullTable);
-            Dictionary<uint, string> strings = ReadLabels(root, token);
+            var labelWarnings = new List<string>();
+            Dictionary<uint, string> strings = ReadLabels(root, token, labelWarnings);
             string characters = Child(root, "Characters", true);
             string mappingPath = characters == null ? null : Child(characters, "CharacterMapping.jsfb", false);
             string costumesPath = characters == null ? null : Child(characters, "CostumesTable.jsfb", false);
@@ -99,7 +100,8 @@ namespace GorillaStudio.NameFolders
                 string label;
                 strings.TryGetValue(item.LabelKey, out label);
                 var reference = new DiscoveryAttireReference { LogicalId = logicalId, CostumeKey = item.Key,
-                    DisplayName = CleanLabel(label), IsDefault = item.Key == defaultKey };
+                    DisplayName = CleanLabel(label), IsDefault = item.Key == defaultKey,
+                    Warning = labelWarnings.Count == 0 ? null : string.Join(Environment.NewLine, labelWarnings) };
                 if (reference.DisplayName == null) reference.DisplayName = "Attire " + (result.Count + 1).ToString(CultureInfo.InvariantCulture);
                 List<CostumeRecord> matchingCostumes = costumes.Where(row => row.Key == item.Key).ToList();
                 // An active owner+key pair remains explicit evidence when a mod
@@ -119,9 +121,9 @@ namespace GorillaStudio.NameFolders
                     reference.CostumeIndex = choice.CostumeIndex;
                     reference.ModelHash = choice.ModelHash;
                     if (matchingCostumes.Count == 0)
-                        reference.Warning = Describe(reference) + (costumesPath == null
+                        reference.Warning = AppendWarning(reference.Warning, Describe(reference) + (costumesPath == null
                             ? ": CostumesTable.jsfb is missing; using its unique explicit owner and costume-key mapping."
-                            : ": its CostumesTable.jsfb row is missing; using its unique explicit owner and costume-key mapping.");
+                            : ": its CostumesTable.jsfb row is missing; using its unique explicit owner and costume-key mapping."));
                 }
                 else reference.Issue = Describe(reference) + (choices.Count > 1
                     ? ": multiple different costume mappings; choose a model source explicitly."
@@ -246,11 +248,27 @@ namespace GorillaStudio.NameFolders
             return result;
         }
 
-        private static Dictionary<uint, string> ReadLabels(string root, CancellationToken token)
+        private static Dictionary<uint, string> ReadLabels(string root, CancellationToken token, ICollection<string> warnings)
         {
             token.ThrowIfCancellationRequested();
-            string path = DiscoveryProfiles.FindEnglishSdb(root);
-            Dictionary<uint, string> result = path == null ? new Dictionary<uint, string>() : DiscoveryProfiles.ReadStrings(path);
+            string path;
+            try { path = DiscoveryProfiles.FindEnglishSdb(root); }
+            catch (Exception error) when (Unreadable(error))
+            {
+                warnings.Add("Discovery attire labels could not be inspected: " + error.Message
+                    + " Missing labels use Attire N; active costume and model references remain unchanged.");
+                return new Dictionary<uint, string>();
+            }
+            var result = new Dictionary<uint, string>();
+            if (path == null)
+                warnings.Add("Discovery attire labels: Sdb/ENG.sdb was not found. Missing labels use Attire N; active costume and model references remain unchanged.");
+            else
+            {
+                var diagnostics = new List<string>();
+                result = DiscoveryProfiles.ReadStrings(path, diagnostics);
+                foreach (string diagnostic in diagnostics)
+                    warnings.Add(diagnostic + " Active attire references still use exact costume keys and model hashes; missing attire labels use Attire N.");
+            }
             token.ThrowIfCancellationRequested();
             return result;
         }
@@ -381,6 +399,8 @@ namespace GorillaStudio.NameFolders
         {
             if (!result.Issues.Contains(issue)) result.Issues.Add(issue);
         }
+        private static string AppendWarning(string existing, string warning)
+        { return string.IsNullOrWhiteSpace(existing) ? warning : existing + Environment.NewLine + warning; }
         private static bool Unreadable(Exception error)
         {
             return (error is IOException && !(error is InvalidDataException)) || error is UnauthorizedAccessException || error is SecurityException;

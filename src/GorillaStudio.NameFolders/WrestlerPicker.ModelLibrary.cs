@@ -78,7 +78,7 @@ namespace GorillaStudio.NameFolders
         private List<string> SearchRoots()
         {
             var roots = new List<string>(modelRoots);
-            roots.AddRange(Entries.Where(entry => Directory.Exists(entry.Folder)).Select(entry => entry.Folder));
+            roots.AddRange(Entries.Where(entry => !string.IsNullOrWhiteSpace(entry.Folder)).Select(entry => entry.Folder));
             string data = currentRosterTable == null ? sourceFolder : DiscoveryProfiles.DataRoot(currentRosterTable);
             roots.Add(data);
             DirectoryInfo parent = Directory.GetParent(data);
@@ -89,9 +89,7 @@ namespace GorillaStudio.NameFolders
                 roots.Add(Path.Combine(parent.FullName, "BakeMe", "Characters"));
                 roots.Add(Path.Combine(parent.FullName, "discovery_data", "Characters"));
             }
-            var unique = roots.Where(Directory.Exists).Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            return unique.Where(path => !unique.Any(other => !string.Equals(path, other, StringComparison.OrdinalIgnoreCase)
-                && path.StartsWith(other.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))).ToList();
+            return roots;
         }
 
         private async Task RefreshModelInventoryAsync()
@@ -107,43 +105,27 @@ namespace GorillaStudio.NameFolders
                 List<string> roots = SearchRoots();
                 List<RosterEntry> scanEntries = Entries;
                 string scanTable = currentRosterTable;
-                Dictionary<RosterEntry, List<ModelCandidate>> mappedChoices = null;
+                ModelInventoryBindingStage staged = ModelInventoryBindingStage.Capture(scanEntries, scanTable);
                 List<ModelCandidate> found = await Task.Run(() =>
                 {
                     var result = new List<ModelCandidate>();
                     var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (string root in roots)
+                    foreach (string root in ModelInventoryBindingStage.ExistingRoots(roots))
                     {
                         cancellation.Token.ThrowIfCancellationRequested();
                         foreach (ModelCandidate model in ModelLibrary.Scan(root, cancellation.Token))
                             if (seen.Add(model.Folder)) result.Add(model);
                     }
-                    mappedChoices = MappedModelLibrary.FindMatches(scanEntries, result, scanTable, cancellation.Token);
+                    staged.Prepare(result, cancellation.Token);
                     return result;
                 }, cancellation.Token);
-                if (IsDisposed || version != modelScanVersion) return;
+                if (IsDisposed || cancellation.IsCancellationRequested || version != modelScanVersion) return;
+                Dictionary<RosterEntry, List<ModelCandidate>> choices;
+                HashSet<string> ready;
+                if (!staged.Commit(Entries, currentRosterTable, out choices, out ready)) return;
                 modelInventory = found;
-                foreach (var mapping in mappedChoices)
-                {
-                    if (Directory.Exists(mapping.Key.Folder) || mapping.Value.Count != 1) continue;
-                    ModelCandidate model = mapping.Value[0];
-                    mapping.Key.Folder = model.Folder;
-                    if (model.SourceId > 0) mapping.Key.SourceId = model.SourceId;
-                    mapping.Key.Source = "Character mapping";
-                    mapping.Key.IsMod = true;
-                }
-                // A verified ambiguous mapping must not be silently overridden by a
-                // convenient display-name match or stock-body fallback.
-                List<RosterEntry> bindable = Entries.Where(entry => Directory.Exists(entry.Folder)
-                    || !mappedChoices.ContainsKey(entry)).ToList();
-                ModelLibraryBindingResult binding = ModelLibraryBinding.Apply(bindable, found, currentRosterTable, false);
-                ModelLibraryBinding.AddUnassigned(Entries, found, currentRosterTable);
-                modelChoices = binding.Choices;
-                foreach (var mapping in mappedChoices)
-                    if (!Directory.Exists(mapping.Key.Folder) && mapping.Value.Count > 1) modelChoices[mapping.Key] = mapping.Value;
-                readyModelFolders = new HashSet<string>(Entries.Where(entry => Directory.Exists(entry.Folder)
-                    && found.Any(model => SameFolderOrChild(model.Folder, entry.Folder))).Select(entry => Path.GetFullPath(entry.Folder)),
-                    StringComparer.OrdinalIgnoreCase);
+                modelChoices = choices;
+                readyModelFolders = ready;
                 RosterEntry selected = wrestlers.SelectedItems.Count == 1 ? (RosterEntry)wrestlers.SelectedItems[0].Tag : null;
                 RefreshList(selected);
                 modelsInfo.Text = found.Count + " model folders indexed · locations remembered";
@@ -235,7 +217,11 @@ namespace GorillaStudio.NameFolders
 
         private bool HasIndexedModel(string folder)
         {
-            return Directory.Exists(folder) && readyModelFolders.Contains(Path.GetFullPath(folder));
+            if (string.IsNullOrWhiteSpace(folder)) return false;
+            string path = Path.GetFullPath(folder);
+            if (path.Length != Path.GetPathRoot(path).Length)
+                path = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return readyModelFolders.Contains(path);
         }
 
         private static bool SameFolderOrChild(string candidate, string parent)

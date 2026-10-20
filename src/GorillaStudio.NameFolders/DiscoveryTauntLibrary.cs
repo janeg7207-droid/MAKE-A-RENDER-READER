@@ -53,6 +53,8 @@ namespace GorillaStudio.NameFolders
         public string VerifiedPackHash { get; internal set; }
         public int ArchiveCount { get; internal set; }
         public bool ArchivesSearched { get; internal set; }
+        public bool ArchiveLookupPending { get; internal set; }
+        public long SourceRevision { get; internal set; }
         public string ArchiveStatus { get; internal set; }
         public bool ScanIncomplete { get; internal set; }
         public bool AnimationRootFound { get; internal set; }
@@ -90,6 +92,70 @@ namespace GorillaStudio.NameFolders
                 bool current = Table == null || (TableStamp.IsCurrent() && Assets.IsCurrent(cancellationToken));
                 return current && (ExternalRevision == null || ExternalRevision() == CapturedRevision);
             }
+        }
+
+        internal static Preparation ForkPreparation(Preparation prepared)
+        {
+            if (prepared == null) throw new ArgumentNullException(nameof(prepared));
+            // Source snapshots are read-only. A new preparation owns a distinct
+            // publication root while keeping the exact same lookup lease.
+            return new Preparation {
+                ApplicationRoot = prepared.ApplicationRoot, SelectedRoot = prepared.SelectedRoot,
+                ManifestPath = prepared.ManifestPath, ManifestText = prepared.ManifestText, ManifestHash = prepared.ManifestHash,
+                ManifestStamp = prepared.ManifestStamp, Table = prepared.Table, TableStamp = prepared.TableStamp,
+                Definitions = prepared.Definitions, Assets = prepared.Assets, Records = prepared.Records,
+                ExternalRevision = prepared.ExternalRevision, CapturedRevision = prepared.CapturedRevision,
+                DataRoot = prepared.DataRoot, Missing = prepared.Missing
+            };
+        }
+
+        internal static DiscoveryTauntImport WithArchiveDiagnostics(DiscoveryTauntImport available,
+            DiscoveryMotionFallbacks fallbacks, bool baseScanIncomplete)
+        {
+            if (available == null) throw new ArgumentNullException(nameof(available));
+            if (fallbacks == null) throw new ArgumentNullException(nameof(fallbacks));
+            var result = new DiscoveryTauntImport {
+                Root = available.Root, Library = available.Library, Taunts = available.Taunts,
+                Definitions = available.Definitions, Imported = available.Imported, Available = available.Available,
+                Missing = available.Missing, Unsupported = available.Unsupported, ReadFailures = available.ReadFailures,
+                CacheFailures = available.CacheFailures, ArchiveImported = available.ArchiveImported,
+                VerifiedImported = available.VerifiedImported, VerifiedPackHash = available.VerifiedPackHash,
+                ArchiveCount = fallbacks.ArchiveCount, ArchivesSearched = fallbacks.ArchivesSearched,
+                ArchiveStatus = fallbacks.Status, ArchiveLookupPending = false, SourceRevision = available.SourceRevision,
+                ScanIncomplete = baseScanIncomplete || fallbacks.Incomplete,
+                AnimationRootFound = available.AnimationRootFound, HasLinkedSources = available.HasLinkedSources,
+                SearchRoots = available.SearchRoots == null ? new string[0] : available.SearchRoots.ToArray()
+            };
+            const string pendingWarning = "Additional animation archive lookup is pending; missing clips may become available when it finishes.";
+            foreach (string warning in available.Warnings.Concat(fallbacks.Warnings))
+                if (!string.Equals(warning, pendingWarning, StringComparison.Ordinal)
+                    && !result.Warnings.Contains(warning)) result.Warnings.Add(warning);
+            foreach (DiscoveryUnavailableTaunt item in available.Unavailable)
+            {
+                var copy = new DiscoveryUnavailableTaunt { Id = item.Id, Variant = item.Variant, Clip = item.Clip,
+                    Name = item.Name, Names = item.Names == null ? new List<string>() : new List<string>(item.Names),
+                    Kind = item.Kind, Reason = item.Reason };
+                if (item.Kind == DiscoveryTauntUnavailableKind.MissingAnimation || item.Kind == DiscoveryTauntUnavailableKind.ScanIncomplete)
+                {
+                    copy.Kind = result.ScanIncomplete ? DiscoveryTauntUnavailableKind.ScanIncomplete : DiscoveryTauntUnavailableKind.MissingAnimation;
+                    const string notSearched = " Installed-game CAK archives were not searched.";
+                    string reason = copy.Reason ?? "Animation clip " + copy.Clip + " was not located.";
+                    if (reason.EndsWith(notSearched, StringComparison.Ordinal)) reason = reason.Substring(0, reason.Length - notSearched.Length);
+                    string issue;
+                    if (fallbacks.Issues.TryGetValue(copy.Clip, out issue) && !string.IsNullOrWhiteSpace(issue))
+                    { if (!reason.Contains(issue)) reason += " " + issue; }
+                    else if (fallbacks.ArchivesSearched)
+                    {
+                        const string noMatch = " No unambiguous matching motion was recovered from the available archive search.";
+                        if (!reason.Contains(noMatch)) reason += noMatch;
+                        if (fallbacks.Incomplete) reason += " The archive search did not finish; see its warnings.";
+                    }
+                    else reason += notSearched;
+                    copy.Reason = reason;
+                }
+                result.Unavailable.Add(copy);
+            }
+            return result;
         }
 
         internal sealed class SourceStamp
@@ -193,13 +259,26 @@ namespace GorillaStudio.NameFolders
         {
             // Retain the historical root for direct/synchronous callers. The
             // interactive prepared-refresh path uses its own revision below.
-            return BuildPreparation(Prepare(applicationRoot, discoveryRoot, CancellationToken.None), storageRoot, fallbacks, null, true, false);
+            return BuildPreparation(Prepare(applicationRoot, discoveryRoot, CancellationToken.None), storageRoot, fallbacks, null, true, false, CancellationToken.None);
+        }
+
+        public static DiscoveryTauntImport Build(string applicationRoot, string storageRoot, string discoveryRoot,
+            DiscoveryMotionFallbacks fallbacks, CancellationToken cancellationToken)
+        {
+            return BuildPreparation(Prepare(applicationRoot, discoveryRoot, cancellationToken), storageRoot,
+                fallbacks, null, true, true, cancellationToken);
         }
 
         public static DiscoveryTauntImport BuildPrepared(Preparation prepared, string storageRoot,
             DiscoveryMotionFallbacks fallbacks = null, Action<string> progress = null)
         {
-            return BuildPreparation(prepared, storageRoot, fallbacks, progress, true, true);
+            return BuildPrepared(prepared, storageRoot, fallbacks, progress, CancellationToken.None);
+        }
+
+        public static DiscoveryTauntImport BuildPrepared(Preparation prepared, string storageRoot,
+            DiscoveryMotionFallbacks fallbacks, Action<string> progress, CancellationToken cancellationToken)
+        {
+            return BuildPreparation(prepared, storageRoot, fallbacks, progress, true, true, cancellationToken);
         }
 
         // The refresh bridge has just validated this snapshot while cancellation
@@ -208,14 +287,21 @@ namespace GorillaStudio.NameFolders
         internal static DiscoveryTauntImport BuildCurrentPreparation(Preparation prepared, string storageRoot,
             DiscoveryMotionFallbacks fallbacks, Action<string> progress)
         {
-            return BuildPreparation(prepared, storageRoot, fallbacks, progress, false, true);
+            return BuildCurrentPreparation(prepared, storageRoot, fallbacks, progress, CancellationToken.None);
+        }
+
+        internal static DiscoveryTauntImport BuildCurrentPreparation(Preparation prepared, string storageRoot,
+            DiscoveryMotionFallbacks fallbacks, Action<string> progress, CancellationToken cancellationToken)
+        {
+            return BuildPreparation(prepared, storageRoot, fallbacks, progress, false, true, cancellationToken);
         }
 
         private static DiscoveryTauntImport BuildPreparation(Preparation prepared, string storageRoot,
-            DiscoveryMotionFallbacks fallbacks, Action<string> progress, bool validate, bool separateOverlay)
+            DiscoveryMotionFallbacks fallbacks, Action<string> progress, bool validate, bool separateOverlay, CancellationToken cancellationToken)
         {
             if (prepared == null) throw new ArgumentNullException(nameof(prepared));
-            if (validate && !prepared.IsCurrent(CancellationToken.None))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (validate && !prepared.IsCurrent(cancellationToken))
                 throw new DiscoveryTauntSourcesChangedException();
             string applicationRoot = prepared.ApplicationRoot;
             string baseData = Path.Combine(applicationRoot, "data");
@@ -227,12 +313,19 @@ namespace GorillaStudio.NameFolders
             object raw;
             if (!manifest.TryGetValue("taunts", out raw) || !(raw is IEnumerable))
                 throw new InvalidDataException("The bundled taunt library has no animation list.");
-            var entries = ((IEnumerable)raw).Cast<object>().Select(value => value as Dictionary<string, object>).ToList();
-            if (entries.Any(value => value == null)) throw new InvalidDataException("A bundled taunt entry is invalid.");
-            var result = new DiscoveryTauntImport { Library = baseLibrary, Taunts = entries, Available = entries.Count };
+            var entries = new List<Dictionary<string, object>>();
+            foreach (object value in (IEnumerable)raw)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var entry = value as Dictionary<string, object>;
+                if (entry == null) throw new InvalidDataException("A bundled taunt entry is invalid.");
+                entries.Add(entry);
+            }
+            var result = new DiscoveryTauntImport { Library = baseLibrary, Taunts = entries, Available = entries.Count,
+                SourceRevision = prepared.CapturedRevision };
             result.VerifiedPackHash = prepared.Records.Sha256;
             string table = prepared.Table;
-            if (table == null) return result;
+            if (table == null) { cancellationToken.ThrowIfCancellationRequested(); return result; }
 
             string sourceRoot = prepared.DataRoot;
             List<DiscoveryTaunt> definitions = prepared.Definitions;
@@ -255,27 +348,33 @@ namespace GorillaStudio.NameFolders
             // Never mutate the active window's previous engine data while an
             // interactive refresh is still being checked for source changes.
             // A failed/stale attempt remains private and is never applied.
+            string revision = cancellationToken.CanBeCanceled ? Guid.NewGuid().ToString("N") : prepared.OverlayRevision;
             string overlay = Path.Combine(storageRoot, "taunt-data", identity.Substring(0, 20)
-                + (separateOverlay ? "-" + prepared.OverlayRevision.Substring(0, 12) : ""));
+                + (separateOverlay ? "-" + revision.Substring(0, 12) : ""));
             string data = Path.Combine(overlay, "data"), library = Path.Combine(data, "library"), pack = Path.Combine(data, "gamepack");
+            cancellationToken.ThrowIfCancellationRequested();
             Directory.CreateDirectory(data);
-            foreach (string directory in Directory.GetDirectories(applicationRoot))
+            foreach (string directory in Directory.EnumerateDirectories(applicationRoot))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!string.Equals(Path.GetFileName(directory), "data", StringComparison.OrdinalIgnoreCase))
                     DirectoryLinks.EnsureJunction(Path.Combine(overlay, Path.GetFileName(directory)), directory);
-            LinkChildren(baseData, data, new[] { "library", "gamepack", "caps", "start" });
-            MaterializeDirectory(Path.Combine(baseData, "caps"), Path.Combine(data, "caps"), false);
-            MaterializeDirectory(Path.Combine(baseData, "start"), Path.Combine(data, "start"), false);
+            }
+            LinkChildren(baseData, data, new[] { "library", "gamepack", "caps", "start" }, cancellationToken);
+            MaterializeDirectory(Path.Combine(baseData, "caps"), Path.Combine(data, "caps"), false, cancellationToken);
+            MaterializeDirectory(Path.Combine(baseData, "start"), Path.Combine(data, "start"), false, cancellationToken);
             Directory.CreateDirectory(library);
-            LinkChildren(baseLibrary, library, new[] { "previews_game" });
-            MaterializeDirectory(Path.Combine(baseLibrary, "previews_game"), Path.Combine(library, "previews_game"), true);
+            LinkChildren(baseLibrary, library, new[] { "previews_game" }, cancellationToken);
+            MaterializeDirectory(Path.Combine(baseLibrary, "previews_game"), Path.Combine(library, "previews_game"), true, cancellationToken);
             Directory.CreateDirectory(pack);
-            LinkChildren(Path.Combine(baseData, "gamepack"), pack, new[] { "decoded" });
+            LinkChildren(Path.Combine(baseData, "gamepack"), pack, new[] { "decoded" }, cancellationToken);
             string decoded = Path.Combine(pack, "decoded");
             Directory.CreateDirectory(decoded);
-            foreach (string original in Directory.GetFiles(Path.Combine(baseData, "gamepack", "decoded")))
+            foreach (string original in Directory.EnumerateFiles(Path.Combine(baseData, "gamepack", "decoded")))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 string target = Path.Combine(decoded, Path.GetFileName(original));
-                if (!File.Exists(target)) CopyAtomic(original, target);
+                if (!File.Exists(target)) CopyAtomic(original, target, cancellationToken);
             }
             string cache = Path.Combine(storageRoot, "motion-cache-v1");
             Directory.CreateDirectory(cache);
@@ -287,9 +386,11 @@ namespace GorillaStudio.NameFolders
             int completed = 0;
             foreach (DiscoveryTaunt definition in definitions)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (completed++ % 32 == 0)
                     progress?.Invoke("Preparing taunt " + completed.ToString(CultureInfo.InvariantCulture) + " of "
                         + definitions.Count.ToString(CultureInfo.InvariantCulture) + "…");
+                cancellationToken.ThrowIfCancellationRequested();
                 List<Dictionary<string, object>> matches;
                 byClip.TryGetValue(definition.Clip, out matches);
                 DiscoveryMotionAsset asset = assets.Find(definition.Clip);
@@ -300,6 +401,7 @@ namespace GorillaStudio.NameFolders
                 // keep a custom motion only inside a CAK must extract its active
                 // .clip/.clips into Discovery to override this stock record.
                 if (asset == null && matches == null) prepared.Records.TryRead(definition.Clip, out verified);
+                cancellationToken.ThrowIfCancellationRequested();
                 // Archive lookup fills only definitions with no extracted,
                 // bundled or verified shipped record.
                 if (asset == null && verified == null && matches == null && fallbacks != null)
@@ -343,15 +445,19 @@ namespace GorillaStudio.NameFolders
                 try
                 {
                     byte[] bytes = verified == null ? asset.Read() : verified.Bytes;
+                    cancellationToken.ThrowIfCancellationRequested();
                     string hash = Hash(bytes);
+                    cancellationToken.ThrowIfCancellationRequested();
                     string cached = Path.Combine(cache, hash + ".npz");
                     DecodedDiscoveryMotion motion = null;
                     if (!File.Exists(cached))
                     {
                         stage = MotionImportStage.Decode;
                         motion = DiscoveryMotionDecoder.Decode(bytes);
+                        cancellationToken.ThrowIfCancellationRequested();
                         stage = MotionImportStage.PrepareCache;
                         DiscoveryMotionNpz.Write(cached, motion);
+                        cancellationToken.ThrowIfCancellationRequested();
                     }
                     stage = MotionImportStage.PrepareCache;
                     int frames = BitConverter.ToInt32(bytes, 0x44);
@@ -368,10 +474,12 @@ namespace GorillaStudio.NameFolders
                             {
                                 stage = MotionImportStage.Decode;
                                 motion = DiscoveryMotionDecoder.Decode(bytes);
+                                cancellationToken.ThrowIfCancellationRequested();
                                 stage = MotionImportStage.PrepareCache;
                             }
                             originalMotion = DiscoveryMotionNpz.MatchesPoses(originalClip, motion);
-                            WriteAtomic(stockMarker, originalMotion ? "yes" : "no");
+                            cancellationToken.ThrowIfCancellationRequested();
+                            WriteAtomic(stockMarker, originalMotion ? "yes" : "no", cancellationToken);
                         }
                     }
                     string destination = Path.Combine(decoded, definition.Clip + ".npz");
@@ -379,8 +487,8 @@ namespace GorillaStudio.NameFolders
                     if (!File.Exists(destination) || !File.Exists(stamp) || File.ReadAllText(stamp) != hash ||
                         new FileInfo(destination).Length != new FileInfo(cached).Length)
                     {
-                        CopyAtomic(cached, destination);
-                        WriteAtomic(stamp, hash);
+                        CopyAtomic(cached, destination, cancellationToken);
+                        WriteAtomic(stamp, hash, cancellationToken);
                     }
                     applied.Add(definition.Clip);
                     if (fromArchive) result.ArchiveImported++;
@@ -452,20 +560,24 @@ namespace GorillaStudio.NameFolders
                     else AddUnavailable(result, definition, kind, reason);
                 }
             }
-            foreach (string stamp in Directory.GetFiles(decoded, "*.npz.sha256"))
+            foreach (string stamp in Directory.EnumerateFiles(decoded, "*.npz.sha256"))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 string clip = Path.GetFileName(stamp).Substring(0, Path.GetFileName(stamp).Length - ".npz.sha256".Length);
                 if (applied.Contains(clip)) continue;
                 string original = Path.Combine(baseData, "gamepack", "decoded", clip + ".npz");
                 string target = Path.Combine(decoded, clip + ".npz");
-                if (File.Exists(original)) CopyAtomic(original, target);
+                if (File.Exists(original)) CopyAtomic(original, target, cancellationToken);
                 else if (File.Exists(target)) File.Delete(target);
                 File.Delete(stamp);
             }
-            RemoveOtherVariantAliases(entries, definitions);
+            RemoveOtherVariantAliases(entries, definitions, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             entries = entries.OrderBy(item => Convert.ToString(item["name"], CultureInfo.InvariantCulture), StringComparer.OrdinalIgnoreCase).ToList();
             manifest["taunts"] = entries;
-            WriteAtomic(Path.Combine(library, "taunts.json"), Json(manifest));
+            progress?.Invoke("Publishing taunt library…");
+            cancellationToken.ThrowIfCancellationRequested();
+            WriteAtomic(Path.Combine(library, "taunts.json"), Json(manifest), cancellationToken);
             result.Warnings.AddRange(prepared.Records.Warnings.Where(warning => !result.Warnings.Contains(warning)));
             result.Root = overlay;
             result.Library = library;
@@ -518,10 +630,13 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static void RemoveOtherVariantAliases(IEnumerable<Dictionary<string, object>> entries, IEnumerable<DiscoveryTaunt> definitions)
+        private static void RemoveOtherVariantAliases(IEnumerable<Dictionary<string, object>> entries,
+            IEnumerable<DiscoveryTaunt> definitions, CancellationToken cancellationToken)
         {
             var owners = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (DiscoveryTaunt definition in definitions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 foreach (string name in definition.Names)
                 {
                     string normalized = name.Trim();
@@ -530,8 +645,10 @@ namespace GorillaStudio.NameFolders
                         owners.Add(normalized, clips = new HashSet<string>(StringComparer.OrdinalIgnoreCase));
                     clips.Add(definition.Clip);
                 }
+            }
             foreach (Dictionary<string, object> entry in entries)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 object value;
                 if (!entry.TryGetValue("also", out value) || !(value is IEnumerable) || value is string ||
                     !entry.ContainsKey("clip")) continue;
@@ -539,6 +656,7 @@ namespace GorillaStudio.NameFolders
                 var aliases = new List<string>();
                 foreach (object alias in (IEnumerable)value)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     string name = Convert.ToString(alias, CultureInfo.InvariantCulture).Trim();
                     HashSet<string> clips;
                     // Older Gorilla libraries grouped separate animation
@@ -551,38 +669,59 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static void LinkChildren(string source, string destination, string[] excludedDirectories)
+        private static void LinkChildren(string source, string destination, string[] excludedDirectories, CancellationToken cancellationToken)
         {
-            foreach (string directory in Directory.GetDirectories(source))
+            cancellationToken.ThrowIfCancellationRequested();
+            foreach (string directory in Directory.EnumerateDirectories(source))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!excludedDirectories.Contains(Path.GetFileName(directory), StringComparer.OrdinalIgnoreCase))
                     DirectoryLinks.EnsureJunction(Path.Combine(destination, Path.GetFileName(directory)), directory);
-            foreach (string file in Directory.GetFiles(source))
+            }
+            foreach (string file in Directory.EnumerateFiles(source))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (string.Equals(Path.GetFileName(file), "taunts.json", StringComparison.OrdinalIgnoreCase)) continue;
                 string target = Path.Combine(destination, Path.GetFileName(file));
-                if (!File.Exists(target)) CopyAtomic(file, target);
+                if (!File.Exists(target)) CopyAtomic(file, target, cancellationToken);
             }
         }
 
-        private static void CopyAtomic(string source, string destination)
+        private static void CopyAtomic(string source, string destination, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
-                File.Copy(source, temporary, false);
+                using (var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    var buffer = new byte[65536];
+                    while (true)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        int count = input.Read(buffer, 0, buffer.Length);
+                        if (count == 0) break;
+                        cancellationToken.ThrowIfCancellationRequested();
+                        output.Write(buffer, 0, count);
+                    }
+                }
+                cancellationToken.ThrowIfCancellationRequested();
                 if (File.Exists(destination)) File.Replace(temporary, destination, null);
                 else File.Move(temporary, destination);
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
         }
 
-        private static void WriteAtomic(string path, string value)
+        private static void WriteAtomic(string path, string value, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (File.Exists(path) && string.Equals(File.ReadAllText(path), value, StringComparison.Ordinal)) return;
             string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
                 File.WriteAllText(temporary, value, new UTF8Encoding(false));
+                cancellationToken.ThrowIfCancellationRequested();
                 if (File.Exists(path)) File.Replace(temporary, path, null);
                 else File.Move(temporary, path);
             }
@@ -603,8 +742,9 @@ namespace GorillaStudio.NameFolders
 #endif
         }
 
-        private static void MaterializeDirectory(string source, string target, bool readOnlyFiles)
+        private static void MaterializeDirectory(string source, string target, bool readOnlyFiles, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!Directory.Exists(source)) { Directory.CreateDirectory(target); return; }
             if (Directory.Exists(target) && (File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0)
             {
@@ -613,17 +753,21 @@ namespace GorillaStudio.NameFolders
                 Directory.Delete(target);
             }
             Directory.CreateDirectory(target);
-            foreach (string original in Directory.GetFiles(source))
+            foreach (string original in Directory.EnumerateFiles(source))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 string destination = Path.Combine(target, Path.GetFileName(original));
                 if (File.Exists(destination)) continue;
                 bool linked = false;
                 if (readOnlyFiles && Environment.OSVersion.Platform == PlatformID.Win32NT)
                     linked = CreateHardLink(destination, original, IntPtr.Zero);
-                if (!linked) CopyAtomic(original, destination);
+                if (!linked) CopyAtomic(original, destination, cancellationToken);
             }
-            foreach (string child in Directory.GetDirectories(source))
-                MaterializeDirectory(child, Path.Combine(target, Path.GetFileName(child)), readOnlyFiles);
+            foreach (string child in Directory.EnumerateDirectories(source))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                MaterializeDirectory(child, Path.Combine(target, Path.GetFileName(child)), readOnlyFiles, cancellationToken);
+            }
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateHardLinkW")]

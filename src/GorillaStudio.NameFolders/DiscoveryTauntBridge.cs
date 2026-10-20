@@ -46,13 +46,16 @@ namespace GorillaStudio.NameFolders
 
         public static async Task<DiscoveryTauntImport> RefreshAsync(object owner, string discoveryRoot,
             Action<string> progress, CancellationToken cancellationToken, Action<bool> cancellationEnabled = null,
-            Func<long> sourceRevision = null)
+            Func<long> sourceRevision = null,
+            Func<DiscoveryTauntLibrary.Preparation, CancellationToken, Task<IDisposable>> enterCommit = null,
+            Func<bool> contextCurrent = null, Action<DiscoveryTauntImport> appliedResult = null,
+            Func<CancellationToken, Task> beforeArchiveLookup = null, bool publishAvailableFirst = false)
         {
             var window = owner as Window;
             if (window == null) throw new ArgumentException("Choose an open Gorilla Studio window.", nameof(owner));
             long request = Interlocked.Increment(ref nextRefreshRequest);
             lock (refreshRequests) refreshRequests[window] = request;
-            string game = null, folder = null;
+            string game = null;
             bool entered = false;
             using (var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             try
@@ -63,23 +66,21 @@ namespace GorillaStudio.NameFolders
                     RefreshOnDispatcher(window, () => {
                         if (!window.IsLoaded) throw new OperationCanceledException(cancellation.Token);
                         game = window.GetType().GetField("Game", Members)?.GetValue(window) as string;
-                        folder = window.GetType().GetField("Folder", Members)?.GetValue(window) as string;
                         window.Closed += closed;
                     });
                     await RefreshLock.WaitAsync(cancellation.Token);
                     entered = true;
                     cancellation.Token.ThrowIfCancellationRequested();
                     string app = AppDomain.CurrentDomain.BaseDirectory;
-                    bool commitStarted = false;
                     for (int attempt = 0; attempt < 3; attempt++)
                     {
                         RefreshOnDispatcher(window, () => {
-                            if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
+                            if (!RefreshContextCurrent(window, request, game, contextCurrent)) throw new OperationCanceledException(cancellation.Token);
                         });
-                        // Once an overlay update has begun, finish its replacement
-                        // even if a caller cancels. The original load contract also
-                        // disables Cancel before this shared-data commit.
-                        CancellationToken lookupToken = commitStarted ? CancellationToken.None : cancellation.Token;
+                        // Every build has a private revision overlay. Keep the
+                        // working engine library available while the new one is
+                        // scanned, decoded and validated in the background.
+                        CancellationToken lookupToken = cancellation.Token;
                         lookupToken.ThrowIfCancellationRequested();
                         progress?.Invoke(attempt == 0 ? "Reading Discovery taunt definitions and extracted animation assets…"
                             : "Animation sources changed. Reading the current files again…");
@@ -87,9 +88,66 @@ namespace GorillaStudio.NameFolders
                             DiscoveryTauntLibrary.Prepare(app, discoveryRoot, lookupToken, sourceRevision), lookupToken);
                         IReadOnlyList<string> missing = prepared.Missing;
                         string dataRoot = prepared.DataRoot;
+                        if (publishAvailableFirst && missing.Count > 0 && !string.IsNullOrWhiteSpace(dataRoot))
+                        {
+                            DiscoveryTauntLibrary.Preparation publication = prepared;
+                            DiscoveryMotionFallbacks recovered = null;
+                            bool originalIncomplete = false;
+                            try
+                            {
+                                DiscoveryTauntImport staged = await DiscoveryLibraryRefreshStages.RunAsync<DiscoveryTauntImport, DiscoveryMotionFallbacks>(
+                                    async stageToken => {
+                                        progress?.Invoke("Preparing available Discovery animations; additional archives will be checked afterward…");
+                                        var available = await Task.Run(() => DiscoveryTauntLibrary.BuildCurrentPreparation(
+                                            prepared, FolderBridge.StorageDirectory, null, progress, stageToken), stageToken);
+                                        originalIncomplete = available.ScanIncomplete;
+                                        available.ArchiveLookupPending = true;
+                                        available.ScanIncomplete = true;
+                                        available.ArchiveStatus = "Additional game and Discovery archives are being checked in the background. Available motions can be previewed now.";
+                                        available.Warnings.Add("Additional animation archive lookup is pending; missing clips may become available when it finishes.");
+                                        return available;
+                                    },
+                                    (available, stageToken) => PublishImportAsync(window, request, game, dataRoot ?? discoveryRoot,
+                                        publication, available, cancellationEnabled, enterCommit, contextCurrent, appliedResult, stageToken),
+                                    available => true,
+                                    async (available, stageToken) => {
+                                        recovered = await ReadMissingArchiveMotionsAsync(app, game, dataRoot, missing, prepared,
+                                            progress, beforeArchiveLookup, stageToken);
+                                        return recovered;
+                                    },
+                                    archive => archive != null && archive.Assets.Count > 0,
+                                    async (available, archive, stageToken) => {
+                                        // The first overlay may already be in use
+                                        // by Blender. Enrichment gets a new root.
+                                        publication = DiscoveryTauntLibrary.ForkPreparation(prepared);
+                                        return await Task.Run(() => DiscoveryTauntLibrary.BuildCurrentPreparation(publication,
+                                            FolderBridge.StorageDirectory, archive, progress, stageToken), stageToken);
+                                    }, lookupToken);
+                                if (recovered != null && recovered.Assets.Count == 0)
+                                {
+                                    // No recovered bytes means the working
+                                    // manifest/NPZ library is already complete.
+                                    // Update diagnostics without copying it again.
+                                    staged = DiscoveryTauntLibrary.WithArchiveDiagnostics(staged, recovered, originalIncomplete);
+                                    if (!await Task.Run(() => prepared.IsCurrent(lookupToken), lookupToken)) continue;
+                                    RefreshOnDispatcher(window, () => {
+                                        if (!RefreshContextCurrent(window, request, game, contextCurrent)) throw new OperationCanceledException(lookupToken);
+                                        RecordAnimationReport(window, game, dataRoot ?? discoveryRoot, staged);
+                                        appliedResult?.Invoke(staged);
+                                    });
+                                }
+                                return staged;
+                            }
+                            catch (DiscoveryTauntSourcesChangedException) { continue; }
+                        }
                         DiscoveryMotionFallbacks fallbacks = null;
                         if (missing.Count > 0 && !string.IsNullOrWhiteSpace(dataRoot))
                         {
+                            // Interactive model/picture preparation gets first
+                            // use of the shared archive reader after the roster
+                            // handoff. No UI lock is held while this waits.
+                            if (beforeArchiveLookup != null) await beforeArchiveLookup(lookupToken);
+                            if (!await Task.Run(() => prepared.IsCurrent(lookupToken), lookupToken)) continue;
                             progress?.Invoke("Looking for " + missing.Count.ToString(CultureInfo.InvariantCulture) + " animation clips in game and Discovery archives…");
                             try
                             {
@@ -113,27 +171,18 @@ namespace GorillaStudio.NameFolders
                         // A newly exported loose override outranks an archive
                         // fallback, even if it appeared while that lookup ran.
                         if (!await Task.Run(() => prepared.IsCurrent(lookupToken), lookupToken)) continue;
-                        RefreshOnDispatcher(window, () => {
-                            if (!RefreshContextCurrent(window, request, game, folder)) throw new OperationCanceledException(cancellation.Token);
-                            cancellationEnabled?.Invoke(false);
-                        });
-                        commitStarted = true;
-                        progress?.Invoke("Finishing the animation library…");
+                        progress?.Invoke("Preparing the new animation library in the background…");
                         DiscoveryTauntImport result;
                         try
                         {
                             result = await Task.Run(() => DiscoveryTauntLibrary.BuildCurrentPreparation(
-                                prepared, FolderBridge.StorageDirectory, fallbacks, progress));
+                                prepared, FolderBridge.StorageDirectory, fallbacks, progress, lookupToken), lookupToken);
                         }
                         catch (DiscoveryTauntSourcesChangedException) { continue; }
-                        if (!await Task.Run(() => prepared.IsCurrent(CancellationToken.None))) continue;
-                        RefreshOnDispatcher(window, () => {
-                            if (RefreshContextCurrent(window, request, game, folder))
-                            {
-                                RecordAnimationReport(window, game, dataRoot ?? discoveryRoot, result);
-                                Apply(window, result);
-                            }
-                        });
+                        if (!await Task.Run(() => prepared.IsCurrent(lookupToken), lookupToken)) continue;
+                        try { await PublishImportAsync(window, request, game, dataRoot ?? discoveryRoot, prepared, result,
+                            cancellationEnabled, enterCommit, contextCurrent, appliedResult, lookupToken); }
+                        catch (DiscoveryTauntSourcesChangedException) { continue; }
                         return result;
                     }
                     throw new InvalidOperationException("Discovery animation files are still changing. Finish extracting or saving them, then load Discovery again.");
@@ -155,6 +204,65 @@ namespace GorillaStudio.NameFolders
             }
         }
 
+        private static async Task<DiscoveryMotionFallbacks> ReadMissingArchiveMotionsAsync(string app, string game, string dataRoot,
+            IReadOnlyList<string> missing, DiscoveryTauntLibrary.Preparation prepared, Action<string> progress,
+            Func<CancellationToken, Task> beforeArchiveLookup, CancellationToken token)
+        {
+            if (beforeArchiveLookup != null) await beforeArchiveLookup(token);
+            if (!await Task.Run(() => prepared.IsCurrent(token), token)) throw new DiscoveryTauntSourcesChangedException();
+            progress?.Invoke("Available animations are ready. Checking archives for " + missing.Count.ToString(CultureInfo.InvariantCulture) + " additional clips…");
+            try
+            {
+                var fallback = await DiscoveryArchiveMotions.FindAsync(app, game, dataRoot, missing,
+                    Path.Combine(FolderBridge.StorageDirectory, "motion-archives"), progress, token);
+                if (fallback == null) throw new InvalidOperationException("The animation archive lookup returned no result.");
+                return fallback;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is InvalidDataException
+                || error is InvalidOperationException || error is ArgumentException || error is NotSupportedException || error is System.ComponentModel.Win32Exception)
+            {
+                var fallback = new DiscoveryMotionFallbacks { Incomplete = true,
+                    Status = "Automatic animation archive lookup could not finish: " + error.Message };
+                fallback.Warnings.Add(fallback.Status);
+                foreach (string clip in missing) fallback.Issues[clip] = fallback.Status;
+                return fallback;
+            }
+        }
+
+        private static async Task PublishImportAsync(Window window, long request, string game, string discoveryRoot,
+            DiscoveryTauntLibrary.Preparation prepared, DiscoveryTauntImport result, Action<bool> cancellationEnabled,
+            Func<DiscoveryTauntLibrary.Preparation, CancellationToken, Task<IDisposable>> enterCommit,
+            Func<bool> contextCurrent, Action<DiscoveryTauntImport> appliedResult, CancellationToken token)
+        {
+            if (!await Task.Run(() => prepared.IsCurrent(token), token)) throw new DiscoveryTauntSourcesChangedException();
+            IDisposable commit = null;
+            try
+            {
+                if (enterCommit != null) commit = await enterCommit(prepared, token);
+                token.ThrowIfCancellationRequested();
+                RefreshOnDispatcher(window, () => {
+                    if (!RefreshContextCurrent(window, request, game, contextCurrent)) throw new OperationCanceledException(token);
+                    cancellationEnabled?.Invoke(false);
+                    // Native preparation keys omit the engine data root.
+                    window.GetType().GetField("PrepWanted", Members)?.SetValue(window, null);
+                    window.GetType().GetField("PrepDone", Members)?.SetValue(window, null);
+                    RecordAnimationReport(window, game, discoveryRoot, result);
+                    Apply(window, result);
+                    appliedResult?.Invoke(result);
+                    object selected = Field<ListBox>(window, "TauntList")?.SelectedItem;
+                    string selectedKey = selected == null ? null : Convert.ToString(selected.GetType().GetProperty("Key")?.GetValue(selected, null));
+                    window.GetType().GetMethod("Prepare", Members, null, new[] { typeof(string) }, null)?.Invoke(window, new object[] { selectedKey });
+                });
+            }
+            finally
+            {
+                commit?.Dispose();
+                if (commit != null && !window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
+                    RefreshOnDispatcher(window, () => cancellationEnabled?.Invoke(true));
+            }
+        }
+
         private static void RefreshOnDispatcher(Window window, Action action)
         {
             if (window.Dispatcher.HasShutdownStarted || window.Dispatcher.HasShutdownFinished)
@@ -163,14 +271,27 @@ namespace GorillaStudio.NameFolders
             else window.Dispatcher.Invoke(action);
         }
 
-        private static bool RefreshContextCurrent(Window window, long request, string game, string folder)
+        private static bool RefreshContextCurrent(Window window, long request, string game, Func<bool> contextCurrent)
         {
             long current;
             lock (refreshRequests)
                 if (!refreshRequests.TryGetValue(window, out current) || current != request) return false;
             return window.IsLoaded
                 && string.Equals(game, window.GetType().GetField("Game", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(folder, window.GetType().GetField("Folder", Members)?.GetValue(window) as string, StringComparison.OrdinalIgnoreCase);
+                && (contextCurrent == null || contextCurrent());
+        }
+
+        public static void NoteArchiveLookupStopped(object owner, string game, string discoveryRoot,
+            DiscoveryTauntImport available, string reason)
+        {
+            var window = owner as Window;
+            if (window == null || !window.IsLoaded || available == null) return;
+            var fallback = new DiscoveryMotionFallbacks { Incomplete = true, ArchivesSearched = available.ArchivesSearched,
+                ArchiveCount = available.ArchiveCount, Status = reason };
+            fallback.Warnings.Add(reason);
+            foreach (DiscoveryUnavailableTaunt entry in available.Unavailable) fallback.Issues[entry.Clip] = reason;
+            var report = DiscoveryTauntLibrary.WithArchiveDiagnostics(available, fallback, true);
+            RecordAnimationReport(window, game, discoveryRoot, report);
         }
 
         private static void RecordAnimationReport(Window window, string game, string root, DiscoveryTauntImport import)

@@ -37,6 +37,14 @@ namespace GorillaStudio.NameFolders
         }
         public string CurrentRosterFile { get { return currentRosterFile; } }
         public bool DataRefreshed { get; private set; }
+        private readonly TextBox metadataWarnings = new TextBox();
+
+        internal void SetMetadataWarnings(IEnumerable<string> warnings)
+        {
+            metadataWarnings.Text = string.Join(Environment.NewLine,
+                (warnings ?? Enumerable.Empty<string>()).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct());
+            metadataWarnings.Visible = metadataWarnings.TextLength > 0;
+        }
 
         public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseCharacterFolder, string rosterFile = null)
         {
@@ -139,7 +147,18 @@ namespace GorillaStudio.NameFolders
 
             status.AutoSize = true;
             status.Margin = new Padding(0, 6, 0, 8);
-            layout.Controls.Add(status, 0, 5);
+            var statusArea = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+            statusArea.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            statusArea.Controls.Add(status, 0, 0);
+            metadataWarnings.ReadOnly = true;
+            metadataWarnings.Multiline = true;
+            metadataWarnings.ScrollBars = ScrollBars.Vertical;
+            metadataWarnings.Dock = DockStyle.Fill;
+            metadataWarnings.Height = 64;
+            metadataWarnings.ForeColor = Color.DarkRed;
+            metadataWarnings.Visible = false;
+            statusArea.Controls.Add(metadataWarnings, 0, 1);
+            layout.Controls.Add(statusArea, 0, 5);
 
             var manual = new GroupBox { Text = "Add a wrestler manually", Dock = DockStyle.Fill, AutoSize = true,
                 Padding = new Padding(10), Margin = new Padding(0, 4, 0, 8) };
@@ -314,7 +333,9 @@ namespace GorillaStudio.NameFolders
             if (modelSelectionBusy) return;
             try
             {
-                List<RosterEntry> next = RosterSession.Refresh(rosterFile, Entries, currentRosterTable);
+                var warnings = new List<string>();
+                List<RosterEntry> next = RosterSession.RefreshQuick(rosterFile, Entries, currentRosterTable, warnings);
+                SetMetadataWarnings(warnings);
                 Entries = next;
                 currentRosterTable = CommonRosterTable(next);
                 currentRosterFile = Path.GetFullPath(rosterFile);

@@ -3,6 +3,7 @@
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewRenderBridge.cs" Link="PreviewRenderBridge.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryDataRenderGuard.cs" Link="DiscoveryDataRenderGuard.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryTauntSearch.cs" Link="DiscoveryTauntSearch.cs" />
   </ItemGroup>
 </Project>

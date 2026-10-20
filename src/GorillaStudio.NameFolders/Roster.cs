@@ -37,6 +37,18 @@ namespace GorillaStudio.NameFolders
 
         public static List<RosterEntry> LoadFile(string path)
         {
+            return LoadFileCore(path, false, null);
+        }
+
+        // Roster names and exact stock references are enough to open Studio.
+        // Extracted model discovery is deliberately left to the picker's indexer.
+        public static List<RosterEntry> LoadFileQuick(string path, ICollection<string> warnings = null)
+        {
+            return LoadFileCore(path, true, warnings);
+        }
+
+        private static List<RosterEntry> LoadFileCore(string path, bool quick, ICollection<string> warnings)
+        {
             if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Choose a roster file.", "path");
             if (!File.Exists(path)) throw new FileNotFoundException("The roster file does not exist.", path);
             List<RosterEntry> entries;
@@ -45,7 +57,7 @@ namespace GorillaStudio.NameFolders
                 switch (Path.GetExtension(path).ToLowerInvariant())
                 {
                     case ".json": entries = ReadJson(File.ReadAllText(path)); break;
-                    case ".jsfb": entries = ReadDiscoveryCompanion(path); break;
+                    case ".jsfb": entries = quick ? LoadDiscoveryQuick(path, null, null, warnings) : ReadDiscoveryCompanion(path); break;
                     default: throw new InvalidDataException("Choose a JSON roster or CharProfileTable.jsfb with its companion Discovery Characters folder.");
                 }
             }
@@ -84,6 +96,18 @@ namespace GorillaStudio.NameFolders
 
         public static List<RosterEntry> LoadDiscovery(string path, string sdbPath = null, string stockIndexPath = null)
         {
+            return LoadDiscoveryCore(path, sdbPath, stockIndexPath, false, null);
+        }
+
+        public static List<RosterEntry> LoadDiscoveryQuick(string path, string sdbPath = null, string stockIndexPath = null,
+            ICollection<string> warnings = null)
+        {
+            return LoadDiscoveryCore(path, sdbPath, stockIndexPath, true, warnings);
+        }
+
+        private static List<RosterEntry> LoadDiscoveryCore(string path, string sdbPath, string stockIndexPath,
+            bool quick, ICollection<string> warnings)
+        {
             if (!string.Equals(Path.GetFileName(path), "CharProfileTable.jsfb", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Only CharProfileTable.jsfb can locate a Discovery roster. Other .jsfb files are binary game data, not supported roster imports.");
             ValidateProfileTable(path);
@@ -91,21 +115,27 @@ namespace GorillaStudio.NameFolders
             string characters = FindChildDirectory(root, "Characters");
             if (characters == null)
                 throw new InvalidDataException("Keep CharProfileTable.jsfb in its Discovery Roster folder alongside the companion Characters folder. Keep Sdb/ENG.sdb beside them to load the game's character names.");
-            List<DiscoveryProfile> profiles = DiscoveryProfiles.Read(path, sdbPath);
-            DiscoveryScanResult scan = DiscoveryScanner.Scan(root, profiles, path);
-            if (scan.Warnings.Any(w => w.StartsWith("Could not read character mapping", StringComparison.Ordinal)))
-                throw new InvalidDataException(string.Join(Environment.NewLine, scan.Warnings));
-            var entries = scan.Entries;
+            List<DiscoveryProfile> profiles = warnings == null ? DiscoveryProfiles.Read(path, sdbPath)
+                : DiscoveryProfiles.Read(path, sdbPath, warnings);
+            var entries = new List<RosterEntry>();
+            if (!quick)
+            {
+                DiscoveryScanResult scan = DiscoveryScanner.Scan(root, profiles, path);
+                if (scan.Warnings.Any(w => w.StartsWith("Could not read character mapping", StringComparison.Ordinal)))
+                    throw new InvalidDataException(string.Join(Environment.NewLine, scan.Warnings));
+                entries = scan.Entries;
+            }
             stockIndexPath = stockIndexPath ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "gamepack", "stock_index.json");
             Dictionary<int, string> stock = File.Exists(stockIndexPath) ? StockModels.Read(root, stockIndexPath) : new Dictionary<int, string>();
+            var byId = entries.GroupBy(entry => entry.Id).ToDictionary(group => group.Key, group => group.ToList());
             foreach (DiscoveryProfile profile in profiles)
             {
-                List<RosterEntry> models = entries.Where(e => e.Id == profile.Id).ToList();
-                if (models.Count == 0)
+                List<RosterEntry> models;
+                if (!byId.TryGetValue(profile.Id, out models))
                 {
                     var entry = new RosterEntry { Id = profile.Id, SourceId = profile.BaseId, Name = profile.Name ?? "Wrestler " + profile.Id.ToString(CultureInfo.InvariantCulture), Source = "Profile" };
                     entries.Add(entry);
-                    models.Add(entry);
+                    byId.Add(profile.Id, models = new List<RosterEntry> { entry });
                 }
                 string key;
                 if (!stock.TryGetValue(profile.Id, out key)) continue;

@@ -40,7 +40,13 @@ internal static class Program
         State.Reset();
         State.BlockPictures = true;
         State.MutateOnDispose = true;
-        Task<string> loading = FolderBridge.PrepareRosterAsync(State.Root, "external-roster.json");
+        State.MetadataSourceOverride = Path.Combine(State.Root, "actual selected JSFB data");
+        State.MetadataWarnings.Add("One invalid localized name was skipped; its roster ID is retained.");
+        Task<string> loading = FolderBridge.PrepareRosterAsync(State.Root, "external-roster.json", null, actualRoot => {
+            State.MetadataReadyCount++; State.MetadataReadyThread = Thread.CurrentThread.ManagedThreadId;
+            State.MetadataReadySource = actualRoot;
+            Equal(0, State.PickerCount); Equal(0, State.PictureCalls); Equal(0, State.Commits.Count);
+        });
         await PicturesStarted();
         Equal(false, loading.IsCompleted);
         Equal(State.UiThread, Thread.CurrentThread.ManagedThreadId);
@@ -52,6 +58,16 @@ internal static class Program
         Equal(State.UiThread, State.PickerThread);
         Equal(State.UiThread, State.DisposeThread);
         Equal(1, State.PickerCount);
+        Equal(1, State.QuickOpenCount);
+        Equal(0, State.FullOpenCount);
+        Equal(1, State.MetadataReadyCount);
+        Equal(State.UiThread, State.MetadataReadyThread);
+        Equal(State.UiThread, State.MetadataWarningsThread);
+        Equal(State.MetadataWarnings.Single(), State.PickerMetadataWarnings.Single());
+        Equal(1, State.MetadataReadyAtPicker);
+        Equal(State.MetadataSourceOverride, State.MetadataReadySource);
+        Equal(State.PickerSource, State.MetadataReadySource);
+        Equal(false, string.Equals(State.Root, State.MetadataReadySource, StringComparison.Ordinal));
         Equal(5, State.Commits.Count);
         Equal(2, State.AttireInventoryCount);
         Equal(true, State.RegisteredAttireContext);
@@ -115,8 +131,29 @@ internal static class Program
         Equal(0, State.PictureCalls);
 
         State.Reset();
-        Equal((string)null, await FolderBridge.PrepareRosterAsync(State.Root, null, () => false));
+        Equal((string)null, await FolderBridge.PrepareRosterAsync(State.Root, null, () => false,
+            actualRoot => State.MetadataReadyCount++));
         Equal(0, State.PickerCount);
+        Equal(0, State.PictureCalls);
+        Equal(0, State.Commits.Count);
+        Equal(0, State.MetadataReadyCount);
+
+        State.Reset(); State.ThrowMetadata = true;
+        bool metadataFailed = false;
+        try { await FolderBridge.PrepareRosterAsync(State.Root, null, null, actualRoot => State.MetadataReadyCount++); }
+        catch (InvalidDataException) { metadataFailed = true; }
+        Equal(true, metadataFailed);
+        Equal(0, State.MetadataReadyCount);
+        Equal(0, State.PickerCount);
+        Equal(0, State.PictureCalls);
+        Equal(0, State.Commits.Count);
+
+        State.Reset(); State.CancelPicker = true;
+        State.MetadataWarnings.Add("Names are unavailable; wrestler IDs are still loaded.");
+        Equal((string)null, await FolderBridge.PrepareRosterAsync(State.Root, null, null, actualRoot => State.MetadataReadyCount++));
+        Equal(1, State.MetadataReadyCount);
+        Equal(1, State.MetadataReadyAtPicker);
+        Equal(State.MetadataWarnings.Single(), State.PickerMetadataWarnings.Single());
         Equal(0, State.PictureCalls);
         Equal(0, State.Commits.Count);
 
@@ -148,6 +185,8 @@ internal static class Program
         // hook; do not replace their modal contract with an async operation.
         State.Reset(); State.ExpectWorkers = false;
         Equal(true, FolderBridge.PrepareRoster(State.Root, null) != null);
+        Equal(0, State.QuickOpenCount);
+        Equal(1, State.FullOpenCount);
         Equal(State.UiThread, State.PickerThread);
         Equal(true, State.Commits.All(thread => thread == State.UiThread));
         Equal(true, State.DiskThreads.All(thread => thread == State.UiThread));
@@ -189,7 +228,11 @@ internal static class State
     internal static string RosterTable { get { return Path.Combine(Root, "Roster", "CharProfileTable.jsfb"); } }
     internal static int UiThread, PickerThread, DisposeThread, PickerCount, PictureCalls, AttireId;
     internal static int Invalidations, InvalidationThread, WarningCount, WarningThread;
-    internal static bool ExpectWorkers, BlockPictures, MutateOnDispose, CancelPicker, Refreshed, ThrowPictures, ThrowRead;
+    internal static int QuickOpenCount, FullOpenCount, MetadataReadyCount, MetadataReadyThread, MetadataReadyAtPicker, MetadataWarningsThread;
+    internal static string MetadataSourceOverride, MetadataReadySource, PickerSource;
+    internal static bool ExpectWorkers, BlockPictures, MutateOnDispose, CancelPicker, Refreshed, ThrowPictures, ThrowRead, ThrowMetadata;
+    internal static readonly List<string> MetadataWarnings = new List<string>();
+    internal static readonly List<string> PickerMetadataWarnings = new List<string>();
     internal static readonly ManualResetEventSlim ReleasePictures = new ManualResetEventSlim(false);
     internal static readonly List<int> DiskThreads = new List<int>();
     internal static readonly List<int> Commits = new List<int>();
@@ -204,7 +247,10 @@ internal static class State
         UiThread = Thread.CurrentThread.ManagedThreadId;
         PickerThread = DisposeThread = PickerCount = PictureCalls = AttireId = 0;
         Invalidations = InvalidationThread = WarningCount = WarningThread = 0;
-        ExpectWorkers = true; BlockPictures = MutateOnDispose = CancelPicker = Refreshed = ThrowPictures = ThrowRead = false;
+        QuickOpenCount = FullOpenCount = MetadataReadyCount = MetadataReadyThread = MetadataReadyAtPicker = MetadataWarningsThread = 0;
+        MetadataSourceOverride = MetadataReadySource = PickerSource = null;
+        MetadataWarnings.Clear(); PickerMetadataWarnings.Clear();
+        ExpectWorkers = true; BlockPictures = MutateOnDispose = CancelPicker = Refreshed = ThrowPictures = ThrowRead = ThrowMetadata = false;
         ReleasePictures.Reset(); DiskThreads.Clear(); Commits.Clear(); Registered = PlannedEntry = null;
         AttireInventoryCount = 0; AttireResult = null; RegisteredAttireContext = false; RegisteredAttireSource = null;
         DiscoverySources.Clear();
@@ -288,6 +334,7 @@ namespace GorillaStudio.NameFolders
         public List<RosterEntry> Entries;
         public bool ChooseCharacterFolder;
         public string DiscoveryTable;
+        public List<string> Warnings = new List<string>();
     }
     internal static class RosterImport
     {
@@ -307,11 +354,23 @@ namespace GorillaStudio.NameFolders
     {
         internal static RosterSessionData Open(string root, IEnumerable<RosterEntry> saved, string file, string bundled)
         {
+            State.FullOpenCount++;
             State.Disk(); return new RosterSessionData { Entries = new List<RosterEntry> { State.Entry },
                 ChooseCharacterFolder = true, DiscoveryTable = State.RosterTable };
         }
+        internal static RosterSessionData OpenQuick(string root, IEnumerable<RosterEntry> saved, string file, string bundled)
+        {
+            State.QuickOpenCount++; State.Disk();
+            if (State.ThrowMetadata) throw new InvalidDataException("Invalid profile metadata");
+            return new RosterSessionData { Entries = new List<RosterEntry> { State.Entry },
+                ChooseCharacterFolder = true, DiscoveryTable = State.RosterTable, Warnings = State.MetadataWarnings.ToList() };
+        }
     }
-    internal static class RosterAccess { internal static string RootFor(string path) { State.Disk(); return State.Root; } }
+    internal static class RosterAccess
+    {
+        internal static string RootFor(string path)
+        { State.Disk(); return path == State.RosterTable ? State.MetadataSourceOverride ?? State.Root : State.Root; }
+    }
     internal sealed class WrestlerPicker : IDisposable
     {
         public List<RosterEntry> Entries;
@@ -323,9 +382,16 @@ namespace GorillaStudio.NameFolders
             new ModelCandidate { Folder = State.Root, Name = "Default", SourceId = 1506 },
             new ModelCandidate { Folder = Path.Combine(State.Root, "Second costume source"), Name = "Alternate", SourceId = 1506 }
         }; } }
-        public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseFolder, string file = null) { Entries = entries; }
+        public WrestlerPicker(string source, List<RosterEntry> entries, bool chooseFolder, string file = null)
+        { Entries = entries; State.PickerSource = source; }
+        internal void SetMetadataWarnings(IEnumerable<string> warnings)
+        {
+            State.MetadataWarningsThread = Thread.CurrentThread.ManagedThreadId;
+            State.PickerMetadataWarnings.AddRange(warnings ?? Enumerable.Empty<string>());
+        }
         public System.Windows.Forms.DialogResult ShowDialog()
         {
+            State.MetadataReadyAtPicker = State.MetadataReadyCount;
             State.PickerThread = Thread.CurrentThread.ManagedThreadId; State.PickerCount++;
             return State.CancelPicker ? System.Windows.Forms.DialogResult.Cancel : System.Windows.Forms.DialogResult.OK;
         }

@@ -17,6 +17,8 @@ namespace GorillaStudio.NameFolders
         {
             var nativeProcess = process as Process;
             if (nativeProcess == null) return;
+            string loadingFailure = DiscoveryDataProcessFailure(owner, script, args);
+            if (loadingFailure != null) throw new InvalidOperationException(loadingFailure);
             ConfigureAlternateAttireProcess(owner, nativeProcess, script, args);
             ObservePlaybackSetup(owner, nativeProcess, script, args);
             DiscoveryTauntBridge.ConfigureProcess(owner, nativeProcess, script, args);

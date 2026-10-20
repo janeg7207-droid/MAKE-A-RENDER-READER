@@ -54,7 +54,7 @@ namespace GorillaStudio.NameFolders
             try
             {
                 string sdb = Locate(root, "Sdb", "ENG.sdb");
-                if (sdb != null) strings = DiscoveryProfiles.ReadStrings(sdb);
+                if (sdb != null) strings = DiscoveryProfiles.ReadStrings(sdb, result.Warnings);
             }
             catch (Exception error) when (FileError(error)) { result.Warnings.Add("Discovery names: " + error.Message); }
 

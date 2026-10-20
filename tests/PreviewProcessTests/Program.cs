@@ -16,6 +16,10 @@ namespace GorillaStudio.NameFolders
 {
     public static partial class FolderBridge
     {
+        internal static bool DataLoading;
+        static partial void CheckDiscoveryDataRender(object owner, string script,
+            System.Collections.Generic.IEnumerable<string> arguments, ref string failure)
+        { if (DataLoading) failure = "Discovery animations are loading for the selected data."; }
         public static bool FastPreviewEnabled { get; set; } = true;
         public static bool FastRenderEnabled { get; set; }
         public static bool RosterSpeedEnabled { get; set; }
@@ -136,6 +140,32 @@ internal static class Program
             FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", new[] { "hair=auto", "hair=white" });
             Equal("The final explicit hair setting wins", "selected", process.StartInfo.EnvironmentVariables["GORILLA_HAIR_CHOICE"]);
         }
+        FolderBridge.DataLoading = true;
+        try
+        {
+            foreach (string mode in new[] { "quick=1", "end=loop", "prepare=model", "prepare=taunt" })
+            using (var process = new Process())
+            {
+                process.StartInfo.EnvironmentVariables["GORILLA_EXTRA"] = "sentinel";
+                bool blocked = false;
+                try { FolderBridge.ConfigurePreviewProcess(null, process, "gorilla_render.py", new[] { "folder", "taunt", "out", mode }); }
+                catch (InvalidOperationException error) { blocked = error.Message.Contains("selected data"); }
+                Equal("An unready data context blocks native process entry: " + mode, true, blocked);
+                Equal("A rejected process retains its original environment: " + mode, "sentinel", process.StartInfo.EnvironmentVariables["GORILLA_EXTRA"]);
+            }
+        }
+        finally { FolderBridge.DataLoading = false; }
+        foreach (string mode in new[] { "prepare", "prepare=model", "prepare=taunt" })
+            Equal("The commit can prepare the new library: " + mode, true,
+                FolderBridge.DiscoveryDataPreparationRequest(@"C:\studio\pipeline\GORILLA_RENDER.py", new[] { "folder", "taunt", "out", mode }));
+        foreach (string[] loadingArguments in new[] { new[] { "quick=1" }, new[] { "end=loop" }, new[] { "prepare=" },
+            new[] { "prepare=unknown" }, new[] { "prepare=model", "quick=1" }, new[] { "prepare=taunt", "prepare=unknown" } })
+            Equal("A commit never authorizes a movie request or unknown preparation: " + string.Join(" ", loadingArguments), false,
+                FolderBridge.DiscoveryDataPreparationRequest("gorilla_render.py", loadingArguments));
+        Equal("Commit preparation cannot authorize another script", false,
+            FolderBridge.DiscoveryDataPreparationRequest("make_taunt_capture.py", new[] { "prepare=model" }));
+        Equal("Missing preparation arguments cannot bypass the guard", false,
+            FolderBridge.DiscoveryDataPreparationRequest("gorilla_render.py", null));
         Console.WriteLine(passed + " preview-process checks passed; no engine process launched.");
     }
 

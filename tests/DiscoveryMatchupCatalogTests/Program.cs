@@ -41,6 +41,27 @@ internal static class Program
 
             string data = Path.Combine(temporary, "discovery_data");
             foreach (string relative in new[] { "CreateShow/MatchUpScreenAsset.jsfb", "CreateShow/MatchupMenuAssetData.jsfb", "CreateShow/ShowLoadData.jsfb", "CreateShow/ShowLoadMenuAssetData.jsfb", "Arena/ArenaData.jsfb", "Arena/ArenaData.json", "Sdb/ENG.sdb" }) Copy(Path.Combine(original, relative), Path.Combine(data, relative));
+            string sdbPath = Path.Combine(data, "Sdb", "ENG.sdb"); byte[] originalSdb = File.ReadAllBytes(sdbPath);
+            var namesBefore = DiscoveryMatchupCatalog.Read(data).Entries.ToDictionary(entry => entry.Id, entry => entry.Names.ToArray());
+            var usedNames = new HashSet<string>(namesBefore.Values.SelectMany(names => names), StringComparer.Ordinal);
+            Dictionary<uint, string> allStrings = DiscoveryProfiles.ReadStrings(sdbPath);
+            byte[] oneBadName = (byte[])originalSdb.Clone(); int badRow = -1;
+            for (int index = 0; index < BitConverter.ToUInt32(oneBadName, 4); index++)
+            {
+                int row = 8 + index * 12; uint key = BitConverter.ToUInt32(oneBadName, row + 8);
+                if (usedNames.Contains(allStrings[key])) continue;
+                Put32(oneBadName, row, 8); badRow = row; break;
+            }
+            Check(badRow >= 0, "The real SDB fixture includes a localization entry outside the matchup labels");
+            File.WriteAllBytes(sdbPath, oneBadName);
+            var partialNames = DiscoveryMatchupCatalog.Read(data);
+            Check(partialNames.RequiredHashes.SetEquals(actual.RequiredHashes) && partialNames.TableCount == actual.TableCount,
+                "One malformed optional SDB row never changes exact matchup references or record-table coverage");
+            Check(partialNames.Entries.All(entry => namesBefore[entry.Id].SequenceEqual(entry.Names)),
+                "One unrelated malformed SDB row preserves every valid actual arena and menu label");
+            Check(partialNames.Warnings.Count == 1 && partialNames.Warnings[0].Contains("1 malformed string row(s) of " + BitConverter.ToUInt32(originalSdb, 4)),
+                "A recovered matchup catalog surfaces the exact optional-name failure count");
+            File.WriteAllBytes(sdbPath, originalSdb);
             string tablePath = Path.Combine(data, "CreateShow", "MatchUpScreenAsset.jsfb");
             var file = new FlatBufferFile(source, "StCr");
             int aew = file.Tables(file.Root, 1).Single(row => file.Field(row, 0) != 0 && file.U32(file.Field(row, 0)) == 806);

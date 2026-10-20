@@ -23,6 +23,11 @@ namespace GorillaStudio.NameFolders
         private static readonly Dictionary<Window, ModelTauntRefresh> modelTauntRefreshes = new Dictionary<Window, ModelTauntRefresh>();
         private static readonly Dictionary<Window, TauntLoadProgress> tauntLoads = new Dictionary<Window, TauntLoadProgress>();
         private static readonly Dictionary<Window, DiscoveryTauntContextCache> tauntContexts = new Dictionary<Window, DiscoveryTauntContextCache>();
+        private static readonly Dictionary<Window, DiscoveryDataLoadCoordinator> dataLoads = new Dictionary<Window, DiscoveryDataLoadCoordinator>();
+        private static readonly Dictionary<Window, string> requestedTauntRoots = new Dictionary<Window, string>();
+        private static readonly Dictionary<Window, Tuple<string, string>> activeTauntContexts = new Dictionary<Window, Tuple<string, string>>();
+        private static readonly HashSet<Window> tauntFreshnessRequired = new HashSet<Window>();
+        private static readonly Dictionary<Window, Dictionary<Button, BatchEnabledRestore>> dataRenderControls = new Dictionary<Window, Dictionary<Button, BatchEnabledRestore>>();
         private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
         private sealed class ModelTauntRefresh
@@ -39,7 +44,8 @@ namespace GorillaStudio.NameFolders
 
         private sealed class TauntLoadProgress
         {
-            internal readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+            internal DiscoveryDataLoadCoordinator.Lease Lease;
+            internal CancellationTokenSource Cancellation;
             internal Button Cancel;
             internal Panel Host;
             internal Window Dialog;
@@ -47,6 +53,147 @@ namespace GorillaStudio.NameFolders
             internal bool Committing;
             internal bool Closed;
             internal bool Finished;
+            internal DiscoveryTauntImport LastPublished;
+        }
+
+        internal static bool DiscoveryDataRenderBlocked(object owner)
+        {
+            var window = owner as Window;
+            if (window == null) return false;
+            TauntLoadProgress loading;
+            if (tauntLoads.TryGetValue(window, out loading) && loading.Committing) return false;
+            if (tauntFreshnessRequired.Contains(window)) return true;
+            string requested;
+            if (!requestedTauntRoots.TryGetValue(window, out requested)) return false;
+            string game = window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string;
+            Tuple<string, string> active;
+            return !activeTauntContexts.TryGetValue(window, out active)
+                || !SameDiscoveryContextPath(active.Item1, game) || !SameDiscoveryContextPath(active.Item2, requested);
+        }
+
+        internal static string DiscoveryDataRenderBlockMessage(object owner)
+        {
+            return "Discovery animation data is still loading for this roster. You can select wrestlers and attires now; Preview and MAKE become available when the matching animation library is ready.";
+        }
+
+        static partial void CheckDiscoveryDataRender(object owner, string script, IEnumerable<string> args, ref string failure)
+        {
+            string name = Path.GetFileNameWithoutExtension((script ?? "").Replace('\\', '/'));
+            bool renderer = name.Equals("gorilla_render", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("make_taunt_capture", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("preview_game", StringComparison.OrdinalIgnoreCase);
+            if (!renderer) return;
+            var window = owner as Window;
+            TauntLoadProgress loading;
+            if (window != null && tauntLoads.TryGetValue(window, out loading) && loading.Committing)
+            {
+                if (!DiscoveryDataPreparationRequest(script, args))
+                    failure = "Discovery's animation library is switching. Wait for the update before starting Preview or MAKE.";
+                return;
+            }
+            if (DiscoveryDataRenderBlocked(owner))
+                failure = DiscoveryDataRenderBlockMessage(owner);
+        }
+
+        private static bool SameDiscoveryContextPath(string left, string right)
+        {
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+                return string.IsNullOrWhiteSpace(left) && string.IsNullOrWhiteSpace(right);
+            return string.Equals(Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static DiscoveryDataLoadCoordinator DataLoadCoordinator(Window window)
+        {
+            DiscoveryDataLoadCoordinator coordinator;
+            if (dataLoads.TryGetValue(window, out coordinator)) return coordinator;
+            coordinator = new DiscoveryDataLoadCoordinator(); dataLoads.Add(window, coordinator);
+            window.Closed += (sender, args) => {
+                coordinator.Dispose(); dataLoads.Remove(window); requestedTauntRoots.Remove(window);
+                activeTauntContexts.Remove(window); tauntFreshnessRequired.Remove(window); dataRenderControls.Remove(window);
+            };
+            return coordinator;
+        }
+
+        private static void UpdateDiscoveryRenderControls(Window window)
+        {
+            Dictionary<Button, BatchEnabledRestore> controls;
+            if (!DiscoveryDataRenderBlocked(window))
+            {
+                if (dataRenderControls.TryGetValue(window, out controls))
+                {
+                    foreach (var item in controls) item.Value.Restore();
+                    dataRenderControls.Remove(window);
+                }
+                return;
+            }
+            if (!dataRenderControls.TryGetValue(window, out controls))
+                dataRenderControls[window] = controls = new Dictionary<Button, BatchEnabledRestore>();
+            var buttons = new List<Button>();
+            foreach (string name in new[] { "PreviewButton", "MakeButton" })
+            {
+                var button = window.GetType().GetField(name, InstanceMembers)?.GetValue(window) as Button;
+                if (button != null) buttons.Add(button);
+            }
+            foreach (Button button in PlaybackButtons(window))
+                if (Equals(button.Tag, "GorillaBatchMake")) buttons.Add(button);
+            foreach (Button button in buttons)
+            {
+                // Native roster/model completion can legitimately re-enable a
+                // button while the new data context is pending. Preserve that
+                // newer intent instead of restoring our earlier temporary false.
+                if (!controls.ContainsKey(button) || button.IsEnabled) controls[button] = new BatchEnabledRestore(button);
+                button.IsEnabled = false;
+            }
+        }
+
+        private static bool DiscoveryTauntCommitIdle(Window window)
+        {
+            if (!window.IsLoaded || pendingRosterSelection != null || rosterWindowsBusy.Contains(window)
+                || batchWindows.ContainsKey(window) || combinedGameSetups.Contains(window) || pictureWork.Contains(window)) return false;
+            foreach (string name in new[] { "Busy", "GameBusy" })
+                if (window.GetType().GetField(name, InstanceMembers)?.GetValue(window) is bool busy && busy) return false;
+            foreach (string name in new[] { "PrepTask", "BgTask" })
+            {
+                var preparation = window.GetType().GetField(name, InstanceMembers)?.GetValue(window) as Task;
+                if (preparation != null && !preparation.IsCompleted) return false;
+            }
+            return true;
+        }
+
+        private sealed class DiscoveryTauntCommit : IDisposable
+        {
+            internal Action Release;
+            public void Dispose() { var release = Release; Release = null; release?.Invoke(); }
+        }
+
+        private static async Task<IDisposable> EnterDiscoveryTauntCommitAsync(Window window, TauntLoadProgress load,
+            DiscoveryDataLoadCoordinator coordinator, DiscoveryTauntLibrary.Preparation prepared, CancellationToken token)
+        {
+            while (true)
+            {
+                await coordinator.WaitForCommitAsync(load.Lease, () => DiscoveryTauntCommitIdle(window), token);
+                if (!await Task.Run(() => prepared.IsCurrent(token), token)) throw new DiscoveryTauntSourcesChangedException();
+                token.ThrowIfCancellationRequested();
+                if (!coordinator.IsCurrent(load.Lease, window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string,
+                    requestedTauntRoots.TryGetValue(window, out string currentRoot) ? currentRoot : null)) throw new OperationCanceledException(token);
+                if (prepared.ExternalRevision != null && prepared.ExternalRevision() != prepared.CapturedRevision)
+                    throw new DiscoveryTauntSourcesChangedException();
+                if (!DiscoveryTauntCommitIdle(window)) continue;
+                var busy = window.GetType().GetField("Busy", InstanceMembers);
+                var commit = new DiscoveryTauntCommit { Release = () => {
+                    load.Committing = false;
+                    if (busy != null && busy.FieldType == typeof(bool)) busy.SetValue(window, false);
+                    SetPerformanceBusy(window, false);
+                } };
+                try
+                {
+                    if (busy != null && busy.FieldType == typeof(bool)) busy.SetValue(window, true);
+                    load.Committing = true; SetPerformanceBusy(window, true); StopAutomaticMake(window);
+                    return commit;
+                }
+                catch { commit.Dispose(); throw; }
+            }
         }
 
         private static void QueueModelDiscoveryTaunts(string alias, string discoveryRoot)
@@ -288,12 +435,15 @@ namespace GorillaStudio.NameFolders
                     }
                     // Validate before remembering a new file, so a bad import cannot
                     // replace the working roster used by the primary selector.
-                    await Task.Run(() => RosterImport.LoadFile(rosterFile));
+                    // JSFB selection validates only current profile metadata.
+                    // Nonfatal SDB warnings are shown in the picker below.
+                    var metadataWarnings = new List<string>();
+                    await Task.Run(() => RosterImport.LoadFileQuick(rosterFile, metadataWarnings));
                     RememberRosterFile(rosterFile);
                 }
-                // Opening the picker must not first rescan every motion/archive.
-                // An explicit Discovery load still refreshes immediately.
-                if (action == 1) await RefreshDiscoveryTauntsAsync(window, source, true);
+                // Open profile metadata before starting animation/archive work.
+                // The metadata-ready callback below starts the independent scan
+                // once the roster can already be handed to the picker.
                 if (!window.IsLoaded) return;
                 foreach (string name in new[] { "Busy", "GameBusy" })
                 {
@@ -310,7 +460,14 @@ namespace GorillaStudio.NameFolders
                 // previous model while this selection is being prepared.
                 if (renderBusy != null && renderBusy.FieldType == typeof(bool))
                 { renderBusy.SetValue(window, true); ownsRenderBusy = true; }
-                string prepared = await PrepareRosterAsync(source, rosterFile, () => window.IsLoaded);
+                string prepared = await PrepareRosterAsync(source, rosterFile, () => window.IsLoaded,
+                    metadataRoot => {
+                        string actualRoot = RosterAccess.RootFor(metadataRoot);
+                        if (actualRoot == null) return;
+                        source = actualRoot;
+                        RememberRoot(window, actualRoot);
+                        _ = RefreshDiscoveryTauntsAsync(window, actualRoot, action == 1);
+                    });
                 if (prepared == null) return;
                 type.GetField("LastGmr", InstanceMembers)?.SetValue(window, null);
                 var previousInstall = type.GetField("InstallButton", InstanceMembers)?.GetValue(window) as Button;
@@ -324,8 +481,8 @@ namespace GorillaStudio.NameFolders
                     if (!string.Equals(selectedRoot, source, StringComparison.OrdinalIgnoreCase))
                         RememberRoot(window, selectedRoot);
                     // The picker can refresh or switch roster files while open.
-                    // Import its final Discovery context before native preparation.
-                    await RefreshDiscoveryTauntsAsync(window, selectedRoot, false);
+                    // A switched picker context supersedes the background load.
+                    _ = RefreshDiscoveryTauntsAsync(window, selectedRoot, false);
                 }
 
                 var setFolder = type.GetMethod("SetFolder", InstanceMembers, null, new[] { typeof(string) }, null);
@@ -364,15 +521,22 @@ namespace GorillaStudio.NameFolders
                 pendingRosterSelection = null;
                 rosterWindowsBusy.Remove(window);
                 if (window.IsLoaded) RefreshAlternateAttireSelection(window);
+                UpdateDiscoveryRenderControls(window);
                 QueueSelectedPicture(window);
             }
         }
 
         private static async Task RefreshDiscoveryTauntsAsync(Window window, string source, bool explicitSetup)
         {
-            if (string.IsNullOrWhiteSpace(source) || !window.IsLoaded || tauntLoads.ContainsKey(window)) return;
+            if (string.IsNullOrWhiteSpace(source) || !window.IsLoaded) return;
             Type type = window.GetType();
             string game = type.GetField("Game", InstanceMembers)?.GetValue(window) as string;
+            TauntLoadProgress previousLoad;
+            if (tauntLoads.TryGetValue(window, out previousLoad) && !explicitSetup
+                && !previousLoad.Finished && !previousLoad.Cancellation.IsCancellationRequested && !previousLoad.Lease.Token.IsCancellationRequested
+                && SameDiscoveryContextPath(previousLoad.Lease.GameRoot, game)
+                && SameDiscoveryContextPath(previousLoad.Lease.DiscoveryRoot, source)) return;
+            requestedTauntRoots[window] = source;
             DiscoveryTauntContextCache context;
             if (!tauntContexts.TryGetValue(window, out context) || !context.Matches(game, source))
             {
@@ -385,22 +549,19 @@ namespace GorillaStudio.NameFolders
                 };
             }
             if (!explicitSetup && context.CanReuse) return;
-            long refreshRevision = context.BeginRefresh();
-            var busyField = type.GetField("Busy", InstanceMembers);
-            var gameBusyField = type.GetField("GameBusy", InstanceMembers);
-            if ((busyField != null && busyField.FieldType == typeof(bool) && (bool)busyField.GetValue(window))
-                || (gameBusyField != null && gameBusyField.FieldType == typeof(bool) && (bool)gameBusyField.GetValue(window)))
-                return;
-            bool ownsBusy = busyField != null && busyField.FieldType == typeof(bool);
-            if (ownsBusy) busyField.SetValue(window, true);
-            SetPerformanceBusy(window, true);
-            var bodyField = type.GetField("BodyGrid", InstanceMembers);
-            var body = bodyField == null ? null : bodyField.GetValue(window) as UIElement;
-            bool enabled = body != null && body.IsEnabled;
-            if (body != null) body.IsEnabled = false;
-            var load = new TauntLoadProgress();
+            if (explicitSetup) tauntFreshnessRequired.Add(window);
+            DiscoveryDataLoadCoordinator coordinator = DataLoadCoordinator(window);
+            var load = new TauntLoadProgress { Lease = coordinator.Begin(game, source) };
+            load.Cancellation = CancellationTokenSource.CreateLinkedTokenSource(load.Lease.Token);
+            if (previousLoad != null)
+            {
+                previousLoad.Finished = true;
+                CloseTauntLoadProgress(previousLoad);
+            }
             tauntLoads[window] = load;
+            UpdateDiscoveryRenderControls(window);
             EventHandler closed = (sender, args) => {
+                if (load.Finished) return;
                 load.Closed = true;
                 load.Cancellation.Cancel();
                 CloseTauntLoadProgress(load);
@@ -408,28 +569,38 @@ namespace GorillaStudio.NameFolders
             window.Closed += closed;
             try
             {
-                ShowTauntLoadProgress(window, body, load);
-                StopAutomaticMake(window);
-                var prepField = type.GetField("PrepTask", InstanceMembers);
-                var preparation = prepField == null ? null : prepField.GetValue(window) as Task;
-                if (preparation != null && !preparation.IsCompleted)
-                {
-                    try { await preparation; }
-                    catch { /* The next native preparation retains its normal error handling. */ }
-                }
+                ShowTauntLoadProgress(window, null, load);
                 load.Cancellation.Token.ThrowIfCancellationRequested();
-                SetModelStatus(window, "Reading Discovery taunts and animation assets…");
+                SetDiscoveryLoadStatus(window, load, "Roster ready. Loading Discovery animations in the background…");
                 DiscoveryTauntImport import = await DiscoveryTauntBridge.RefreshAsync(window, source,
                     update => UpdateTauntLoadProgress(window, load, update), load.Cancellation.Token,
                     canCancel => {
                         load.Committing = !canCancel;
                         if (load.Cancel != null) load.Cancel.IsEnabled = canCancel && !load.Closed && !load.Cancellation.IsCancellationRequested;
-                    }, () => context.CurrentRevision);
-                if (load.Closed || !window.IsLoaded) return;
+                    }, () => context.CurrentRevision,
+                    (prepared, token) => EnterDiscoveryTauntCommitAsync(window, load, coordinator, prepared, token),
+                    () => coordinator.IsCurrent(load.Lease, type.GetField("Game", InstanceMembers)?.GetValue(window) as string,
+                        requestedTauntRoots.TryGetValue(window, out string currentRoot) ? currentRoot : null),
+                    applied => {
+                        load.LastPublished = applied;
+                        activeTauntContexts[window] = Tuple.Create(game, source);
+                        tauntFreshnessRequired.Remove(window);
+                        // Use the successful source snapshot, including when a
+                        // changed source made the bridge retry its first attempt.
+                        context.CompleteRefresh(applied.SourceRevision, !applied.HasLinkedSources);
+                        UpdateDiscoveryRenderControls(window);
+                        if (applied.ArchiveLookupPending)
+                        {
+                            if (load.Cancel != null) load.Cancel.Content = "Stop extra scan";
+                            SetDiscoveryLoadStatus(window, load, applied.Available + " taunts ready. Preview and MAKE are available; checking archives for additional animations…");
+                        }
+                    }, token => coordinator.WaitForCommitAsync(load.Lease, () => DiscoveryTauntCommitIdle(window), token), true);
+                if (load.Closed || !window.IsLoaded || !tauntLoads.TryGetValue(window, out TauntLoadProgress appliedLoad)
+                    || !ReferenceEquals(load, appliedLoad)) return;
                 // Nested links may point outside both watched trees. Preserve
                 // normal rescans for those sources instead of retaining stale
                 // external animations; ordinary extracted trees can be reused.
-                context.CompleteRefresh(refreshRevision, !import.HasLinkedSources);
+                context.CompleteRefresh(import.SourceRevision, !import.HasLinkedSources);
                 string message = import.Definitions == 0
                     ? "No Discovery moves table found; the bundled taunts remain available."
                     : import.Available + " taunts available · " + import.Imported + " added from Discovery";
@@ -441,33 +612,30 @@ namespace GorillaStudio.NameFolders
                 if (import.VerifiedImported > 0) message += " · " + import.VerifiedImported + " from verified Animation data";
                 if (import.ArchivesSearched) message += " · " + import.ArchiveCount + " archives checked";
                 if (import.ScanIncomplete) message += " · lookup incomplete: open Animation details";
-                SetModelStatus(window, message);
-                if (explicitSetup)
-                {
-                    string details = message + "\n\nSelect a wrestler and choose a taunt to preview it.";
-                    if (import.SearchRoots.Count > 0)
-                        details += "\n\nAnimation search covers the entire Discovery folder:\n" + string.Join("\n", import.SearchRoots);
-                    if (!string.IsNullOrWhiteSpace(import.ArchiveStatus)) details += "\n\n" + import.ArchiveStatus;
-                    else if (import.ArchivesSearched) details += "\n\n" + import.ArchiveCount + " game/Discovery archives searched for unmatched animation clips.";
-                    if (import.Warnings.Count > 0)
-                    {
-                        details += "\n\n" + string.Join("\n", import.Warnings.GetRange(0, Math.Min(3, import.Warnings.Count)));
-                        details += "\n\nOpen Animation details for all " + import.Warnings.Count + " warnings and full clip diagnostics.";
-                    }
-                    Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), details,
-                        "Discovery data loaded", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Information);
-                }
+                else if (import.Warnings.Count > 0) message += " · " + import.Warnings.Count + " warnings: open Animation details";
+                SetDiscoveryLoadStatus(window, load, message);
             }
             catch (OperationCanceledException)
             {
-                if (!load.Closed && window.IsLoaded)
-                    SetModelStatus(window, "Animation lookup canceled; the current taunt library was kept.");
+                if (!load.Closed && window.IsLoaded && tauntLoads.TryGetValue(window, out TauntLoadProgress current) && ReferenceEquals(load, current))
+                {
+                    if (load.LastPublished != null)
+                        DiscoveryTauntBridge.NoteArchiveLookupStopped(window, game, source, load.LastPublished,
+                            "Additional archive lookup canceled; the validated available animation library was kept.");
+                    SetDiscoveryLoadStatus(window, load, DiscoveryDataRenderBlocked(window)
+                        ? "Animation lookup canceled. The previous library was kept; load Discovery data again to enable Preview and MAKE for this roster."
+                        : "Additional archive lookup canceled; available taunts remain ready for Preview and MAKE.");
+                }
             }
             catch (Exception error)
             {
-                if (load.Closed || !window.IsLoaded) return;
-                SetModelStatus(window, "Discovery taunts could not be refreshed: " + error.Message);
-                if (explicitSetup)
+                if (load.Closed || !window.IsLoaded || !tauntLoads.TryGetValue(window, out TauntLoadProgress current) || !ReferenceEquals(load, current)) return;
+                if (load.LastPublished != null)
+                    DiscoveryTauntBridge.NoteArchiveLookupStopped(window, game, source, load.LastPublished,
+                        "Additional archive lookup could not finish; available animations were kept. " + error.Message);
+                SetDiscoveryLoadStatus(window, load, load.LastPublished == null ? "Discovery taunts could not be refreshed: " + error.Message
+                    : "Available taunts remain ready. Additional archive lookup could not finish: open Animation details.");
+                if (explicitSetup && load.LastPublished == null)
                     Forms.MessageBox.Show(new NativeOwner(new WindowInteropHelper(window).Handle), error.Message,
                         "Discovery taunts", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
             }
@@ -476,13 +644,12 @@ namespace GorillaStudio.NameFolders
                 load.Finished = true;
                 window.Closed -= closed;
                 CloseTauntLoadProgress(load);
-                tauntLoads.Remove(window);
+                if (tauntLoads.TryGetValue(window, out TauntLoadProgress current) && ReferenceEquals(load, current)) tauntLoads.Remove(window);
                 load.Cancellation.Dispose();
+                load.Lease.Dispose();
                 if (!load.Closed)
                 {
-                    if (body != null) body.IsEnabled = enabled;
-                    if (ownsBusy) busyField.SetValue(window, false);
-                    SetPerformanceBusy(window, false);
+                    UpdateDiscoveryRenderControls(window);
                 }
             }
         }
@@ -542,17 +709,31 @@ namespace GorillaStudio.NameFolders
             load.Cancellation.Cancel();
             if (load.Cancel != null) load.Cancel.IsEnabled = false;
             if (load.Status != null) load.Status.Text = "Canceling animation lookup…";
-            if (owner.IsLoaded) SetModelStatus(owner, "Canceling animation lookup…");
+            if (owner.IsLoaded) SetDiscoveryLoadStatus(owner, load, "Canceling animation lookup…");
         }
 
         private static void UpdateTauntLoadProgress(Window owner, TauntLoadProgress load, string message)
         {
             if (owner.Dispatcher.HasShutdownStarted || owner.Dispatcher.HasShutdownFinished) return;
             owner.Dispatcher.BeginInvoke(new Action(() => {
-                if (load.Finished || load.Closed || !owner.IsLoaded || (load.Cancellation.IsCancellationRequested && !load.Committing)) return;
-                if (load.Status != null) load.Status.Text = message;
-                SetModelStatus(owner, message);
+                if (load.Finished || load.Closed || !owner.IsLoaded || !tauntLoads.TryGetValue(owner, out TauntLoadProgress current)
+                    || !ReferenceEquals(load, current) || (load.Cancellation.IsCancellationRequested && !load.Committing)) return;
+                SetDiscoveryLoadStatus(owner, load, message);
             }));
+        }
+
+        private static void SetDiscoveryLoadStatus(Window window, TauntLoadProgress load, string message)
+        {
+            if (load.Status != null) load.Status.Text = message;
+            if (load.Cancel != null) load.Cancel.ToolTip = message;
+            // Archive progress must not replace the progress of a foreground
+            // Preview, MAKE, model preparation, selection or game setup.
+            if (rosterWindowsBusy.Contains(window) || batchWindows.ContainsKey(window) || combinedGameSetups.Contains(window)) return;
+            foreach (string name in new[] { "Busy", "GameBusy" })
+                if (window.GetType().GetField(name, InstanceMembers)?.GetValue(window) is bool busy && busy) return;
+            foreach (string name in new[] { "PrepTask", "BgTask" })
+                if (window.GetType().GetField(name, InstanceMembers)?.GetValue(window) is Task task && !task.IsCompleted) return;
+            if (window.IsLoaded) SetModelStatus(window, message);
         }
 
         private static void CloseTauntLoadProgress(TauntLoadProgress load)
@@ -582,6 +763,8 @@ namespace GorillaStudio.NameFolders
         private static void RememberRoot(Window window, string root)
         {
             lastDiscoveryRoot = root;
+            requestedTauntRoots[window] = root;
+            UpdateDiscoveryRenderControls(window);
             try
             {
                 Directory.CreateDirectory(StorageDirectory);

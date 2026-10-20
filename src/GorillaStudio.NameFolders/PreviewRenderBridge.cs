@@ -20,6 +20,12 @@ namespace GorillaStudio.NameFolders
         {
             if (owner == null) throw new ArgumentNullException("owner");
             string[] arguments = args == null ? null : args.ToArray();
+            string loadingFailure = DiscoveryDataProcessFailure(owner, script, arguments);
+            if (loadingFailure != null)
+            {
+                if (onLine != null) onLine(loadingFailure);
+                return new ValueTuple<int, List<string>>(1, new List<string> { loadingFailure });
+            }
             if (arguments != null && arguments.Any(DiscoveryTauntSearch.IsUnavailableKey))
             {
                 string message = "This taunt has no playable animation. Read its search result for the lookup or import details.";

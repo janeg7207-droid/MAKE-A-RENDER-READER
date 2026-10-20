@@ -61,18 +61,20 @@ namespace GorillaStudio.NameFolders
 
         // The roster button is already asynchronous. Keep its folder scans, profile
         // parsing and picture conversion away from the dispatcher that owns the UI.
-        internal static async Task<string> PrepareRosterAsync(string discoveryRoot, string rosterFile, Func<bool> isCurrent = null)
+        internal static async Task<string> PrepareRosterAsync(string discoveryRoot, string rosterFile, Func<bool> isCurrent = null,
+            Action<string> metadataReady = null)
         {
             string warning = null;
             var loaded = await Task.Run(() =>
             {
                 string bundled = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json");
-                RosterSessionData session = RosterLaunch.Open(discoveryRoot, ReadRosterFile(out warning), rosterFile, bundled);
+                RosterSessionData session = RosterLaunch.OpenQuick(discoveryRoot, ReadRosterFile(out warning), rosterFile, bundled);
                 string source = RosterAccess.RootFor(session.DiscoveryTable) ?? RosterAccess.RootFor(discoveryRoot)
                     ?? AppDomain.CurrentDomain.BaseDirectory;
                 return new RosterModelSession { Source = source, Session = session };
             });
             if (isCurrent != null && !isCurrent()) return null;
+            metadataReady?.Invoke(loaded.Source);
             ShowRosterWarning(warning);
             return await ChooseRosterModelAsync(loaded.Source, loaded.Session, rosterFile, isCurrent);
         }
@@ -123,6 +125,7 @@ namespace GorillaStudio.NameFolders
         {
             using (var picker = new WrestlerPicker(source, session.Entries, session.ChooseCharacterFolder, rosterFile))
             {
+                picker.SetMetadataWarnings(session.Warnings);
                 DialogResult result = picker.ShowDialog();
                 if (picker.DataRefreshed) InvalidateTauntContexts();
                 if (result != DialogResult.OK || picker.SelectedEntry == null) return null;

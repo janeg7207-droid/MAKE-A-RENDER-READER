@@ -32,6 +32,7 @@ internal static class Program
             await BatchProcessOwnershipAndCancellation();
             await AutomaticPreviewOutcomes();
             await UnavailableTauntDoesNotStart();
+            await LoadingDataDoesNotUseOldRenderOrCache();
             Console.WriteLine(checks + " preview process bridge checks passed.");
             return 0;
         }
@@ -54,6 +55,32 @@ internal static class Program
             Equal(result.Item2.Single(), callbacks.Single());
             Equal(false, owner.Busy);
         }
+    }
+
+    private static async Task LoadingDataDoesNotUseOldRenderOrCache()
+    {
+        FakeOwner owner = Create("loading-data");
+        await Run(owner); // A valid preview already exists in the old context's cache.
+        Equal(1, owner.Calls);
+        try
+        {
+            FolderBridge.DataGuard = (actualOwner, script, args) => "Discovery animations are loading for the selected data.";
+            foreach (string mode in new[] { "quick=1", "end=loop", "prepare=model", "prepare=taunt" })
+            {
+                var lines = new List<string>();
+                var result = await FolderBridge.RunPreviewProcess(owner, owner.Script,
+                    new[] { owner.Folder, "Taunt1", owner.Output, mode }, lines.Add,
+                    process => { throw new Exception("An unready data context cannot start a renderer"); });
+                Equal(1, result.Item1);
+                Equal(1, owner.Calls);
+                Equal(result.Item2.Single(), lines.Single());
+                Equal(true, lines[0].Contains("selected data"));
+                Equal(false, owner.Busy);
+            }
+        }
+        finally { FolderBridge.DataGuard = null; }
+        Equal(0, (await Run(owner)).Item1);
+        Equal(1, owner.Calls); // The ready context can use its existing valid cache again.
     }
 
     private static async Task CacheAndCallbacks()
@@ -507,6 +534,9 @@ namespace GorillaStudio.NameFolders
 
     public static partial class FolderBridge
     {
+        internal static Func<object, string, IEnumerable<string>, string> DataGuard;
+        static partial void CheckDiscoveryDataRender(object owner, string script, IEnumerable<string> arguments, ref string failure)
+        { failure = DataGuard?.Invoke(owner, script, arguments); }
         public static bool FastPreviewEnabled = true, FastRenderEnabled;
         internal static string DiscoveryEngineRoot;
         internal static string StoragePath;
