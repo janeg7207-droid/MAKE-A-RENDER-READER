@@ -3,5 +3,6 @@
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/RandyTauntPreviewCache.cs" Link="RandyTauntPreviewCache.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/MotionNpzSemanticComparer.cs" Link="MotionNpzSemanticComparer.cs" />
   </ItemGroup>
 </Project>

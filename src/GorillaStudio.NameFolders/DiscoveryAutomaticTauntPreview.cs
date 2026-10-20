@@ -229,7 +229,7 @@ namespace GorillaStudio.NameFolders
                     state.Status = "Sign in to create a Randy Orton preview.";
                     return;
                 }
-                state.Status = "Preparing Randy Orton's taunt preview…";
+                state.Status = "Opening Randy Orton's taunt preview…";
                 PresentRandyPreviewHint(window, state, key);
                 RandyTauntPreviewResult result = await PrepareRandyTauntPreviewAsync(window, key, message => {
                     if (window.Dispatcher.HasShutdownStarted || window.Dispatcher.HasShutdownFinished) return;
@@ -238,8 +238,14 @@ namespace GorillaStudio.NameFolders
                         { state.Status = message; PresentRandyPreviewHint(window, state, key); }
                     };
                     if (window.Dispatcher.CheckAccess()) show(); else window.Dispatcher.BeginInvoke(show);
-                }, intent.Token);
+                }, intent.Token, manual);
                 if (state.Closed || !state.Selection.IsCurrent(intent, AutomaticTauntKey(state.List.SelectedItem), RandyPreviewContext(window))) return;
+                if (result == null)
+                {
+                    state.Status = "No saved Randy preview for this taunt yet.\nPress Preview to create it once.";
+                    PresentRandyPreviewHint(window, state, key);
+                    return;
+                }
                 ShowRandyAtlas(window, state, key, context, result.AtlasPath, manual);
                 state.Status = result.Cached ? "Randy Orton preview ready · cached" : "Randy Orton preview ready";
                 PresentRandyPreviewHint(window, state, key);

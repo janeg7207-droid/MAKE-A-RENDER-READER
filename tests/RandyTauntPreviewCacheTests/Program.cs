@@ -89,6 +89,20 @@ internal static class Program
         Check(path != good && path.StartsWith(cache, StringComparison.Ordinal), "Published atlases are immutable private copies");
         Check(Hash(good) == before, "Publishing never changes a bundled source image");
         Check(RandyTauntPreviewCache.TryRead(cache, context, out path), "The exact same Randy context reuses its completed image");
+        string refresh = Path.Combine(root, "refreshed-overlay");
+        foreach (string original in Directory.GetFiles(overlay, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(refresh, Path.GetRelativePath(overlay, original));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)); File.Copy(original, target);
+            File.SetLastWriteTimeUtc(target, File.GetLastWriteTimeUtc(original).AddMinutes(2));
+        }
+        var refreshed = RandyTauntPreviewCache.CaptureContext(app, refresh, "tgood", model, "blender=5.2;game=A");
+        Check(refreshed.Fingerprint == context.Fingerprint, "An unchanged Discovery refresh reuses its motion identity despite new paths and timestamps");
+        Check(RandyTauntPreviewCache.TryRead(cache, refreshed, out path), "A generated Randy preview survives an unchanged Discovery refresh without rendering again");
+        string changedMotion = Path.Combine(refresh, "data/gamepack/decoded/62247a000.npz");
+        File.WriteAllText(changedMotion, "a genuinely different animation");
+        Check(!refreshed.IsCurrent() && !RandyTauntPreviewCache.TryRead(cache, refreshed, out path), "A real motion change after refresh still rejects the saved preview");
+        Check(context.IsCurrent(), "Changing another refresh does not invalidate this context's unchanged source");
         string modelPath = Path.Combine(model, "BaseModel/baseModel.mcd"); DateTime stamp = File.GetLastWriteTimeUtc(modelPath);
         File.WriteAllText(modelPath, "Other base"); File.SetLastWriteTimeUtc(modelPath, stamp);
         Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(cache, context, out path), "Changed base-model bytes invalidate a saved preview even with retained mtime");

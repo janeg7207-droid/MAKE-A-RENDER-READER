@@ -45,7 +45,9 @@ namespace GorillaStudio.NameFolders
                 if (Semantic(original) != Semantic(current)) return false;
                 string[] left = MotionFiles(app, original), right = MotionFiles(engine, current);
                 if (left.Length != right.Length) return false;
-                for (int index = 0; index < left.Length; index++) if (Hash(left[index]) != Hash(right[index])) return false;
+                for (int index = 0; index < left.Length; index++)
+                    if (Hash(left[index]) != Hash(right[index])
+                        && (index != 0 || !MotionNpzSemanticComparer.Equivalent(left[index], right[index]))) return false;
                 string path = Path.Combine(app, "data", "library", "previews_game", key + ".png");
                 if (!ValidAtlas(path)) return false;
                 // Source changes during an atlas lookup must never display an older motion.
@@ -69,10 +71,14 @@ namespace GorillaStudio.NameFolders
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, new UTF8Encoding(false), true))
             {
-                writer.Write("Randy-taunt-atlas-v1;model=161_Randy_Orton_2019;ring;hair=black;quick=1;15fps");
-                writer.Write(app); writer.Write(engine); writer.Write(model); writer.Write(key); writer.Write(extraSignature ?? "");
+                writer.Write("Randy-taunt-atlas-v2;model=161_Randy_Orton_2019;ring;hair=black;quick=1;15fps");
+                // Discovery builds a new private overlay directory on refresh.
+                // Its temporary path and copied motion timestamps do not change
+                // Randy's rendered animation. The context retains the actual
+                // source paths for freshness checks, but the key follows bytes.
+                writer.Write(app); writer.Write(model); writer.Write(key); writer.Write(extraSignature ?? "");
                 writer.Write(Semantic(entry));
-                foreach (string path in MotionFiles(engine, entry)) WriteFile(writer, path, true);
+                foreach (string path in MotionFiles(engine, entry)) WriteMotion(writer, path);
                 foreach (string path in ModelFiles(model)) WriteFile(writer, path, path.EndsWith(".mcd", StringComparison.OrdinalIgnoreCase) || new FileInfo(path).Length <= 1024 * 1024);
                 foreach (string directory in SharedModelDirectories(app, model))
                     foreach (string path in ModelFiles(directory)) WriteFile(writer, path, new FileInfo(path).Length <= 1024 * 1024);
@@ -296,6 +302,14 @@ namespace GorillaStudio.NameFolders
             if (content) writer.Write(Hash(path));
             file.Refresh();
             if (!file.Exists || file.Length != length || file.LastWriteTimeUtc.Ticks != ticks) throw new IOException("A Randy preview input changed while it was read.");
+        }
+        private static void WriteMotion(BinaryWriter writer, string path)
+        {
+            var file = new FileInfo(path); long length = file.Length, ticks = file.LastWriteTimeUtc.Ticks;
+            writer.Write(Path.GetFileName(path)); writer.Write(length); writer.Write(Hash(path));
+            file.Refresh();
+            if (!file.Exists || file.Length != length || file.LastWriteTimeUtc.Ticks != ticks)
+                throw new IOException("A Randy preview motion changed while it was read.");
         }
         private static string CacheFolder(string root, RandyTauntPreviewContext context)
         {
