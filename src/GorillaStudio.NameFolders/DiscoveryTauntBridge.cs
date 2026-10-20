@@ -589,16 +589,7 @@ namespace GorillaStudio.NameFolders
                 // wrestler after this filename is replaced. Decode a fresh
                 // stream and retain no open file handle, so each selection uses
                 // the exact preview that was most recently captured.
-                var bitmap = new BitmapImage();
-                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-                {
-                    bitmap.BeginInit();
-                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
-                    bitmap.StreamSource = stream;
-                    bitmap.EndInit();
-                    bitmap.Freeze();
-                }
+                BitmapSource bitmap = PreviewAtlasLoader.Load(path);
                 var frames = new List<ImageSource>();
                 int height = bitmap.PixelHeight, width = bitmap.PixelWidth;
                 if (height <= 0 || width <= 0) return false;

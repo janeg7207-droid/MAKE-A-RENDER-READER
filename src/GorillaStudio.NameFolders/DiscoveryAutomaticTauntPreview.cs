@@ -318,13 +318,7 @@ namespace GorillaStudio.NameFolders
 
         private static void ShowRandyAtlas(Window window, AutomaticTauntPreview state, string key, string context, string path, bool showResult)
         {
-            var bitmap = new BitmapImage();
-            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            {
-                bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache; bitmap.StreamSource = stream;
-                bitmap.EndInit(); bitmap.Freeze();
-            }
+            BitmapSource bitmap = PreviewAtlasLoader.Load(path);
             int height = bitmap.PixelHeight;
             if (height <= 0 || bitmap.PixelWidth < height || bitmap.PixelWidth % height != 0)
                 throw new InvalidDataException("The Randy preview has no complete square frames.");
