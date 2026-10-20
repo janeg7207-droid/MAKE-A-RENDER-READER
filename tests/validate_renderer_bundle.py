@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import textwrap
@@ -41,15 +42,23 @@ def main():
         wrapper = engine / "gr_render.py"
         shutil.copy2(repo / "runtime/engine/gr_render.py", wrapper)
         (character / "BaseModel/baseModel.mcd").write_bytes(b"fixture base source")
-        (character / "Attire/Attire.mcd").write_bytes(b"fixture attire source")
+        mask = b"HPL!LOD!" + struct.pack("<I", 0)
+        for mode in (0, 1):
+            mask += b"DATA" + struct.pack("<I", mode) + b"MESH" + struct.pack("<I", 4) + b"Body"
+            mask += struct.pack("<4I", 3, 0, 1, 2)
+        mask += b"END!" + struct.pack("<I", 0)
+        (character / "Attire/Attire.mcd").write_bytes(b"fixture attire source" + mask)
         (native / "gs_paths.py").write_text("from pathlib import Path\nSTOCK_ROOT=Path(" + repr(str(root / "stock")) + ")\n")
         (native / "gorilla_mcd.py").write_text(textwrap.dedent('''
             from pathlib import Path
             class Model:
                 def __init__(self,path):
                     self.path=Path(path); self.b=self.path.read_bytes()
+                    offset=self.b.find(b'HPL!')
+                    self.rec={} if offset<0 else {'HPL!':(offset,len(self.b)-offset)}
                     names=[('Body',128)] if self.path.parent.name=='BaseModel' else [('Duplicate',129),('Duplicate',130)]
                     self.meshes=[dict(name=name,flags=flag,verts=3,numbering=[0,1,2]) for name,flag in names]
+                    self.lods=[{index:([(0,1,2)],) for index in range(len(names))}]
         '''))
         (native / "gorilla_blender.py").write_text(textwrap.dedent('''
             import bpy
@@ -85,7 +94,9 @@ def main():
                 manifest.write_text(json.dumps([dict(name=o.name,full=o.name,verts=len(o.data.vertices),materials=[]) for o in bpy.data.objects if o.type=='MESH']))
             neutral=all(not o.hide_render for o in bpy.data.objects if o.type=='MESH')
             for handler in list(bpy.app.handlers.render_pre): handler(bpy.context.scene)
-            rows=[dict(name=o.name,role=o.get('gorilla_geometry_role'),flag=o.get('gorilla_geometry_flags'),hidden=o.hide_render,vertices=len(o.data.vertices)) for o in bpy.data.objects if o.type=='MESH']
+            depsgraph=bpy.context.evaluated_depsgraph_get()
+            depsgraph.update()
+            rows=[dict(name=o.name,role=o.get('gorilla_geometry_role'),flag=o.get('gorilla_geometry_flags'),hidden=o.hide_render,vertices=len(o.data.vertices),source_faces=len(o.data.polygons),evaluated_faces=len(o.evaluated_get(depsgraph).data.polygons)) for o in bpy.data.objects if o.type=='MESH']
             (blend.parent/'observed.json').write_text(json.dumps(dict(reused=reused,neutral=neutral,rows=rows,mode=os.environ.get('GORILLA_GEAR_CHOICE'))))
         '''))
         sources = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in character.rglob("*.mcd")}
@@ -100,6 +111,9 @@ def main():
             completed = subprocess.run(command, env=env, text=True, capture_output=True, timeout=120)
             if completed.returncode != 0:
                 raise AssertionError(completed.stdout + "\n" + completed.stderr)
+            for line in completed.stdout.splitlines():
+                if "body hide masks:" in line or "geometry visibility:" in line:
+                    print(line, flush=True)
             result = json.loads((cache / "observed.json").read_text())
             results.append(result)
             check(len(result["rows"]) == 3, mode + ": standalone updater wrapper imports every fixture mesh")
@@ -110,8 +124,12 @@ def main():
             check(by_flag[129]["hidden"] == (mode == "ring"), mode + ": exact entrance-only piece follows current gear mode")
             check(by_flag[130]["hidden"] == (mode == "entrance"), mode + ": duplicate-name ring-only piece follows current gear mode")
             check(all(row["vertices"] == 3 for row in result["rows"]), mode + ": gear switching preserves source vertex counts")
+            check(by_flag[128]["source_faces"] == 1 and by_flag[128]["evaluated_faces"] == 0,
+                  mode + ": standalone wrapper applies verified common HPL only to evaluated body faces")
+            check(all(by_flag[flag]["evaluated_faces"] == 1 for flag in (129, 130)),
+                  mode + ": body masking leaves attire topology intact")
         check((cache / "model.geometry.json").is_file(), "Standalone bundle commits a reusable geometry cache revision")
-        check(not list(engine.glob("gorilla_geometry*.py")), "Update entry works without additional updater payload files")
+        check(not list(engine.glob("gorilla_*.py")), "Update entry works without additional updater payload files")
         check(all(hashlib.sha256(Path(p).read_bytes()).hexdigest() == digest for p, digest in sources.items()), "Source character files remain unchanged")
         check(not list(cache.glob("model.pre-geometry*.blend")), "A fresh current cache does not accumulate rebuild backups")
         marker_before = (cache / "model.geometry.json").read_bytes()

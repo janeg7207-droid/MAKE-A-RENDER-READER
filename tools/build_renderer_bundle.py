@@ -24,7 +24,7 @@ def main():
     before, tail = content.split(begin, 1)
     old, after = tail.split(end, 1)
     lines = [begin, "_GEOMETRY_BUNDLE = {"]
-    for name in ("gorilla_geometry", "gorilla_geometry_cache"):
+    for name in ("gorilla_geometry", "gorilla_geometry_cache", "gorilla_body_masks"):
         source = (repo / "src/renderer" / (name + ".py")).read_bytes()
         digest = hashlib.sha256(source).hexdigest()
         encoded = base64.b64encode(zlib.compress(source, 9)).decode("ascii")
@@ -37,7 +37,7 @@ def main():
     if args.check:
         if expected != content:
             raise SystemExit("The render helper bundle is stale. Run tools/build_renderer_bundle.py.")
-        print("Geometry bundle matches both canonical helper sources.")
+        print("Geometry bundle matches all canonical helper sources.")
     else:
         wrapper.write_text(expected, encoding="utf-8")
         print("Updated the self-contained render helper bundle.")

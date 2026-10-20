@@ -5,7 +5,7 @@
     <AssemblyName>GorillaStudio.NameFolders</AssemblyName>
     <RootNamespace>GorillaStudio.NameFolders</RootNamespace>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Version>1.7.8</Version>
+    <Version>1.7.9</Version>
     <Deterministic>true</Deterministic>
   </PropertyGroup>
   <ItemGroup>

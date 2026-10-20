@@ -13,6 +13,8 @@ namespace GorillaStudio.NameFolders
         public int Already { get; internal set; }
         public int AddedMovies { get; internal set; }
         public int AddedSlots { get; internal set; }
+        public int RepairedSlots { get; internal set; }
+        public int CheckedSlots { get; internal set; }
         public bool IsCheck { get; internal set; }
         public bool BakeRequired { get; internal set; }
         public string BackupDirectory { get; internal set; }
@@ -21,6 +23,8 @@ namespace GorillaStudio.NameFolders
         public string Summary { get { return (IsCheck ? "Match card check: " : "Match card setup: ")
             + Patched + (IsCheck ? " layout file(s) need repair, " : " layout file(s) repaired, ")
             + AddedSlots + " missing movie slot(s), " + AddedMovies + (IsCheck ? " missing placeholder movie(s)." : " placeholder movie(s) added.")
+            + (CheckedSlots > 0 ? " " + CheckedSlots + " supported player slot(s) checked." : "")
+            + (RepairedSlots > 0 ? " " + RepairedSlots + (IsCheck ? " existing movie slot(s) need repair." : " existing movie slot(s) repaired.") : "")
             + (BakeRequired ? (IsCheck ? " Run Game setup, then bake once in Discovery." : " BAKE ONCE in Discovery, then restart the game.") : "")
             + (Failed.Count + Unsupported.Count > 0 ? " " + (Failed.Count + Unsupported.Count) + " setup issue(s) need attention." : ""); } }
     }
@@ -119,12 +123,13 @@ namespace GorillaStudio.NameFolders
                         if (!relevant && !HasMatchupLayout(source)) continue;
                         relevant = true;
                         if (HasPlayerGroups(source, explicitScreen)) recognized++;
-                        int added; List<string> unsupported;
-                        byte[] patched = Patch(source, template, movie, explicitScreen, out added, out unsupported);
+                        int added, repaired, checkedSlots; List<string> unsupported;
+                        byte[] patched = Patch(source, template, movie, explicitScreen, out added, out repaired, out checkedSlots, out unsupported);
+                        report.CheckedSlots += checkedSlots;
                         foreach (string message in unsupported) report.Unsupported.Add(Relative(root, file) + ": " + message);
-                        if (added == 0) { if (unsupported.Count == 0) report.Already++; continue; }
+                        if (added == 0 && repaired == 0) { if (unsupported.Count == 0) report.Already++; continue; }
                         if (!checkOnly) ReplaceBackedUp(root, file, original, patched, report);
-                        report.Patched++; report.AddedSlots += added; report.BakeRequired = true;
+                        report.Patched++; report.AddedSlots += added; report.RepairedSlots += repaired; report.BakeRequired = true;
                     }
                     catch (Exception error) when (Expected(error))
                     { if (relevant) report.Failed.Add(Relative(root, file) + ": " + error.Message); }
@@ -197,9 +202,10 @@ namespace GorillaStudio.NameFolders
             return source.Nodes.Any(node => Layouts.Any(layout => PlayerGroup(node, layout, explicitScreen)));
         }
 
-        private static byte[] Patch(Screen source, Screen template, int movie, bool explicitScreen, out int added, out List<string> unsupported)
+        private static byte[] Patch(Screen source, Screen template, int movie, bool explicitScreen,
+            out int added, out int repaired, out int checkedSlots, out List<string> unsupported)
         {
-            added = 0; unsupported = new List<string>();
+            added = 0; repaired = 0; checkedSlots = 0; unsupported = new List<string>();
             if (!HasPlayerGroups(source, explicitScreen))
                 unsupported.Add("No supported match-up player-slot groups were found; left unchanged.");
             var clone = new Copier(source.Bytes);
@@ -213,19 +219,32 @@ namespace GorillaStudio.NameFolders
                     string label = string.Join("/", groups[0].Path.Take(groups[0].Path.Count - 1));
                     if (groups.Count != Slots[layout] || Enumerable.Range(1, Slots[layout]).Any(player => groups.Count(node => node.Path.Last() == player + "P") != 1))
                     { unsupported.Add(label + " has an unexpected player-slot structure; left unchanged."); continue; }
+                    checkedSlots += groups.Count;
                     foreach (Node group in groups)
                     {
                         int[] children = source.Children(group.Position);
                         string[] names = children.Select(source.Name).ToArray();
                         int player = int.Parse(group.Path.Last().Substring(0, 1), CultureInfo.InvariantCulture);
                         int[] existingMovies = children.Where(child => source.Name(child) == "GM_clip").ToArray();
+                        bool repairExisting = existingMovies.Length > 0;
                         if (existingMovies.Length > 0)
                         {
                             if (existingMovies.Length != 1 || !ExpectedMovie(source, existingMovies[0], layout, player))
+                            {
                                 unsupported.Add(string.Join("/", group.Path) + ": existing GM_clip is not an autoplay movie for this layout/player asset; existing bytes were left unchanged.");
-                            continue;
+                                continue;
+                            }
+                            if (children.Length != 3 || names[0] != "CAS_dummy" || names[1] != "SS_dummy" || names[2] != "GM_clip"
+                                || source.ByteField(children[0], 2) != 2 || source.ByteField(children[1], 2) != 2
+                                || children.Any(child => !EmptyNodeLists(source, child)))
+                            {
+                                unsupported.Add(string.Join("/", group.Path) + ": the existing movie has custom or unsupported slot children; its marker or transform was not counted as complete, and existing bytes were left unchanged.");
+                                continue;
+                            }
+                            if (ExpectedMarker(source, children[1], layout, player)
+                                && ExpectedTransform(source, existingMovies[0])) continue;
                         }
-                        if (children.Length != 2 || names[0] != "CAS_dummy" || names[1] != "SS_dummy"
+                        else if (children.Length != 2 || names[0] != "CAS_dummy" || names[1] != "SS_dummy"
                             || children.Any(child => source.ByteField(child, 2) != 2))
                         { unsupported.Add(string.Join("/", group.Path) + " has custom slot children; left unchanged."); continue; }
                         // Validate every clone before changing the original child pointer.
@@ -235,7 +254,7 @@ namespace GorillaStudio.NameFolders
                             int vector = clone.Allocate(16); clone.Put32(vector, 3);
                             int cas = clone.Table(source, children[0], true);
                             int still = clone.Table(source, children[1], true);
-                            int moving = clone.Table(template, movie, true);
+                            int moving = repairExisting ? clone.Table(source, existingMovies[0], true) : clone.Table(template, movie, true);
                             clone.Name(moving, "GM_clip"); clone.Asset(moving, Hash(MoviePath(layout, player)));
                             clone.Floats(moving, 3, 0f, -551f); clone.Floats(moving, 4, 1024f, 1024f);
                             clone.Floats(moving, 5, 1102f / 1024f, 1102f / 1024f);
@@ -243,13 +262,14 @@ namespace GorillaStudio.NameFolders
                             clone.Floats(still, 5, marker, marker);
                             clone.Point(vector + 4, cas); clone.Point(vector + 8, still); clone.Point(vector + 12, moving);
                             int childField = source.Field(group.Position, 55); clone.Point(childField, vector);
-                            changes.Add(childField); added++;
+                            changes.Add(childField);
+                            if (repairExisting) repaired++; else added++;
                         }
                         catch (InvalidDataException error) { unsupported.Add(string.Join("/", group.Path) + ": " + error.Message); }
                     }
                 }
             }
-            if (added == 0) return source.Bytes;
+            if (added == 0 && repaired == 0) return source.Bytes;
             byte[] result = clone.Result();
             // Existing bytes can change only in the original group's child-vector
             // pointer; all replacement nodes, strings and scalar tables are appended.
@@ -263,6 +283,10 @@ namespace GorillaStudio.NameFolders
                 int[] children = verified.Children(group.Position);
                 if (children.Length != 3 || verified.Name(children[2]) != "GM_clip" || verified.ByteField(children[2], 2) != 7 || verified.ByteField(children[2], 51) != 1)
                     throw new InvalidDataException("The completed slot did not retain its playing movie layer.");
+                int layout = Array.IndexOf(Layouts, group.Path[group.Path.Count - 2]);
+                int player = int.Parse(group.Path.Last().Substring(0, 1), CultureInfo.InvariantCulture);
+                if (!ExpectedMarker(verified, children[1], layout, player) || !ExpectedTransform(verified, children[2]))
+                    throw new InvalidDataException("The completed slot did not retain its exact plugin marker and movie transform.");
             }
             return result;
         }
@@ -274,6 +298,40 @@ namespace GorillaStudio.NameFolders
             if (asset == 0 || (long)asset + 8 > (long)movie + source.ShapeOf(movie).Size) return false;
             ulong actual = U32(source.Bytes, asset) | (ulong)U32(source.Bytes, asset + 4) << 32;
             return actual == Hash(MoviePath(layout, player));
+        }
+
+        private static bool ExpectedMarker(Screen source, int still, int layout, int player)
+        {
+            float marker = 1f + (8 * layout + player) / 1048576f;
+            return ExpectedFloats(source, still, 5, marker, marker);
+        }
+
+        private static bool EmptyNodeLists(Screen source, int table)
+        {
+            foreach (int property in new[] { 55, 56 })
+            {
+                int field = source.Field(table, property);
+                if (field != 0 && U32(source.Bytes, source.Target(field)) != 0) return false;
+            }
+            return true;
+        }
+
+        private static bool ExpectedTransform(Screen source, int movie)
+        {
+            return ExpectedFloats(source, movie, 3, 0f, -551f)
+                && ExpectedFloats(source, movie, 4, 1024f, 1024f)
+                && ExpectedFloats(source, movie, 5, 1102f / 1024f, 1102f / 1024f);
+        }
+
+        private static bool ExpectedFloats(Screen source, int table, int property, float first, float second)
+        {
+            int field = source.Field(table, property);
+            if (field == 0) return false;
+            int value = source.Target(field), a = source.Field(value, 0), b = source.Field(value, 1);
+            int end = checked(value + source.ShapeOf(value).Size);
+            if (a == 0 || b == 0 || a == b || (long)a + 4 > end || (long)b + 4 > end) return false;
+            return U32(source.Bytes, a) == BitConverter.ToUInt32(BitConverter.GetBytes(first), 0)
+                && U32(source.Bytes, b) == BitConverter.ToUInt32(BitConverter.GetBytes(second), 0);
         }
 
         private static byte[] ValidatePlaceholders(string appRoot)

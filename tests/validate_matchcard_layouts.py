@@ -122,6 +122,33 @@ def main() -> None:
     equal("All 86 shipped match-card projects decoded independently", 86, screens)
     equal("All 4,472 omitted slots follow the original recipe", 4472, total_added)
 
+    repaired_existing = 0
+    repairs = args.fixtures / "existing-repairs"
+    if repairs.exists():
+        for file in sorted(repairs.glob("*.jsfb")):
+            if file.name.endswith(".original.jsfb"):
+                continue
+            original = file.with_name(file.stem + ".original.jsfb").read_bytes()
+            fixed = file.read_bytes()
+            old_fb, old_nodes = native.tree(original)
+            fixed_fb, fixed_nodes = native.tree(fixed)
+            old = {tuple(node[1]): node for node in old_nodes}
+            current = {tuple(node[1]): node for node in fixed_nodes}
+            equal(file.name + " retained existing hierarchy", sorted(completed_by_path), sorted(current))
+            for path, expected_node in completed_by_path.items():
+                if len(path) == 4 and path[0] == "matchup" and path[2].endswith("P"):
+                    equal(file.name + " exact independently decoded native leaf " + "/".join(path),
+                          fbclone.plain(completed_fb, expected_node[0]), fbclone.plain(fixed_fb, current[path][0]))
+            group = old[("matchup", "1on1", "1P")][0]
+            field = group + old_fb.slots(group)[0][55]
+            equal(file.name + " only original child pointer changes", [],
+                  [index for index, (before, after) in enumerate(zip(original, fixed))
+                   if before != after and index not in range(field, field + 4)])
+            equal(file.name + " no player or layer identity changes", [],
+                  [path for path, node in old.items() if path not in current or node[2:4] != current[path][2:4]])
+            repaired_existing += 1
+        equal("Six incomplete existing-marker/movie-transform fixtures independently verified", 6, repaired_existing)
+
     basis = (pack / "UI/Assets/movies/gorilla_renders/ph_L00_1P.bk2").read_bytes()
     movie_count = 0
     for layout, slots in enumerate(native.LAYOUT_SLOTS):
@@ -142,6 +169,7 @@ def main() -> None:
     equal("A newly generated placeholder decodes independently with FFmpeg", 0, process.returncode)
     report = {"checks": len(checks), "screen_files": screens, "new_slots": total_added,
               "placeholder_movies": movie_count, "native_full_recipe_slots": count,
+              "repaired_existing_slot_fixtures": repaired_existing,
               "runtime_playback_tested": False,
               "completed_RAW24_sha256": hashlib.sha256(completed).hexdigest()}
     if args.report:

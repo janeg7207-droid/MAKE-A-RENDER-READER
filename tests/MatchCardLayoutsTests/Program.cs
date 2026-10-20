@@ -239,6 +239,100 @@ internal static class Program
                 "Existing GM_clip nodes with wrong autoplay, movie type or layout/player asset are reported instead of counted as complete");
             Check(movieInputs.All(pair => File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value)) && movieValidation.AddedMovies == 0 && !movieValidation.BakeRequired,
                 "Unsupported existing movie nodes retain their complete original files and require no guessed repair");
+            string existingData = Path.Combine(temporary, "incomplete-existing-slots");
+            foreach (string movieFile in Directory.GetFiles(Path.Combine(allData, "UI", "Assets", "movies", "gorilla_renders"), "*.bk2"))
+                Copy(movieFile, Path.Combine(existingData, "UI", "Assets", "movies", "gorilla_renders", Path.GetFileName(movieFile)));
+            var brokenSlots = new Dictionary<string, byte[]>();
+            foreach (string variant in new[] { "marker", "marker_y", "wrong_player", "position", "size", "scale" })
+            {
+                byte[] broken = (byte[])after.Clone();
+                int stillNode = FindNode(broken, new[] { "matchup", "1on1", "1P", "SS_dummy" });
+                int movieNode = FindNode(broken, new[] { "matchup", "1on1", "1P", "GM_clip" });
+                if (variant == "marker") SetFloats(broken, stillNode, 5, 1f, 1f);
+                else if (variant == "marker_y") SetFloats(broken, stillNode, 5, 1f + 1f / 1048576f, 1f);
+                else if (variant == "wrong_player") SetFloats(broken, stillNode, 5, 1f + 2f / 1048576f, 1f + 2f / 1048576f);
+                else if (variant == "position") SetFloats(broken, movieNode, 3, 12f, -551f);
+                else if (variant == "size") SetFloats(broken, movieNode, 4, 512f, 1024f);
+                else SetFloats(broken, movieNode, 5, 1f, 1f);
+                string file = Path.Combine(existingData, "UI", "Projects", "Modded", variant + ".jsfb");
+                Directory.CreateDirectory(Path.GetDirectoryName(file)); File.WriteAllBytes(file, broken); brokenSlots[file] = broken;
+            }
+            string[] beforeExistingFiles = Files(existingData);
+            var existingCheck = MatchCardLayouts.Apply(app, existingData, true);
+            Check(existingCheck.Patched == 6 && existingCheck.RepairedSlots == 6 && existingCheck.CheckedSlots == 606
+                && existingCheck.AddedSlots == 0 && existingCheck.Failed.Count == 0 && existingCheck.Unsupported.Count == 0 && existingCheck.BakeRequired,
+                "Existing movie slots with missing or wrong static-picture markers and movie transforms need repair instead of counting as complete");
+            Check(brokenSlots.All(pair => File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value)) && Files(existingData).SequenceEqual(beforeExistingFiles),
+                "Read-only marker and movie-transform diagnosis preserves every project and creates no backup");
+            var fixedExisting = MatchCardLayouts.Apply(app, existingData, false);
+            Check(fixedExisting.Patched == 6 && fixedExisting.RepairedSlots == 6 && fixedExisting.AddedSlots == 0
+                && fixedExisting.CheckedSlots == 606 && fixedExisting.Unsupported.Count == 0 && fixedExisting.Failed.Count == 0 && fixedExisting.BakeRequired,
+                "Known existing slots receive the exact native marker and movie transform through the normal backed-up setup flow");
+            foreach (var pair in brokenSlots)
+            {
+                byte[] complete = File.ReadAllBytes(pair.Key);
+                int group = FindNode(pair.Value, new[] { "matchup", "1on1", "1P" });
+                int pointer = Field(pair.Value, group, 55);
+                Check(Enumerable.Range(0, pair.Value.Length).All(index => pair.Value[index] == complete[index] || (index >= pointer && index < pointer + 4)),
+                    "Repair only updates the original child pointer and appends replacement leaves: " + Path.GetFileName(pair.Key));
+                Check(File.ReadAllBytes(Path.Combine(fixedExisting.BackupDirectory, pair.Key.Substring(existingData.Length + 1) + ".bak")).SequenceEqual(pair.Value),
+                    "Repair retains exact incomplete original bytes for " + Path.GetFileName(pair.Key));
+                int stillNode = FindNode(complete, new[] { "matchup", "1on1", "1P", "SS_dummy" });
+                int movieNode = FindNode(complete, new[] { "matchup", "1on1", "1P", "GM_clip" });
+                Check(ReadFloats(complete, stillNode, 5).SequenceEqual(new[] { 1f + 1f / 1048576f, 1f + 1f / 1048576f })
+                    && ReadFloats(complete, movieNode, 3).SequenceEqual(new[] { 0f, -551f })
+                    && ReadFloats(complete, movieNode, 4).SequenceEqual(new[] { 1024f, 1024f })
+                    && ReadFloats(complete, movieNode, 5).SequenceEqual(new[] { 1102f / 1024f, 1102f / 1024f }),
+                    "Both exact static-layer marker components and all movie transforms are restored for " + Path.GetFileName(pair.Key));
+                if (args.Length > 1)
+                {
+                    string fixtures = Path.GetFullPath(args[1]);
+                    Copy(pair.Key, Path.Combine(fixtures, "existing-repairs", Path.GetFileName(pair.Key)));
+                    File.WriteAllBytes(Path.Combine(fixtures, "existing-repairs", Path.GetFileNameWithoutExtension(pair.Key) + ".original.jsfb"), pair.Value);
+                }
+            }
+            var existingAgain = MatchCardLayouts.Apply(app, existingData, false);
+            Check(existingAgain.Patched == 0 && existingAgain.RepairedSlots == 0 && existingAgain.AddedSlots == 0
+                && existingAgain.Already == 6 && existingAgain.CheckedSlots == 606 && !existingAgain.BakeRequired,
+                "A repeated setup validates all existing repaired slots without rewriting files or requesting another bake");
+
+            string customMarkerData = Path.Combine(temporary, "custom-marker-children");
+            string customMarkerFile = Path.Combine(customMarkerData, "UI", "Projects", "Custom", "custom_card.jsfb");
+            byte[] customMarker = (byte[])after.Clone();
+            int customStill = FindNode(customMarker, new[] { "matchup", "1on1", "1P", "SS_dummy" });
+            SetFloats(customMarker, customStill, 5, 1f, 1f);
+            int customCas = FindNode(customMarker, new[] { "matchup", "1on1", "1P", "CAS_dummy" });
+            int customCasName = Target(customMarker, Field(customMarker, customCas, 1));
+            Encoding.ASCII.GetBytes("CAS_other").CopyTo(customMarker, customCasName + 4);
+            Directory.CreateDirectory(Path.GetDirectoryName(customMarkerFile)); File.WriteAllBytes(customMarkerFile, customMarker);
+            var customMarkerReport = MatchCardLayouts.Apply(app, customMarkerData, false);
+            Check(customMarkerReport.Patched == 0 && customMarkerReport.RepairedSlots == 0 && customMarkerReport.Unsupported.Count == 1
+                && customMarkerReport.Unsupported[0].Contains("marker or transform") && File.ReadAllBytes(customMarkerFile).SequenceEqual(customMarker),
+                "An incompatible marker in a custom child structure is reported without replacing unknown mod layers");
+            string unsupportedExistingData = Path.Combine(temporary, "unsupported-existing-children");
+            foreach (string movieFile in Directory.GetFiles(Path.Combine(allData, "UI", "Assets", "movies", "gorilla_renders"), "*.bk2"))
+                Copy(movieFile, Path.Combine(unsupportedExistingData, "UI", "Assets", "movies", "gorilla_renders", Path.GetFileName(movieFile)));
+            var unsupportedChildren = new Dictionary<string, byte[]>();
+            foreach (string variant in new[] { "static_kind", "cas_kind", "static_children", "cas_children", "movie_children", "static_animations" })
+            {
+                byte[] unknown = (byte[])after.Clone();
+                int stillNode = FindNode(unknown, new[] { "matchup", "1on1", "1P", "SS_dummy" });
+                int casNode = FindNode(unknown, new[] { "matchup", "1on1", "1P", "CAS_dummy" });
+                int movieNode = FindNode(unknown, new[] { "matchup", "1on1", "1P", "GM_clip" });
+                if (variant == "static_kind") unknown[Field(unknown, stillNode, 2)] = 7;
+                else if (variant == "cas_kind") unknown[Field(unknown, casNode, 2)] = 7;
+                else unknown = AddChildReference(unknown, variant == "cas_children" ? casNode : variant == "movie_children" ? movieNode : stillNode,
+                    variant == "static_animations" ? 56 : 55, movieNode);
+                string file = Path.Combine(unsupportedExistingData, "UI", "Projects", "Modded", variant + ".jsfb");
+                Directory.CreateDirectory(Path.GetDirectoryName(file)); File.WriteAllBytes(file, unknown); unsupportedChildren[file] = unknown;
+            }
+            var unsupportedExisting = MatchCardLayouts.Apply(app, unsupportedExistingData, false);
+            Check(unsupportedExisting.Patched == 0 && unsupportedExisting.Already == 0 && unsupportedExisting.RepairedSlots == 0
+                && unsupportedExisting.Unsupported.Count == 6 && unsupportedExisting.Failed.Count == 0 && !unsupportedExisting.BakeRequired,
+                "Correct marker and transform cannot falsely validate unknown static/CAS node kinds or non-leaf child and animation lists");
+            Check(unsupportedChildren.All(pair => File.ReadAllBytes(pair.Key).SequenceEqual(pair.Value))
+                && !Directory.Exists(Path.Combine(unsupportedExistingData, "Gorilla Studio Layout Backups")),
+                "Unknown existing player-layer schemas remain byte-for-byte unchanged without creating backups");
             if (args.Length > 1)
             {
                 string fixtures = Path.GetFullPath(args[1]);
@@ -252,6 +346,27 @@ internal static class Program
         finally { if (Directory.Exists(temporary)) Directory.Delete(temporary, true); }
     }
     private static string[] Files(string root) { return Directory.GetFiles(root, "*", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).ToArray(); }
+    private static void SetFloats(byte[] bytes, int node, int property, float first, float second)
+    {
+        int table = Target(bytes, Field(bytes, node, property));
+        BitConverter.GetBytes(first).CopyTo(bytes, Field(bytes, table, 0)); BitConverter.GetBytes(second).CopyTo(bytes, Field(bytes, table, 1));
+    }
+    private static float[] ReadFloats(byte[] bytes, int node, int property)
+    {
+        int table = Target(bytes, Field(bytes, node, property));
+        return new[] { BitConverter.ToSingle(bytes, Field(bytes, table, 0)), BitConverter.ToSingle(bytes, Field(bytes, table, 1)) };
+    }
+    private static byte[] AddChildReference(byte[] source, int node, int property, int child)
+    {
+        int field = Field(source, node, property);
+        if (field == 0) throw new Exception("Fixture requires a stored node-list field.");
+        int vector = (source.Length + 7) & ~7, embedded = vector + 8;
+        byte[] result = new byte[embedded + source.Length];
+        Buffer.BlockCopy(source, 0, result, 0, source.Length);
+        Buffer.BlockCopy(source, 0, result, embedded, source.Length);
+        Put32(result, field, vector - field); Put32(result, vector, 1); Put32(result, vector + 4, embedded + child - vector - 4);
+        return result;
+    }
     private static void Copy(string source, string destination) { Directory.CreateDirectory(Path.GetDirectoryName(destination)); File.Copy(source, destination, true); }
     private static void Check(bool value, string description) { if (!value) throw new Exception("FAIL: " + description); passed++; Console.WriteLine("PASS: " + description); }
 
