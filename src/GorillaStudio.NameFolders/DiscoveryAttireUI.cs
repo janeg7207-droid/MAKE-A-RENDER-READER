@@ -20,12 +20,14 @@ namespace GorillaStudio.NameFolders
             internal ModelCandidate[] Inventory;
             internal string[] ModelRoots;
             internal DiscoveryAttireCatalogResult Result;
+            internal string ModelsContext;
         }
 
         private sealed class DiscoveryAttireBinding
         {
             internal DiscoveryAttireContext Context;
             internal string SourceFolder;
+            internal bool ExplicitSource;
         }
 
         private sealed class PreparedDiscoveryAttire
@@ -43,18 +45,19 @@ namespace GorillaStudio.NameFolders
         // root that happened to be loaded first. Alias switches reuse it.
         internal static void RegisterDiscoveryAttires(string alias, RosterEntry entry,
             IEnumerable<ModelCandidate> inventory, DiscoveryAttireCatalogResult result, string sourceFolder = null,
-            IEnumerable<string> modelRoots = null)
+            IEnumerable<string> modelRoots = null, string rosterContext = null)
         {
             if (string.IsNullOrWhiteSpace(alias) || entry == null || result == null) return;
             var context = new DiscoveryAttireContext {
-                Entry = CopyRosterEntry(entry), Result = result,
+                Entry = CopyRosterEntry(entry), Result = result, ModelsContext = rosterContext ?? entry.RosterTable,
                 ModelRoots = (modelRoots ?? new string[0]).Where(path => !string.IsNullOrWhiteSpace(path))
                     .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                 Inventory = (inventory ?? new ModelCandidate[0]).Where(item => item != null)
                     .Select(item => new ModelCandidate { Folder = item.Folder, Name = item.Name, SourceId = item.SourceId }).ToArray()
             };
             discoveryAttires[SelectionPath(alias)] = new DiscoveryAttireBinding {
-                Context = context, SourceFolder = sourceFolder ?? entry.Folder
+                Context = context, SourceFolder = sourceFolder ?? entry.Folder,
+                ExplicitSource = SelectedModelSources(entry, context.ModelsContext).Any(item => SameAttireFolder(item.Folder, sourceFolder ?? entry.Folder))
             };
         }
 
@@ -112,7 +115,9 @@ namespace GorillaStudio.NameFolders
             // Keep exact mapped labels/defaults and add explicit local clothes
             // from the loaded character. Local choices do not create mappings
             // or change the selected wrestler's logical roster slot.
-            return DiscoveryAttireDisplay.Merge(DiscoveryAttireOptions.Combine(alias, binding.SourceFolder, local, mapped,
+            var associated = ModelSourceAttires.Read(ReadSelectedModelAssociations(), binding.Context.Entry, binding.Context.ModelsContext,
+                binding.SourceFolder, alias);
+            return DiscoveryAttireDisplay.Merge(DiscoveryAttireOptions.Combine(alias, binding.SourceFolder, local, mapped.Concat(associated),
                 binding.Context.Result.References.Count > 0), binding.Context.Result);
         }
 
@@ -227,6 +232,9 @@ namespace GorillaStudio.NameFolders
         private static void ValidateDiscoveryAttireSelection(object owner, AttireControls controls, string alias)
         {
             DiscoveryAttireBinding binding = DiscoveryAttireFor(owner, alias);
+            if (binding != null && binding.ExplicitSource && !ModelSourceAssociations.IsAssociated(ReadSelectedModelAssociations(),
+                binding.Context.Entry, binding.Context.ModelsContext, binding.SourceFolder))
+                throw new InvalidOperationException("This model pack is no longer selected for this wrestler. Choose its model folders again.");
             if (binding == null || binding.Context.Result.Sources.Count == 0) return;
             if (!binding.Context.Result.Sources.Any(source => SameAttireFolder(source.SourceFolder, binding.SourceFolder)
                 && string.Equals(AlternateAttires.AliasRelativePath(alias, source.RelativePath), controls.Selected, StringComparison.Ordinal)
@@ -295,6 +303,22 @@ namespace GorillaStudio.NameFolders
                 DiscoveryAttireReferenceKey(candidate) == item.DiscoveryKey
                 && string.Equals(DiscoveryAttireOptions.Key(candidate.SourceFolder, candidate.RelativePath),
                     DiscoveryAttireOptions.Key(item.SourceFolder, item.SourceRelativePath), StringComparison.OrdinalIgnoreCase));
+            bool explicitSource = item.ExplicitSourceKey != null;
+            if (explicitSource)
+            {
+                try
+                {
+                    AlternateAttire selected = ModelSourceAttires.Read(ReadSelectedModelAssociations(), binding.Context.Entry, binding.Context.ModelsContext)
+                        .FirstOrDefault(candidate => candidate.ExplicitSourceKey == item.ExplicitSourceKey);
+                    ModelCandidate pack = selected == null ? null : SelectedModelSources(binding.Context.Entry, binding.Context.ModelsContext)
+                        .FirstOrDefault(candidate => SameAttireFolder(candidate.Folder, selected.SourceFolder));
+                    source = pack == null ? null : new DiscoveryAttireSource { LogicalId = binding.Context.Entry.Id, SourceFolder = pack.Folder,
+                        RelativePath = selected.SourceRelativePath, SourceId = pack.SourceId > 0 ? pack.SourceId : binding.Context.Entry.Id,
+                        DisplayName = selected.DisplayName, IsDefault = selected.IsDefault };
+                }
+                catch (Exception error) when (AttireError(error))
+                { controls.Note.Text = error.Message; SelectExistingAttire(controls); return; }
+            }
             if (source == null || source.LogicalId != binding.Context.Entry.Id)
             { controls.Note.Text = "This attire is no longer linked to the selected wrestler. Refresh the list."; return; }
             if (SameAttireFolder(binding.SourceFolder, source.SourceFolder))
@@ -339,7 +363,7 @@ namespace GorillaStudio.NameFolders
                 controls.SwitchCommitted = true; committed = true;
                 UpdateAttireAvailability(owner, controls);
                 discoveryAttires[SelectionPath(prepared.Alias)] = new DiscoveryAttireBinding {
-                    Context = binding.Context, SourceFolder = prepared.Plan.SourceFolder
+                    Context = binding.Context, SourceFolder = prepared.Plan.SourceFolder, ExplicitSource = explicitSource
                 };
                 RememberRenderTable(prepared.Alias, binding.Context.Entry.RosterTable);
                 RememberPreparedRender(prepared.Alias, prepared.Plan, binding.Context.Entry, prepared.Pictures);

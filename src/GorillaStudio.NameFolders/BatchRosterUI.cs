@@ -60,6 +60,7 @@ namespace GorillaStudio.NameFolders
             internal RosterEntry Entry;
             internal bool Selected;
             internal List<BatchAttireSelection> Attires;
+            internal int AssociatedModelCount;
         }
 
         private static void AttachBatchControls(Window owner)
@@ -69,7 +70,7 @@ namespace GorillaStudio.NameFolders
             if (parent == null || parent.Children.OfType<Button>().Any(button => Equals(button.Tag, "GorillaBatchMake"))) return;
             var batch = new Button { Content = "Batch MAKE…", Tag = "GorillaBatchMake", Style = make.Style,
                 FontFamily = make.FontFamily, FontSize = make.FontSize, Padding = make.Padding, Margin = new Thickness(0, 5, 0, 3),
-                ToolTip = "Select several wrestlers and make them one after another with the current taunt and settings." };
+                ToolTip = "Select wrestlers or several outfits and render them with the current taunt and settings." };
             parent.Children.Insert(parent.Children.IndexOf(make) + 1, batch);
             batch.Click += async (sender, args) => await OpenBatchRosterAsync(owner);
             owner.Closed += (sender, args) =>
@@ -174,7 +175,7 @@ namespace GorillaStudio.NameFolders
             var inventory = new List<ModelCandidate>();
             var completed = new List<BatchRenderJob>();
             var allJobs = new List<BatchRenderJob>();
-            string table = null, runDirectory = null;
+            string table = null, runDirectory = null, associationContext = null;
             string normalOutputDirectory = type.GetField("Output", InstanceMembers)?.GetValue(owner) as string;
             Func<BatchRosterRow, Task> chooseAttires = null;
             Action refresh = () =>
@@ -188,7 +189,9 @@ namespace GorillaStudio.NameFolders
                     var rowGrid = new Grid();
                     rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
                     rowGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                    string attireText = row.Attires == null ? "Current/default attire" : row.Attires.Count.ToString(CultureInfo.InvariantCulture) + " attire(s): " + string.Join(", ", row.Attires.Select(attire => attire.DisplayName));
+                    string attireText = row.Attires == null ? (row.AssociatedModelCount > 1
+                        ? "Default outfit from " + row.AssociatedModelCount.ToString(CultureInfo.InvariantCulture) + " selected model packs"
+                        : "Current/default attire") : row.Attires.Count.ToString(CultureInfo.InvariantCulture) + " attire(s): " + string.Join(", ", row.Attires.Select(attire => attire.DisplayName));
                     var label = new StackPanel();
                     label.Children.Add(new TextBlock { Text = row.Entry.Id.ToString(CultureInfo.InvariantCulture) + "   " + row.Entry.Name });
                     label.Children.Add(new TextBlock { Text = attireText, FontSize = 11, Foreground = Brushes.LightGray, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = attireText });
@@ -230,15 +233,20 @@ namespace GorillaStudio.NameFolders
                     }
                     row.Entry = await Task.Run(() => BatchRenderPlan.CharacterEntry(row.Entry));
                     DiscoveryAttireCatalogResult discovery = await Task.Run(() => BatchRenderPlan.FindAttires(row.Entry, inventory, table));
+                    List<ModelSourceAssociation> associations = await Task.Run(() => ReadSelectedModelAssociations());
+                    List<ModelCandidate> selectedSources = await Task.Run(() => ModelSourceAssociations.Sources(associations, row.Entry, associationContext));
+                    row.AssociatedModelCount = selectedSources.Count;
                     if (discovery.References.Count == 0 && discovery.Issues.Count > 0)
                         throw new InvalidOperationException(string.Join("\n", discovery.Issues));
                     List<BatchAttireSelection> available;
                     List<BatchAttireSelection> current = row.Attires;
-                    if (discovery.References.Count > 0)
+                    if (discovery.References.Count > 0 || selectedSources.Count > 0)
                     {
-                        available = await Task.Run(() => BatchRenderPlan.AvailableAttires(row.Entry, discovery));
+                        available = await Task.Run(() => BatchRenderPlan.AvailableAttires(row.Entry, discovery, associations, associationContext));
                         if (available.Count == 0) throw new InvalidOperationException("No linked or local attire models were found for " + row.Entry.Name
                             + ".\n" + string.Join("\n", discovery.Issues));
+                        if (current == null && selectedSources.Count > 1)
+                            current = await Task.Run(() => BatchRenderPlan.DefaultAssociatedAttires(row.Entry, discovery, associations, associationContext));
                         if (current == null && selectedDiscovery != null && selectedDiscovery.LogicalId == row.Entry.Id)
                         {
                             string key = DiscoveryAttireReferenceKey(selectedDiscovery);
@@ -314,7 +322,12 @@ namespace GorillaStudio.NameFolders
                 try
                 {
                     status.Text = "Installing verified completed renders…";
-                    var report = await Task.Run(() => BatchRenderInstaller.Install(AppDomain.CurrentDomain.BaseDirectory, game, completed.ToArray()));
+                    var report = await Task.Run(() =>
+                    {
+                        var installed = BatchRenderInstaller.Install(AppDomain.CurrentDomain.BaseDirectory, game, completed.ToArray());
+                        foreach (BatchRenderJob job in completed) CopyInstalledSelectionLoopPolicy(job.RenderPath, game);
+                        return installed;
+                    });
                     status.Text = report.Summary;
                     if (report.Failed.Count > 0) status.Text += "\n" + string.Join("\n", report.Failed);
                     if (report.Installed > 0)
@@ -400,7 +413,8 @@ namespace GorillaStudio.NameFolders
                     var chosen = rows.Where(row => row.Selected).Select(row => BatchRenderPlan.Copy(row.Entry)).ToList();
                     var choices = rows.Where(row => row.Selected && row.Attires != null).GroupBy(row => row.Entry.Id)
                         .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.First().Attires);
-                    var plan = await Task.Run(() => BatchRenderPlan.CreateWithAttires(chosen, inventory, table, choices));
+                    var plan = await Task.Run(() => BatchRenderPlan.CreateWithAttires(chosen, inventory, table, choices,
+                        ReadSelectedModelAssociations(), associationContext));
                     renderLifetime.Token.ThrowIfCancellationRequested();
                     if (plan.Jobs.Count == 0) { status.Text = string.Join("\n", plan.Skipped.Take(8)); return; }
                     if (output == null || string.IsNullOrWhiteSpace(previousOutput)) throw new InvalidOperationException("The original render output folder is unavailable.");
@@ -447,7 +461,11 @@ namespace GorillaStudio.NameFolders
                             try
                             {
                                 status.Text = currentLabel + "\nSaving the completed file to your usual output folder…";
-                                await Task.Run(() => BatchRenderPlan.PublishCompleted(job, normalOutputDirectory));
+                                await Task.Run(() =>
+                                {
+                                    BatchRenderPlan.PublishCompleted(job, normalOutputDirectory);
+                                    SelectionLoopPolicy.TryCopy(job.RenderPath, job.PublishedRenderPath, job.Entry.Id);
+                                });
                                 var resultInfo = type.GetField("ResultInfo", InstanceMembers)?.GetValue(owner) as TextBlock;
                                 if (resultInfo != null) resultInfo.Text += "\nSaved to: " + job.PublishedRenderPath;
                             }
@@ -545,6 +563,7 @@ namespace GorillaStudio.NameFolders
                         Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "rosters", "Discovery_roster.json"), rosterLoadingToken), rosterLoadingToken);
                     if (closed) return;
                     table = session.DiscoveryTable;
+                    associationContext = table ?? root;
                     rows = session.Entries.Where(entry => entry.Id > 0 && entry.Id <= 65535 && !string.IsNullOrWhiteSpace(entry.Name))
                         .OrderBy(entry => entry.Name, StringComparer.OrdinalIgnoreCase).ThenBy(entry => entry.Id).Select(entry => new BatchRosterRow { Entry = entry }).ToList();
                     string currentId = type.GetField("TargetSlot", InstanceMembers)?.GetValue(owner) as string;
@@ -557,6 +576,21 @@ namespace GorillaStudio.NameFolders
                     refresh();
                     inventory = await Task.Run(() => BatchModelInventory(session, root, rosterLoadingToken), rosterLoadingToken);
                     if (closed) return;
+                    Dictionary<BatchRosterRow, int> associatedCounts = await Task.Run(() =>
+                    {
+                        var associations = ReadSelectedModelAssociations();
+                        var counts = new Dictionary<BatchRosterRow, int>();
+                        foreach (BatchRosterRow row in rows)
+                        {
+                            rosterLoadingToken.ThrowIfCancellationRequested();
+                            try { counts[row] = ModelSourceAssociations.Sources(associations, row.Entry, associationContext).Count; }
+                            catch (Exception error) when (error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException)
+                            { counts[row] = 0; } // MAKE reports a stale selected source before starting any job.
+                        }
+                        return counts;
+                    }, rosterLoadingToken);
+                    if (closed) return;
+                    foreach (var pair in associatedCounts) pair.Key.AssociatedModelCount = pair.Value;
                     loaded = true; status.Text = BatchRosterLoading.ReadyStatus(session, inventory.Count);
                     refresh();
                 }
@@ -603,9 +637,11 @@ namespace GorillaStudio.NameFolders
         private static async Task BatchLoadCharacterAsync(Window owner, RosterEntry entry, MethodInfo setFolder, string previousFolder, string previousAttire,
             BatchRenderJob job = null, bool restoreResult = false, IEnumerable<ModelCandidate> inventory = null, string rosterTable = null)
         {
+            string modelContext = rosterTable ?? RememberedRoot(owner);
             DiscoveryAttireCatalogResult discovery = await Task.Run(() =>
             {
-                DiscoveryAttireCatalogResult result = BatchRenderPlan.RefreshDiscoveryAttires(job ?? new BatchRenderJob { Entry = BatchRenderPlan.Copy(entry) }, inventory, rosterTable);
+                DiscoveryAttireCatalogResult result = BatchRenderPlan.RefreshDiscoveryAttires(job ?? new BatchRenderJob { Entry = BatchRenderPlan.Copy(entry) }, inventory, rosterTable,
+                    ReadSelectedModelAssociations(), modelContext);
                 ResolveDiscoveryAttireSources(result, System.Threading.CancellationToken.None);
                 return result;
             });
@@ -617,7 +653,7 @@ namespace GorillaStudio.NameFolders
             string alias = PrepareCharacterAlias(plan, attire, pictures);
             RememberRenderTable(alias, entry.RosterTable);
             RememberPreparedRender(alias, plan, entry, pictures);
-            RegisterDiscoveryAttires(alias, entry, inventory, discovery, source);
+            RegisterDiscoveryAttires(alias, entry, inventory, discovery, source, rosterContext: modelContext);
             if (job != null && job.HasExplicitAttire
                 && !SeedDiscoveryAttireChoice(owner, alias, job.AttireSourceRelativePath, job.AttireDiscoveryKey))
                 throw new InvalidOperationException("The attire controls are unavailable. Reopen Gorilla Studio before rendering this batch.");

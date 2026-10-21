@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable><LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/GorillaStudio.NameFolders/ModelLibrary.cs" Link="ModelLibrary.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireOptions.cs" Link="DiscoveryAttireOptions.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/ModelSourceAssociations.cs" Link="ModelSourceAssociations.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/ModelSourceAttires.cs" Link="ModelSourceAttires.cs" />
+  </ItemGroup>
+</Project>

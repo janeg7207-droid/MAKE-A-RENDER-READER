@@ -18,6 +18,9 @@ namespace GorillaStudio.NameFolders
         private readonly RosterEntry selected;
         private readonly string initialPath;
         private string selectedPath;
+        private List<ModelCandidate> selectedModels;
+        private readonly HashSet<string> checkedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private bool refreshing;
         private readonly bool matchingOnly;
 
         internal static string Choose(IWin32Window owner, RosterEntry selected,
@@ -28,7 +31,16 @@ namespace GorillaStudio.NameFolders
                 return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.selectedPath : null;
         }
 
-        private ModelChoiceDialog(RosterEntry selected, IEnumerable<ModelCandidate> candidates, string initialPath, bool matchingOnly)
+        internal static List<ModelCandidate> ChooseMany(IWin32Window owner, RosterEntry selected,
+            IEnumerable<ModelCandidate> candidates, string initialPath, IEnumerable<string> remembered = null, bool matchingOnly = false)
+        {
+            if (selected == null) throw new ArgumentNullException("selected");
+            using (var dialog = new ModelChoiceDialog(selected, candidates, initialPath, matchingOnly, remembered))
+                return dialog.ShowDialog(owner) == DialogResult.OK ? dialog.selectedModels : null;
+        }
+
+        private ModelChoiceDialog(RosterEntry selected, IEnumerable<ModelCandidate> candidates, string initialPath, bool matchingOnly,
+            IEnumerable<string> remembered = null)
         {
             this.selected = selected;
             this.initialPath = initialPath;
@@ -39,6 +51,10 @@ namespace GorillaStudio.NameFolders
                     && seen.Add(candidate.Folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)))
                 .OrderBy(candidate => candidate.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(candidate => candidate.Folder, StringComparer.OrdinalIgnoreCase).ToList();
+            foreach (string path in remembered ?? Enumerable.Empty<string>())
+                if (this.candidates.Any(item => string.Equals(item.Folder, path, StringComparison.OrdinalIgnoreCase))) checkedFolders.Add(path);
+            if (checkedFolders.Count == 0 && this.candidates.Any(item => string.Equals(item.Folder, initialPath, StringComparison.OrdinalIgnoreCase)))
+                checkedFolders.Add(initialPath);
 
             Text = "Choose model for " + selected.Name;
             Font = new Font("Segoe UI", 10);
@@ -59,8 +75,7 @@ namespace GorillaStudio.NameFolders
             Controls.Add(layout);
             layout.Controls.Add(new Label
             {
-                Text = matchingOnly ? "More than one model matches " + selected.Name + ". Choose once; your choice is remembered."
-                    : "Choose the model to use for " + selected.Name,
+                Text = "Check one or more models for " + selected.Name + ". Each selected pack becomes an available outfit; the roster batch can use the same taunt for all of them.",
                 AutoSize = true, MaximumSize = new Size(900, 0),
                 Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, 0, 14)
             }, 0, 0);
@@ -82,13 +97,18 @@ namespace GorillaStudio.NameFolders
             models.Dock = DockStyle.Fill;
             models.View = View.Details;
             models.FullRowSelect = true;
-            models.MultiSelect = false;
+            models.MultiSelect = true;
+            models.CheckBoxes = true;
             models.HideSelection = false;
             models.ShowItemToolTips = true;
             models.Columns.Add("Model", 250);
             models.Columns.Add("Folder", 610);
-            models.SelectedIndexChanged += (sender, args) => load.Enabled = models.SelectedItems.Count == 1;
-            models.DoubleClick += (sender, args) => LoadSelected();
+            models.ItemChecked += (sender, args) => {
+                if (refreshing) return;
+                var item = (ModelCandidate)args.Item.Tag;
+                if (args.Item.Checked) checkedFolders.Add(item.Folder); else checkedFolders.Remove(item.Folder);
+                UpdateStatus();
+            };
             models.KeyDown += (sender, args) =>
             {
                 if (args.KeyCode != Keys.Enter) return;
@@ -107,7 +127,7 @@ namespace GorillaStudio.NameFolders
                 FlowDirection = FlowDirection.RightToLeft, Margin = new Padding(0)
             };
             var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, Padding = new Padding(10, 5, 10, 5) };
-            load.Text = "Load selected model";
+            load.Text = "Load checked models";
             load.AutoSize = true;
             load.Padding = new Padding(10, 5, 10, 5);
             load.Click += (sender, args) => LoadSelected();
@@ -120,6 +140,12 @@ namespace GorillaStudio.NameFolders
             };
             actions.Controls.Add(cancel);
             actions.Controls.Add(load);
+            var checkVisible = new Button { Text = "Check visible", AutoSize = true, Padding = new Padding(8, 5, 8, 5) };
+            checkVisible.Click += (sender, args) => { foreach (ListViewItem item in models.Items) item.Checked = true; };
+            var clear = new Button { Text = "Clear checks", AutoSize = true, Padding = new Padding(8, 5, 8, 5) };
+            clear.Click += (sender, args) => { checkedFolders.Clear(); RefreshModels(); };
+            actions.Controls.Add(checkVisible);
+            actions.Controls.Add(clear);
             if (!matchingOnly) actions.Controls.Add(chooseFolder);
             layout.Controls.Add(actions, 0, 4);
             CancelButton = cancel;
@@ -153,6 +179,7 @@ namespace GorillaStudio.NameFolders
                 matchingSelection = new RosterEntry { Id = selected.Id, Name = selected.Name, SourceId = 0 };
             var recommended = new HashSet<string>(ModelLibrary.Match(candidates, matchingSelection).Select(candidate => candidate.Folder), StringComparer.OrdinalIgnoreCase);
             models.BeginUpdate();
+            refreshing = true;
             try
             {
                 models.Items.Clear();
@@ -163,15 +190,21 @@ namespace GorillaStudio.NameFolders
                     var item = new ListViewItem(candidate.Name ?? Path.GetFileName(candidate.Folder)) { Tag = candidate, ToolTipText = candidate.Folder };
                     item.SubItems.Add(candidate.Folder);
                     models.Items.Add(item);
+                    item.Checked = checkedFolders.Contains(candidate.Folder);
                     if (string.Equals(candidate.Folder, initialPath, StringComparison.OrdinalIgnoreCase)) item.Selected = true;
                 }
                 if (models.SelectedItems.Count == 0 && models.Items.Count > 0) models.Items[0].Selected = true;
             }
-            finally { models.EndUpdate(); }
-            load.Enabled = models.SelectedItems.Count == 1;
+            finally { refreshing = false; models.EndUpdate(); }
+            UpdateStatus();
+        }
+
+        private void UpdateStatus()
+        {
+            load.Enabled = checkedFolders.Count > 0;
             status.Text = models.Items.Count == 0
                 ? (matchingOnly ? "No matches for this search. Click Show all." : "No matching model folders. Click Show all or choose another folder.")
-                : models.Items.Count + " of " + candidates.Count + " model folders · select a folder, then load it";
+                : models.Items.Count + " of " + candidates.Count + " model folders · " + checkedFolders.Count + " checked (checks remain when searching)";
         }
 
         private static string SearchKey(string value)
@@ -184,19 +217,23 @@ namespace GorillaStudio.NameFolders
 
         private void LoadSelected()
         {
-            if (models.SelectedItems.Count != 1) return;
-            var candidate = (ModelCandidate)models.SelectedItems[0].Tag;
-            if (!Directory.Exists(candidate.Folder))
+            var choices = candidates.Where(candidate => checkedFolders.Contains(candidate.Folder)).ToList();
+            if (choices.Count == 0) return;
+            if (choices.Any(candidate => !Directory.Exists(candidate.Folder)))
             {
                 status.Text = "This folder is no longer available. Choose another folder or refresh your mod library.";
                 return;
             }
-            Complete(candidate.Folder);
+            selectedModels = choices;
+            selectedPath = choices[0].Folder;
+            DialogResult = DialogResult.OK;
+            Close();
         }
 
         private void Complete(string path)
         {
             selectedPath = path;
+            selectedModels = new List<ModelCandidate> { new ModelCandidate { Folder = path, Name = Path.GetFileName(path) } };
             DialogResult = DialogResult.OK;
             Close();
         }

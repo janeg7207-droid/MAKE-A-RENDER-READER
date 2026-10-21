@@ -73,6 +73,7 @@ internal static class Program
         Equal(true, State.RegisteredAttireContext);
         Equal(State.Root, State.RegisteredAttireSource);
         Equal(State.Root, State.RegisteredAttireRoots.Single());
+        Equal(State.RosterTable, State.RegisteredModelsContext);
         Equal(true, State.Commits.All(thread => thread == State.UiThread));
         Equal(true, State.DiskThreads.Count >= 8);
         Equal(true, State.DiskThreads.All(thread => thread != State.UiThread));
@@ -269,6 +270,7 @@ internal static class State
     internal static DiscoveryAttireCatalogResult AttireResult;
     internal static bool RegisteredAttireContext;
     internal static string RegisteredAttireSource;
+    internal static string RegisteredModelsContext;
     internal static string[] RegisteredAttireRoots;
     internal static readonly List<DiscoveryAttireSource> DiscoverySources = new List<DiscoveryAttireSource>();
     internal static void Reset()
@@ -282,7 +284,7 @@ internal static class State
         ExpectWorkers = true; BlockPictures = MutateOnDispose = CancelPicker = Refreshed = ThrowPictures = ThrowRead = ThrowMetadata = false;
         ChooseCharacterFolder = true;
         ReleasePictures.Reset(); DiskThreads.Clear(); Commits.Clear(); Registered = PlannedEntry = null;
-        AttireInventoryCount = 0; AttireResult = null; RegisteredAttireContext = false; RegisteredAttireSource = null;
+        AttireInventoryCount = 0; AttireResult = null; RegisteredAttireContext = false; RegisteredAttireSource = null; RegisteredModelsContext = null;
         DiscoverySources.Clear();
         Entry = new RosterEntry { Id = 4000, Name = "Selected Mod", Folder = Root, RosterTable = RosterTable,
             SourceId = 1506, IsMod = true, Source = "Chosen model folder", StockFolder = "1506_Original_Stock" };
@@ -430,6 +432,7 @@ namespace GorillaStudio.NameFolders
         public string SelectedFolder { get { return State.Root; } }
         public string CurrentRosterFile { get { return State.RosterTable; } }
         internal List<string> CurrentModelSearchRoots { get { return new List<string> { State.Root }; } }
+        internal string CurrentModelsContext { get { return State.RosterTable ?? Path.GetFullPath(State.Root); } }
         public bool DataRefreshed { get { return State.Refreshed; } }
         internal List<ModelCandidate> CurrentModelInventory { get { return new List<ModelCandidate> {
             new ModelCandidate { Folder = State.Root, Name = "Default", SourceId = 1506 },
@@ -504,11 +507,12 @@ namespace GorillaStudio.NameFolders
         private static void RememberRenderTable(string alias, string table) { State.Commit(); }
         private static void RememberPreparedRender(string alias, CharacterFolderPlan plan, RosterEntry entry, Dictionary<ulong, string> pictures) { State.Commit(); }
         private static void RegisterDiscoveryAttires(string alias, RosterEntry entry, IEnumerable<ModelCandidate> inventory,
-            DiscoveryAttireCatalogResult result, string sourceFolder = null, IEnumerable<string> modelRoots = null)
+            DiscoveryAttireCatalogResult result, string sourceFolder = null, IEnumerable<string> modelRoots = null, string rosterContext = null)
         {
             State.Commit(); State.RegisteredAttireContext = ReferenceEquals(result, State.AttireResult);
             State.RegisteredAttireSource = sourceFolder;
             State.RegisteredAttireRoots = modelRoots?.ToArray() ?? new string[0];
+            State.RegisteredModelsContext = rosterContext;
         }
         private static void ResolveDiscoveryAttireSources(DiscoveryAttireCatalogResult result, CancellationToken token)
         { State.Disk(); }

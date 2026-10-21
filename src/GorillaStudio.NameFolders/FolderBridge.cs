@@ -93,6 +93,7 @@ namespace GorillaStudio.NameFolders
             internal List<RosterEntry> Entries;
             internal List<ModelCandidate> Models;
             internal List<string> ModelRoots;
+            internal string ModelsContext;
             internal bool RememberRoster;
         }
 
@@ -104,6 +105,7 @@ namespace GorillaStudio.NameFolders
             internal string Alias;
             internal List<ModelCandidate> Models;
             internal List<string> ModelRoots;
+            internal string ModelsContext;
             internal DiscoveryAttireCatalogResult Attires;
         }
 
@@ -139,6 +141,7 @@ namespace GorillaStudio.NameFolders
                     Entries = picker.Entries.Select(CopyRosterEntry).ToList(),
                     Models = picker.CurrentModelInventory,
                     ModelRoots = picker.CurrentModelSearchRoots,
+                    ModelsContext = picker.CurrentModelsContext,
                     RememberRoster = session.ChooseCharacterFolder
                 };
             }
@@ -198,7 +201,7 @@ namespace GorillaStudio.NameFolders
             if (choice.RememberRoster && !string.IsNullOrWhiteSpace(choice.RosterFile))
                 RememberRosterFile(choice.RosterFile);
             return new PreparedRosterModel { Entry = choice.Entry, Plan = plan, Pictures = pictures, Alias = alias,
-                Models = models, ModelRoots = choice.ModelRoots, Attires = attires };
+                Models = models, ModelRoots = choice.ModelRoots, ModelsContext = choice.ModelsContext, Attires = attires };
         }
 
         private static string CommitRosterModel(PreparedRosterModel prepared)
@@ -208,7 +211,7 @@ namespace GorillaStudio.NameFolders
             lastDiscoveryRoot = prepared.Plan.DataRoot;
             RememberRenderTable(prepared.Alias, prepared.Entry.RosterTable);
             RememberPreparedRender(prepared.Alias, prepared.Plan, prepared.Entry, prepared.Pictures);
-            RegisterDiscoveryAttires(prepared.Alias, prepared.Entry, prepared.Models, prepared.Attires, prepared.Plan.SourceFolder, prepared.ModelRoots);
+            RegisterDiscoveryAttires(prepared.Alias, prepared.Entry, prepared.Models, prepared.Attires, prepared.Plan.SourceFolder, prepared.ModelRoots, prepared.ModelsContext);
             RegisterSelection(prepared.Alias, prepared.Entry);
             QueueModelDiscoveryTaunts(prepared.Alias, prepared.Plan.DataRoot);
             return prepared.Alias;

@@ -23,6 +23,7 @@ namespace GorillaStudio.NameFolders
         public string UnavailableReason { get; set; }
         public bool IsAvailable { get { return string.IsNullOrWhiteSpace(UnavailableReason); } }
         internal bool RequiresDiscoverySourceProof { get; set; }
+        internal bool RequiresSelectedSourceProof { get; set; }
     }
 
     public sealed class BatchRenderJob
@@ -40,6 +41,9 @@ namespace GorillaStudio.NameFolders
         public ulong AttireDiscoveryModelHash { get; internal set; }
         public bool HasExplicitAttire { get; internal set; }
         public bool AttireLocalSourceMustRemainMapped { get; internal set; }
+        public bool AttireSourceMustRemainSelected { get; internal set; }
+        internal string AttireSelectedRosterContext { get; set; }
+        internal string AttireSelectedWrestlerName { get; set; }
         internal string AttireLocalSourceFolder { get; set; }
         internal int AttireLocalSourceId { get; set; }
         internal int AttireLocalLogicalId { get; set; }
@@ -171,7 +175,8 @@ namespace GorillaStudio.NameFolders
         }
 
         /// <summary>Lists active mapped choices and extra MCDs contained in the same proven character sources.</summary>
-        public static List<BatchAttireSelection> AvailableAttires(RosterEntry entry, DiscoveryAttireCatalogResult catalog)
+        public static List<BatchAttireSelection> AvailableAttires(RosterEntry entry, DiscoveryAttireCatalogResult catalog,
+            IEnumerable<ModelSourceAssociation> associations = null, string associationContext = null)
         {
             if (entry == null) throw new ArgumentNullException("entry");
             entry = CharacterEntry(entry);
@@ -190,11 +195,15 @@ namespace GorillaStudio.NameFolders
                 paths.Add(DiscoveryAttireOptions.Key(choice.SourceFolder, choice.RelativePath));
             }
             bool mappedDefault = result.Any(choice => choice.IsDefault);
+            List<ModelCandidate> selectedSources = ModelSourceAssociations.Sources(associations, entry, associationContext);
             var roots = sources.Select(source => source.SourceFolder).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (ReadyFolder(entry) && !roots.Any(folder => SameSource(folder, entry.Folder))) roots.Add(entry.Folder);
+            foreach (ModelCandidate selected in selectedSources)
+                if (!roots.Any(folder => SameSource(folder, selected.Folder))) roots.Add(selected.Folder);
             foreach (string folder in roots)
             {
-                int sourceId = LocalSourceId(entry, folder, sources);
+                int sourceId = LocalSourceId(entry, folder, sources, selectedSources);
+                ModelCandidate selectedSource = selectedSources.FirstOrDefault(item => SameSource(item.Folder, folder));
                 foreach (AlternateAttire attire in AlternateAttires.Read(folder))
                 {
                     string relative;
@@ -205,6 +214,8 @@ namespace GorillaStudio.NameFolders
                     const string defaultSuffix = " (default)";
                     if (mappedDefault && label.EndsWith(defaultSuffix, StringComparison.OrdinalIgnoreCase))
                         label = label.Substring(0, label.Length - defaultSuffix.Length);
+                    if (selectedSource != null && selectedSources.Count > 1)
+                        label = (selectedSource.Name ?? Path.GetFileName(folder)) + " · " + label;
                     result.Add(new BatchAttireSelection { SourceFolder = folder, SourceId = sourceId,
                         RelativePath = relative, DisplayName = label + (sources.Count > 0 ? " (local)" : ""),
                         IsDefault = attire.IsDefault && !mappedDefault });
@@ -224,18 +235,38 @@ namespace GorillaStudio.NameFolders
             return result;
         }
 
+        /// <summary>Uses one existing attire from each complete model pack explicitly selected for this wrestler.</summary>
+        public static List<BatchAttireSelection> DefaultAssociatedAttires(RosterEntry entry, DiscoveryAttireCatalogResult catalog,
+            IEnumerable<ModelSourceAssociation> associations, string associationContext = null)
+        {
+            List<ModelCandidate> selected = ModelSourceAssociations.Sources(associations, entry, associationContext);
+            List<BatchAttireSelection> available = AvailableAttires(entry, catalog, associations, associationContext);
+            var result = new List<BatchAttireSelection>();
+            foreach (ModelCandidate source in selected)
+            {
+                List<BatchAttireSelection> choices = available.Where(choice => choice.IsAvailable && SameSource(choice.SourceFolder, source.Folder)).ToList();
+                BatchAttireSelection first = choices.FirstOrDefault(choice => choice.IsDefault) ?? choices.FirstOrDefault();
+                if (first == null) throw new InvalidOperationException("The selected model pack has no available attire: " + source.Folder);
+                result.Add(first);
+            }
+            return result;
+        }
+
         private static bool LocalAttireError(Exception error)
         {
             return error is IOException || error is UnauthorizedAccessException || error is ArgumentException
                 || error is System.Security.SecurityException || error is NotSupportedException;
         }
 
-        private static int LocalSourceId(RosterEntry entry, string folder, IEnumerable<DiscoveryAttireSource> sources)
+        private static int LocalSourceId(RosterEntry entry, string folder, IEnumerable<DiscoveryAttireSource> sources,
+            IEnumerable<ModelCandidate> selectedSources = null)
         {
             int[] proven = sources.Where(source => source.LogicalId == entry.Id && SameSource(source.SourceFolder, folder))
                 .Select(source => source.SourceId).Where(id => id > 0 && id <= 65535).Distinct().ToArray();
             if (proven.Length > 1) throw new InvalidOperationException("The selected character source has different physical model IDs. Choose a specific model folder.");
             if (proven.Length == 1) return proven[0];
+            ModelCandidate selected = (selectedSources ?? Enumerable.Empty<ModelCandidate>()).FirstOrDefault(item => SameSource(item.Folder, folder));
+            if (selected != null) return selected.SourceId > 0 ? selected.SourceId : entry.Id;
             if (!SameSource(folder, entry.Folder))
                 throw new InvalidOperationException("The selected local attire no longer belongs to an active Discovery character source. Refresh the attire choices.");
             return CharacterFolders.PhysicalId(folder) ?? (entry.SourceId > 0 ? entry.SourceId : entry.Id);
@@ -243,17 +274,26 @@ namespace GorillaStudio.NameFolders
 
         /// <summary>Resolves explicitly selected active costume sources before ordinary ambiguous-model handling.</summary>
         public static BatchRenderPlan CreateWithAttires(IEnumerable<RosterEntry> selected, IEnumerable<ModelCandidate> inventory,
-            string rosterTable, IDictionary<int, List<BatchAttireSelection>> selections)
+            string rosterTable, IDictionary<int, List<BatchAttireSelection>> selections,
+            IEnumerable<ModelSourceAssociation> associations = null, string associationContext = null)
         {
+            associationContext = associationContext ?? rosterTable;
             var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(CharacterEntry).ToList();
             var models = CharacterModels(inventory);
+            List<ModelSourceAssociation> selectedModels = (associations ?? Enumerable.Empty<ModelSourceAssociation>()).ToList();
             var normalized = new Dictionary<int, List<BatchAttireSelection>>();
             foreach (var group in rows.GroupBy(entry => entry.Id).Where(group => group.Count() == 1 && group.Key >= 1 && group.Key <= 65535))
             {
                 RosterEntry entry = group.First();
                 List<BatchAttireSelection> choices;
-                if (selections == null || !selections.TryGetValue(entry.Id, out choices) || choices == null || choices.Count == 0) continue;
                 DiscoveryAttireCatalogResult catalog = null;
+                List<ModelCandidate> selectedSources = ModelSourceAssociations.Sources(selectedModels, entry, associationContext);
+                if (selections == null || !selections.TryGetValue(entry.Id, out choices) || choices == null || choices.Count == 0)
+                {
+                    if (selectedSources.Count < 2) continue;
+                    catalog = DiscoveryAttireCatalog.Find(entry, models, rosterTable);
+                    choices = DefaultAssociatedAttires(entry, catalog, selectedModels, associationContext);
+                }
                 var safe = new List<BatchAttireSelection>();
                 foreach (BatchAttireSelection choice in choices)
                 {
@@ -272,13 +312,15 @@ namespace GorillaStudio.NameFolders
                         string folder = choice.SourceFolder ?? entry.Folder;
                         bool currentSource = SameSource(folder, entry.Folder);
                         bool provenSource = catalog.Sources.Any(source => source.LogicalId == entry.Id && SameSource(source.SourceFolder, folder));
-                        if (!currentSource && !provenSource)
-                            throw new InvalidOperationException("An attire in another model folder requires an active Discovery source for this wrestler. Refresh the attire choices.");
+                        bool selectedSource = selectedSources.Any(source => SameSource(source.Folder, folder));
+                        if (!currentSource && !provenSource && !selectedSource)
+                            throw new InvalidOperationException("An attire in another model folder requires an active Discovery source or an explicitly selected model pack for this wrestler. Choose its models again.");
                         string relative = DiscoveryAttireOptions.ValidateLocalSelection(folder, folder, choice.RelativePath);
                         if (relative == null) throw new ArgumentException("Choose an actual attire model for " + entry.Name + ".");
-                        safe.Add(new BatchAttireSelection { SourceFolder = folder, SourceId = LocalSourceId(entry, folder, catalog.Sources),
+                        safe.Add(new BatchAttireSelection { SourceFolder = folder, SourceId = LocalSourceId(entry, folder, catalog.Sources, selectedSources),
                             RelativePath = relative, DisplayName = choice.DisplayName, IsDefault = choice.IsDefault,
-                            RequiresDiscoverySourceProof = !currentSource });
+                            RequiresDiscoverySourceProof = !currentSource && provenSource,
+                            RequiresSelectedSourceProof = !currentSource && !provenSource && selectedSource });
                         if (provenSource && string.IsNullOrWhiteSpace(entry.RosterTable) && !string.IsNullOrWhiteSpace(rosterTable))
                             entry.RosterTable = Path.GetFullPath(rosterTable);
                     }
@@ -288,12 +330,20 @@ namespace GorillaStudio.NameFolders
                 entry.Folder = first.SourceFolder;
                 if (first.SourceId > 0) entry.SourceId = first.SourceId;
             }
-            return ExpandAttires(Create(rows, models, rosterTable), normalized, true);
+            BatchRenderPlan plan = ExpandAttires(Create(rows, models, rosterTable), normalized, true);
+            foreach (BatchRenderJob job in plan.Jobs.Where(item => item.AttireSourceMustRemainSelected))
+            {
+                job.AttireSelectedRosterContext = ModelSourceAssociations.Context(job.Entry, associationContext);
+                job.AttireSelectedWrestlerName = job.Entry.Name;
+            }
+            return plan;
         }
 
-        public static DiscoveryAttireCatalogResult RefreshDiscoveryAttires(BatchRenderJob job, IEnumerable<ModelCandidate> inventory, string rosterTable)
+        public static DiscoveryAttireCatalogResult RefreshDiscoveryAttires(BatchRenderJob job, IEnumerable<ModelCandidate> inventory, string rosterTable,
+            IEnumerable<ModelSourceAssociation> associations = null, string associationContext = null)
         {
             if (job == null || job.Entry == null) throw new ArgumentException("A wrestler job is required.", "job");
+            associationContext = associationContext ?? rosterTable;
             var result = FindAttires(job.Entry, inventory, rosterTable);
             if (!string.IsNullOrWhiteSpace(job.AttireDiscoveryKey))
                 VerifyDiscoveryChoice(job.Entry, new BatchAttireSelection { SourceFolder = job.Entry.Folder,
@@ -315,6 +365,16 @@ namespace GorillaStudio.NameFolders
                         && SameSource(source.SourceFolder, job.AttireLocalSourceFolder)).ToList();
                     if (proof.Count == 0 || LocalSourceId(job.Entry, job.Entry.Folder, proof) != job.AttireLocalSourceId)
                         throw new InvalidOperationException("The selected local attire no longer belongs to an active Discovery source for this wrestler. Refresh its attire choices.");
+                }
+                if (job.AttireSourceMustRemainSelected)
+                {
+                    if (!string.Equals(job.AttireSelectedWrestlerName, job.Entry.Name, StringComparison.Ordinal)
+                        || !string.Equals(job.AttireSelectedRosterContext, ModelSourceAssociations.Context(job.Entry, associationContext), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("The selected model pack's wrestler or roster context changed. Choose its models again.");
+                    List<ModelCandidate> selectedSources = ModelSourceAssociations.Sources(associations, job.Entry, associationContext);
+                    if (!selectedSources.Any(source => SameSource(source.Folder, job.AttireLocalSourceFolder)
+                        && (source.SourceId > 0 ? source.SourceId : job.Entry.Id) == job.AttireLocalSourceId))
+                        throw new InvalidOperationException("This model pack is no longer explicitly selected for this wrestler. Choose its models again.");
                 }
                 DiscoveryAttireOptions.ValidateLocalSelection(job.Entry.Folder, job.Entry.Folder, job.AttireSourceRelativePath);
             }
@@ -375,6 +435,7 @@ namespace GorillaStudio.NameFolders
                         AttireSourceRelativePath = relative, AttireName = string.IsNullOrWhiteSpace(choice.DisplayName) ? relative : choice.DisplayName,
                         AttireDiscoveryKey = choice.DiscoveryKey, AttireDiscoveryModelHash = choice.DiscoveryModelHash,
                         AttireLocalSourceMustRemainMapped = choice.RequiresDiscoverySourceProof,
+                        AttireSourceMustRemainSelected = choice.RequiresSelectedSourceProof,
                         AttireLocalSourceFolder = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? Path.GetFullPath(folder) : null,
                         AttireLocalSourceId = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? entry.SourceId : 0,
                         AttireLocalLogicalId = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? entry.Id : 0,

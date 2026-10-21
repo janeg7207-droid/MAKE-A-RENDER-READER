@@ -83,6 +83,12 @@ namespace GorillaStudio.NameFolders
         // cached previews and completed background MAKE jobs, before it displays or installs it.
         public static void CompleteRenderResult(object owner, object value)
         {
+            try { CompleteRenderResultCore(owner, value); }
+            finally { SaveSelectionLoopPolicy(value); }
+        }
+
+        private static void CompleteRenderResultCore(object owner, object value)
+        {
             var result = value as IDictionary<string, object>;
             if (owner == null || result == null) return;
             string folder = owner.GetType().GetField("Folder", InstanceMembers)?.GetValue(owner) as string;

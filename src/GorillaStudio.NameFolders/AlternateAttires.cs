@@ -19,6 +19,8 @@ namespace GorillaStudio.NameFolders
         public string SourceFolder { get; internal set; }
         public string SourceRelativePath { get; internal set; }
         public string DiscoveryKey { get; internal set; }
+        // An explicit pack choice is authorization, not a game costume mapping.
+        public string ExplicitSourceKey { get; internal set; }
         public ulong DiscoveryModelHash { get; internal set; }
         public string UnavailableReason { get; internal set; }
         public bool IsAvailable { get { return string.IsNullOrWhiteSpace(UnavailableReason); } }

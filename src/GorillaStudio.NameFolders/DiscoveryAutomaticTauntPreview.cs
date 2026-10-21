@@ -137,6 +137,7 @@ namespace GorillaStudio.NameFolders
                     install.Click += (sender, args) => {
                         if (RandyPreviewDisplayed(window)) { args.Handled = true; install.IsEnabled = false; return; }
                         originalInstall.Invoke(window, new object[] { sender, args });
+                        InstallSelectionLoopPolicy(window);
                     };
                 }
             }
@@ -162,6 +163,7 @@ namespace GorillaStudio.NameFolders
             ClearRandyBrowserPreview(window);
             UpdateRandyPreviewButton(window, state);
             AttachRandyPreviewBuildControls(window);
+            AttachSelectionLoopPolicyHints(window);
         }
 
         private static void ArmAutomaticTauntInput(Window window, AutomaticTauntPreview state)

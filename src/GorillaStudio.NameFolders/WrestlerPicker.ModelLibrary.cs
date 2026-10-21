@@ -30,6 +30,7 @@ namespace GorillaStudio.NameFolders
         private readonly CancellationTokenSource modelLifetime = new CancellationTokenSource();
 
         private string ModelsContext { get { return currentRosterTable ?? Path.GetFullPath(sourceFolder); } }
+        internal string CurrentModelsContext { get { return ModelsContext; } }
         private string ModelsSettingsPath
         {
             get { return Path.Combine(FolderBridge.StorageDirectory, "models-" + FolderNames.SourceKey(ModelsContext.ToUpperInvariant()) + ".json"); }
@@ -80,6 +81,14 @@ namespace GorillaStudio.NameFolders
         private List<string> SearchRoots()
         {
             var roots = new List<string>(modelRoots);
+            // A pack selected for a wrestler remains discoverable even when it
+            // lives outside the main model library.
+            List<ModelSourceAssociation> associations;
+            try { associations = FolderBridge.ReadSelectedModelAssociations(); }
+            catch (InvalidDataException) { associations = new List<ModelSourceAssociation>(); }
+            foreach (ModelSourceAssociation record in associations)
+                if (string.Equals(record.RosterContext, ModelSourceAssociations.Context(null, ModelsContext), StringComparison.OrdinalIgnoreCase))
+                    roots.AddRange((record.Sources ?? new List<ModelCandidate>()).Where(item => item != null).Select(item => item.Folder));
             roots.AddRange(Entries.Where(entry => !string.IsNullOrWhiteSpace(entry.Folder)).Select(entry => entry.Folder));
             string data = currentRosterTable == null ? sourceFolder : DiscoveryProfiles.DataRoot(currentRosterTable);
             roots.Add(data);
@@ -188,31 +197,38 @@ namespace GorillaStudio.NameFolders
             string initial = entry.Folder ?? modelRoots.LastOrDefault() ?? sourceFolder;
             while (!IsDisposed)
             {
-                string chosen = ModelChoiceDialog.Choose(this, entry, choices, initial);
+                List<ModelCandidate> remembered;
+                try { remembered = FolderBridge.SelectedModelSources(entry, ModelsContext); }
+                catch (InvalidDataException) { remembered = new List<ModelCandidate>(); }
+                List<ModelCandidate> chosen = ModelChoiceDialog.ChooseMany(this, entry, choices, initial, remembered.Select(item => item.Folder));
                 if (chosen == null) return null;
                 // A pasted/dropped collection root is useful too. Every manual result
                 // goes through this same validation, including a second folder choice.
-                List<ModelCandidate> inside = await Task.Run(() => ModelLibrary.Scan(chosen, modelLifetime.Token), modelLifetime.Token);
+                var validated = new List<ModelCandidate>();
+                List<ModelCandidate> inside = null;
+                string collection = null;
+                foreach (ModelCandidate selected in chosen)
+                {
+                    inside = await Task.Run(() => ModelLibrary.Scan(selected.Folder, modelLifetime.Token), modelLifetime.Token);
+                    if (inside.Count != 1) { collection = selected.Folder; break; }
+                    validated.Add(inside[0]);
+                }
                 if (IsDisposed) return null;
                 if (inside.Count == 0)
                 {
                     MessageBox.Show(this, "No extracted .mcd character models were found in that folder. Choose the folder containing your extracted mods.",
                         "Models folder", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    initial = chosen;
+                    initial = collection;
                     continue;
                 }
                 if (inside.Count > 1)
                 {
-                    if (!await AddModelsRootAsync(chosen)) return null;
+                    if (!await AddModelsRootAsync(collection)) return null;
                     choices = inside;
-                    initial = chosen;
+                    initial = collection;
                     continue;
                 }
-                ModelCandidate candidate = inside[0];
-                if (candidate.SourceId > 0) entry.SourceId = candidate.SourceId;
-                entry.Source = "Chosen model folder";
-                entry.IsMod = true;
-                return candidate.Folder;
+                return RememberModelSelection(entry, validated);
             }
             return null;
         }
@@ -238,6 +254,8 @@ namespace GorillaStudio.NameFolders
         {
             await modelScanTask;
             if (IsDisposed) return null;
+            List<ModelCandidate> associated = await Task.Run(() => FolderBridge.SelectedModelSources(entry, ModelsContext));
+            if (associated.Count > 0) return UseModelSelection(entry, associated);
             RosterModelResolution resolution = await Task.Run(() => RosterModelResolution.Resolve(entry, modelInventory, currentRosterTable));
             if (IsDisposed) return null;
             if (resolution.State == RosterModelState.Ready)
@@ -252,13 +270,9 @@ namespace GorillaStudio.NameFolders
             }
             if (resolution.State == RosterModelState.ChooseMatchingModel)
             {
-                string chosen = ModelChoiceDialog.Choose(this, entry, resolution.Choices, entry.Folder, true);
+                List<ModelCandidate> chosen = ModelChoiceDialog.ChooseMany(this, entry, resolution.Choices, entry.Folder, null, true);
                 if (chosen == null) return null;
-                ModelCandidate selected = resolution.Choices.First(candidate => string.Equals(candidate.Folder, chosen, StringComparison.OrdinalIgnoreCase));
-                if (selected.SourceId > 0) entry.SourceId = selected.SourceId;
-                entry.Source = "Chosen model folder";
-                entry.IsMod = true;
-                return selected.Folder;
+                return RememberModelSelection(entry, chosen);
             }
             if (resolution.State == RosterModelState.InstalledGame)
             {
@@ -294,6 +308,34 @@ namespace GorillaStudio.NameFolders
             MessageBox.Show(this, notice + "\n\nUse Set model library… to add another collection, then load this wrestler again.",
                 "Model files not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return null;
+        }
+
+        private string RememberModelSelection(RosterEntry entry, List<ModelCandidate> selected)
+        {
+            selected = selected.Select(item => {
+                if ((File.GetAttributes(item.Folder) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("Choose the original model folder rather than a linked folder: " + item.Folder);
+                string physical = DirectoryLinks.Resolve(item.Folder);
+                int physicalId = CharacterFolders.PhysicalId(physical) ?? item.SourceId;
+                return new ModelCandidate {
+                    Folder = physicalId >= 1 && physicalId <= 65535 ? AutomaticAttire.CharacterRoot(physical, physicalId) : physical,
+                    Name = item.Name, SourceId = item.SourceId };
+            }).ToList();
+            FolderBridge.RememberSelectedModelSources(entry, ModelsContext, selected);
+            selected = FolderBridge.SelectedModelSources(entry, ModelsContext);
+            foreach (ModelCandidate source in selected)
+                if (!modelRoots.Contains(source.Folder, StringComparer.OrdinalIgnoreCase)) modelRoots.Add(source.Folder);
+            SaveModelRoots();
+            return UseModelSelection(entry, selected);
+        }
+
+        private static string UseModelSelection(RosterEntry entry, List<ModelCandidate> selected)
+        {
+            ModelCandidate primary = selected.FirstOrDefault(item => string.Equals(item.Folder, entry.Folder, StringComparison.OrdinalIgnoreCase)) ?? selected[0];
+            entry.SourceId = primary.SourceId > 0 ? primary.SourceId : entry.Id;
+            entry.Source = selected.Count > 1 ? "Chosen model folders" : "Chosen model folder";
+            entry.IsMod = true;
+            return primary.Folder;
         }
     }
 }
