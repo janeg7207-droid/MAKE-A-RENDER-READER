@@ -44,6 +44,7 @@ def _register_hair_colour_repair():
     repaired = set()
     warned = set()
     fallback_done = set()
+    decoded_images = {}
     automatic = os.environ.get("GORILLA_HAIR_CHOICE", "").strip().lower() == "auto"
     hidden = set(options.get("hide", "").split(","))
 
@@ -53,6 +54,26 @@ def _register_hair_colour_repair():
 
     def same_socket(left, right):
         return left == right
+
+    def usable_image(image):
+        if image is None:
+            return False
+        # Cached external and packed images load lazily: has_data can be false
+        # until size resolves their pixels. A failed load has zero dimensions.
+        # Resolve each datablock once, outside subsequent frame callbacks.
+        try:
+            identity = image.as_pointer()
+        except AttributeError:
+            identity = id(image)
+        except (RuntimeError, ReferenceError):
+            return False
+        if identity not in decoded_images:
+            try:
+                size = image.size
+                decoded_images[identity] = len(size) >= 2 and size[0] > 0 and size[1] > 0
+            except (AttributeError, TypeError, ValueError, RuntimeError, ReferenceError):
+                decoded_images[identity] = False
+        return decoded_images[identity]
 
     def active_shader(material):
         if not material.use_nodes or material.node_tree is None:
@@ -129,9 +150,14 @@ def _register_hair_colour_repair():
         if shade is not None and shade.from_node.type == "RGBTOBW":
             original = only_link(shade.from_node.inputs[0])
             if original is not None and original.from_node.type == "TEX_IMAGE" \
-                    and original.from_node.image is not None:
+                    and usable_image(original.from_node.image):
                 tree.links.new(original.from_socket, shader.inputs["Base Color"])
                 return True
+            if original is not None and original.from_node.type == "TEX_IMAGE":
+                # An older cached fallback may still sample a missing image.
+                # Keep its tint, without treating failed pixels as luminance.
+                tree.links.remove(shade)
+                ramp.inputs[0].default_value = 0.5
         elif shade is None:
             # Linking the private ramp never changes the BSDF socket's default,
             # so it still holds the model's original constant albedo.
@@ -160,7 +186,7 @@ def _register_hair_colour_repair():
                 and base.from_node.layer_name != "ColorMap":
             return
         if automatic and base is not None and base.from_node.type == "TEX_IMAGE" \
-                and base.from_node.image is not None:
+                and usable_image(base.from_node.image):
             fallback_done.add(identity)
             return  # An existing colour texture already supplies its natural tint.
         if natural and base is not None and base.from_node.type == "VERTEX_COLOR":
@@ -189,7 +215,7 @@ def _register_hair_colour_repair():
                 ramp.label = "Gorilla hair colour fallback"
                 ramp.color_ramp.elements[0].color = dark + (1.0,)
                 ramp.color_ramp.elements[1].color = light + (1.0,)
-                if source is not None and not (source.from_node.type == "TEX_IMAGE" and source.from_node.image is None):
+                if source is not None and not (source.from_node.type == "TEX_IMAGE" and not usable_image(source.from_node.image)):
                     shade = tree.nodes.new("ShaderNodeRGBToBW")
                     tree.links.new(source.from_socket, shade.inputs[0])
                     tree.links.new(shade.outputs[0], ramp.inputs[0])
@@ -239,7 +265,7 @@ def _register_hair_colour_repair():
                 continue
             image_link = only_link(separate.inputs[0])
             if image_link is None or image_link.from_node.type != "TEX_IMAGE" \
-                    or image_link.from_node.image is None \
+                    or not usable_image(image_link.from_node.image) \
                     or not same_socket(image_link.from_socket, image_link.from_node.outputs["Color"]):
                 continue
             active_output = any(node.type == "OUTPUT_MATERIAL" and getattr(node, "is_active_output", True)

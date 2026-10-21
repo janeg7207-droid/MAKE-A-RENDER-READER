@@ -167,8 +167,11 @@ def shader(material):
     return next(node for node in material.node_tree.nodes if node.type == "BSDF_PRINCIPLED")
 
 
-def image(name):
-    return types.SimpleNamespace(name=name, colorspace_settings=types.SimpleNamespace())
+def image(name, size=(8, 8)):
+    # Cached external/packed images can have has_data=False until size loads
+    # their pixels. Failed loads retain a non-null image datablock.
+    return types.SimpleNamespace(name=name, size=size, has_data=False,
+                                 colorspace_settings=types.SimpleNamespace())
 
 
 def mesh(material):
@@ -586,6 +589,99 @@ def main():
           "Auto kept a previous manual shade on an originally white shader")
     check(connection(shader(white_copy).inputs["Alpha"]) == white_alpha, "Cached white shader repair changed coverage")
 
+    # A non-null cached image is not proof that its external pixels loaded.
+    # Missing textures must not outrank valid vertex albedo or feed a tint's
+    # luminance. Existing alpha/roughness links and shared body materials stay.
+    invalid_image_results = []
+    for dimensions in ((0, 0), (0, 8), (8, 0)):
+        callback, unused = load_wrapper((0.006, 0.004, 0.002), (0.05, 0.035, 0.02), choice="auto")
+        broken = generic("Missing external albedo " + str(dimensions), colour_texture=True, alpha=True)
+        bsdf = shader(broken)
+        texture = bsdf.inputs["Base Color"].links[0].from_node
+        texture.image = image("cached-missing-colour.dds", size=dimensions)
+        obj = MeshObject("M_Hair_ALPHA:skinned", broken, colours=natural)
+        body = MeshObject("body:skinned", broken, shared_data=obj.data)
+        coverage, roughness = connection(bsdf.inputs["Alpha"]), connection(bsdf.inputs["Roughness"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            callback(types.SimpleNamespace(objects=[obj, body]))
+        fixed = shader(obj.material_slots[0].material)
+        check(fixed.inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR",
+              "A non-null zero-size texture overrode natural vertex hair colour")
+        check(body.material_slots[0].material is broken and bsdf.inputs["Base Color"].links[0].from_node is texture,
+              "Invalid-image fallback changed the shared body material")
+        check(connection(fixed.inputs["Alpha"]) == coverage and connection(fixed.inputs["Roughness"]) == roughness
+              and fixed.inputs["Roughness"].default_value == 0.73,
+              "Invalid-image fallback changed coverage or roughness")
+
+        callback, unused = load_wrapper((0.0035, 0.0028, 0.0024), (0.018, 0.0144, 0.0126))
+        missing = generic("Missing manual albedo " + str(dimensions), colour_texture=True, alpha=True)
+        source = shader(missing).inputs["Base Color"].links[0].from_node
+        source.image = texture.image
+        manual_obj = MeshObject("M_Hair_ALPHA:skinned", missing, colours=[(1.0, 1.0, 1.0)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            callback(types.SimpleNamespace(objects=[manual_obj]))
+        private = manual_obj.material_slots[0].material
+        ramp = shader(private).inputs["Base Color"].links[0].from_node
+        check(ramp.type == "VALTORGB" and not ramp.inputs[0].links and ramp.inputs[0].default_value == 0.5,
+              "Failed image pixels were used as luminance for a manual tint")
+        check(ramp.color_ramp.elements[0].color == (0.0035, 0.0028, 0.0024, 1.0)
+              and ramp.color_ramp.elements[1].color == (0.018, 0.0144, 0.0126, 1.0),
+              "Invalid-image handling changed the selected manual palette")
+        # Emulate an older saved private ramp that still samples failed pixels.
+        old_source = private.node_tree.nodes.new("ShaderNodeTexImage")
+        old_source.image = texture.image
+        shade = private.node_tree.nodes.new("ShaderNodeRGBToBW")
+        private.node_tree.links.new(old_source.outputs["Color"], shade.inputs[0])
+        private.node_tree.links.new(shade.outputs[0], ramp.inputs[0])
+        callback, unused = load_wrapper((0.006, 0.004, 0.002), (0.05, 0.035, 0.02), choice="auto")
+        with contextlib.redirect_stdout(io.StringIO()):
+            callback(types.SimpleNamespace(objects=[manual_obj]))
+        check(shader(private).inputs["Base Color"].links[0].from_node is ramp
+              and not ramp.inputs[0].links and ramp.inputs[0].default_value == 0.5,
+              "Auto restored a missing texture or retained its stale luminance link")
+        invalid_image_results.append({"dimensions": dimensions, "natural_albedo_restored": True,
+                                      "failed_luminance_ignored": True, "cached_auto_texture_not_restored": True})
+
+    # Empty RAI datablocks cannot establish the native strand-shader identity.
+    callback, unused = load_wrapper((0.006, 0.004, 0.002), (0.05, 0.035, 0.02))
+    invalid_rai = hair_material("Empty cached RAI")
+    old_alpha = connection(shader(invalid_rai).inputs["Alpha"])
+    old_roughness = connection(shader(invalid_rai).inputs["Roughness"])
+    separate = shader(invalid_rai).inputs["Alpha"].links[0].from_node
+    separate.inputs[0].links[0].from_node.image = image("cached-missing-rai.dds", size=(0, 0))
+    rai_obj = MeshObject("M_Hair_ALPHA:skinned", invalid_rai, colours=[(1.0, 1.0, 1.0)])
+    with contextlib.redirect_stdout(io.StringIO()):
+        callback(types.SimpleNamespace(objects=[rai_obj]))
+    rai_fixed = shader(rai_obj.material_slots[0].material)
+    check(rai_fixed.inputs["Base Color"].links[0].from_node.type == "VALTORGB",
+          "A zero-size RAI image was used to construct native strand colour")
+    check(connection(rai_fixed.inputs["Alpha"]) == old_alpha
+          and connection(rai_fixed.inputs["Roughness"]) == old_roughness,
+          "Missing RAI handling invented coverage or roughness")
+
+    class LazyImage:
+        def __init__(self):
+            self.name, self.has_data, self.size_reads = "lazy-packed-albedo.dds", False, 0
+            self.packed_file = object()
+
+        @property
+        def size(self):
+            self.size_reads += 1
+            self.has_data = True
+            return (8, 8)
+
+    callback, unused = load_wrapper((0.006, 0.004, 0.002), (0.05, 0.035, 0.02), choice="auto")
+    lazy = LazyImage()
+    valid_lazy = generic("Valid lazy packed albedo", colour_texture=True)
+    shader(valid_lazy).inputs["Base Color"].links[0].from_node.image = lazy
+    lazy_obj = MeshObject("M_Hair_ALPHA:skinned", valid_lazy)
+    check(not lazy.has_data, "The lazy fixture must begin without decoded pixel data")
+    callback(types.SimpleNamespace(objects=[lazy_obj]))
+    callback(types.SimpleNamespace(objects=[lazy_obj]))
+    check(lazy_obj.material_slots[0].material is valid_lazy and lazy.has_data,
+          "A valid lazy or packed image was mistaken for missing pixels")
+    check(lazy.size_reads == 1, "Repeated frames reloaded the same texture dimensions")
+
     # Invalid/missing colour settings must never create a tint or duplicate a handler.
     sys.argv = ["blender", "--", "capture", "output", "clip"]
     namespace = runpy.run_path(str(args.wrapper), run_name="__main__")
@@ -602,6 +698,9 @@ def main():
               "missing_RAI_named_hair_fallback": fallback_results,
               "natural_primary_hair_colours_retained_in_auto": True,
               "cached_manual_tint_to_auto_restores_original_texture_and_constant": True,
+              "nonnull_invalid_images": invalid_image_results,
+              "valid_lazy_packed_images_preserved": True,
+              "image_dimensions_checked_once_per_datablock": True,
               "alpha_not_invented_when_missing": True,
               "original_bytecode_unchanged": True, "windows_blender_images_or_game_executed": False}
     args.output.parent.mkdir(parents=True, exist_ok=True)
