@@ -45,6 +45,16 @@ def _register_hair_colour_repair():
     warned = set()
     fallback_done = set()
     decoded_images = {}
+    source_identities = {}
+    authored_slots = {}
+    source_done = set()
+    source_material_stems = {
+        "M_Hair": ("hair_alpha", "hair2_alpha", "m_hair_alpha"),
+        "M_Hair_Ent": ("hair_alpha", "hair2_alpha", "m_hair_alpha"),
+        "M_Combinations": ("combinations_alpha", "combination_alpha", "m_combinations_alpha"),
+        "M_Mustache": ("mustache_alpha", "m_mustache_alpha"),
+        "M_Beard": ("beard_alpha", "m_beard_alpha"),
+    }
     automatic = os.environ.get("GORILLA_HAIR_CHOICE", "").strip().lower() == "auto"
     hidden = set(options.get("hide", "").split(","))
 
@@ -129,6 +139,78 @@ def _register_hair_colour_repair():
                 meaningful += 1
         return total > 0 and meaningful * 2 >= total
 
+    def source_hair_slot(obj, index):
+        # Object names come from the last material range, so M_Hair can be
+        # named h_acce:skinned. Only the importer's retained source identity
+        # authorizes this additional path; the accessory slot stays excluded.
+        identity = obj.as_pointer()
+        if identity not in source_identities:
+            module = sys.modules.get("gorilla_geometry")
+            reader = getattr(module, "read_provenance", None)
+            source_identities[identity] = reader(obj) if callable(reader) else None
+        source = source_identities[identity]
+        if source is None or getattr(obj, "hide_render", False):
+            return None
+        allowed = source_material_stems.get(source.get("name"))
+        if allowed is None or source["name"] in hidden:
+            return None
+        original = obj.data.materials[index]
+        name = original.name
+        if "." in name and name.rsplit(".", 1)[1].isdigit():
+            name = name.rsplit(".", 1)[0]
+        stem = name.split(":", 1)[0]
+        if stem.lower() not in allowed or stem in hidden:
+            return None
+        return stem
+
+    def authored_slot_colours(obj, index):
+        identity = obj.as_pointer(), index
+        if identity in authored_slots:
+            return authored_slots[identity]
+        authored_slots[identity] = False
+        attributes = getattr(obj.data, "color_attributes", None)
+        layer = attributes.get("ColorMap") if attributes is not None else None
+        if layer is None:
+            attributes = getattr(obj.data, "vertex_colors", None)
+            layer = attributes.get("ColorMap") if attributes is not None else None
+        if layer is None or len(layer.data) == 0:
+            return False
+        domain = getattr(layer, "domain", "CORNER")
+        if domain not in ("CORNER", "POINT"):
+            return False
+        polygons = getattr(obj.data, "polygons", ())
+        count = sum(polygon.loop_total for polygon in polygons if polygon.material_index == index)
+        if count <= 0:
+            return False
+        step = max(1, (count + 2047) // 2048)
+        ordinal = total = meaningful = 0
+        for polygon in polygons:
+            if polygon.material_index != index:
+                continue
+            for loop_index in polygon.loop_indices:
+                sample = ordinal % step == 0
+                ordinal += 1
+                if not sample:
+                    continue
+                if domain == "POINT":
+                    loop_index = obj.data.loops[loop_index].vertex_index
+                if not 0 <= loop_index < len(layer.data):
+                    return False
+                item = layer.data[loop_index]
+                values = getattr(item, "color_srgb", None)
+                if values is None:
+                    values = item.color
+                rgb = tuple(float(value) for value in values[:3])
+                if len(rgb) != 3 or not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in rgb):
+                    return False
+                total += 1
+                white = min(rgb) >= 0.85 and max(rgb) - min(rgb) <= 0.1
+                primary_control = max(rgb) >= 0.95 and sum(value < 0.05 for value in rgb) >= 2
+                if not white and not primary_control:
+                    meaningful += 1
+        authored_slots[identity] = total > 0 and meaningful * 2 >= total
+        return authored_slots[identity]
+
     def owned_ramp(shader):
         base = only_link(shader.inputs["Base Color"])
         if base is None:
@@ -168,7 +250,7 @@ def _register_hair_colour_repair():
                 return True
         return False
 
-    def generic_hair_fallback(obj, index, slot, material, stem):
+    def generic_hair_fallback(obj, index, slot, material, stem, natural=None):
         identity = obj.as_pointer(), index
         if identity in fallback_done:
             return
@@ -178,7 +260,7 @@ def _register_hair_colour_repair():
         base = only_link(shader.inputs["Base Color"])
         # Native RAI repair and the renderer's own finished colour ramps must
         # not receive a second tint. Unknown procedural shaders stay intact.
-        natural = automatic and natural_primary_colours(obj, stem)
+        natural = automatic and (natural_primary_colours(obj, stem) if natural is None else natural)
         if base is not None and base.from_node.type not in ("VERTEX_COLOR", "TEX_IMAGE") \
                 and not (natural and owned_ramp(shader) is not None):
             return
@@ -242,6 +324,171 @@ def _register_hair_colour_repair():
                     pass
             raise
 
+    def native_coverage(tree, shader):
+        alpha = only_link(shader.inputs["Alpha"])
+        rough = only_link(shader.inputs["Roughness"])
+        if alpha is None or rough is None:
+            return None
+        separate = alpha.from_node
+        if separate.type != "SEPARATE_COLOR" or getattr(separate, "mode", "RGB") != "RGB" \
+                or not same_socket(alpha.from_socket, separate.outputs[1]) \
+                or rough.from_node != separate or not same_socket(rough.from_socket, separate.outputs[0]):
+            return None
+        image_link = only_link(separate.inputs[0])
+        if image_link is None or image_link.from_node.type != "TEX_IMAGE" \
+                or not usable_image(image_link.from_node.image) \
+                or not same_socket(image_link.from_socket, image_link.from_node.outputs["Color"]):
+            return None
+        active_output = any(node.type == "OUTPUT_MATERIAL" and getattr(node, "is_active_output", True)
+                            and any(link.from_node == shader for link in node.inputs["Surface"].links)
+                            for node in tree.nodes)
+        return separate if active_output else None
+
+    def native_finished_shader(tree, shader):
+        # The untouched renderer can replace ColorMap before render_pre. Its
+        # unlabelled RAI ramp is recognized by the exact original connections
+        # and coefficients, never by a loose procedural-node name match.
+        base = only_link(shader.inputs["Base Color"])
+        if base is None or base.from_node.type != "VECT_MATH" \
+                or base.from_node.operation != "SCALE":
+            return False
+        colour = base.from_node
+        source = only_link(colour.inputs[0])
+        scale = only_link(colour.inputs["Scale"])
+        if not same_socket(base.from_socket, colour.outputs[0]) \
+                or source is None or source.from_node.type != "VALTORGB" \
+                or not same_socket(source.from_socket, source.from_node.outputs[0]) \
+                or scale is None or scale.from_node.type != "MATH" \
+                or not same_socket(scale.from_socket, scale.from_node.outputs[0]):
+            return False
+        ramp, variation = source.from_node, scale.from_node
+        if getattr(variation, "use_clamp", False):
+            return False
+        shade = only_link(ramp.inputs[0])
+        varied = only_link(variation.inputs[0])
+        if shade is None or shade.from_node.type != "SEPARATE_COLOR":
+            return False
+        separate = shade.from_node
+        if not same_socket(shade.from_socket, separate.outputs[0]):
+            return False
+        if variation.operation == "MULTIPLY_ADD":
+            return native_coverage(tree, shader) == separate \
+                and varied is not None and varied.from_node == separate \
+                and same_socket(varied.from_socket, separate.outputs[2]) \
+                and constant(variation.inputs[1], 0.7) and constant(variation.inputs[2], 0.65)
+        # The native whole-material rebuild uses two math nodes instead of
+        # MULTIPLY_ADD, with a clamped coverage chain and constant roughness.
+        if variation.operation != "ADD" or not constant(variation.inputs[1], 0.65) \
+                or varied is None or varied.from_node.type != "MATH" \
+                or varied.from_node.operation != "MULTIPLY" \
+                or getattr(varied.from_node, "use_clamp", False) \
+                or not same_socket(varied.from_socket, varied.from_node.outputs[0]) \
+                or not constant(varied.from_node.inputs[1], 0.7):
+            return False
+        blue = only_link(varied.from_node.inputs[0])
+        if blue is None or blue.from_node != separate or not same_socket(blue.from_socket, separate.outputs[2]) \
+                or getattr(separate, "mode", "RGB") != "RGB":
+            return False
+        image_link = only_link(separate.inputs[0])
+        if image_link is None or image_link.from_node.type != "TEX_IMAGE" \
+                or not same_socket(image_link.from_socket, image_link.from_node.outputs["Color"]) \
+                or not usable_image(image_link.from_node.image) \
+                or not constant(shader.inputs["Roughness"], minimum=0.0, maximum=1.0):
+            return False
+        alpha = math_source(shader.inputs["Alpha"], "MULTIPLY")
+        if alpha is None or not getattr(alpha, "use_clamp", False) \
+                or not constant(alpha.inputs[1], minimum=0.0):
+            return False
+        cut = math_source(alpha.inputs[0], "SUBTRACT")
+        if cut is None or getattr(cut, "use_clamp", False) \
+                or not constant(cut.inputs[1], minimum=0.0, maximum=1.0):
+            return False
+        green = only_link(cut.inputs[0])
+        if green is None or green.from_node != separate or not same_socket(green.from_socket, separate.outputs[1]):
+            return False
+        for name in ("Specular IOR Level", "Specular"):
+            if name not in shader.inputs:
+                continue
+            specular = math_source(shader.inputs[name], "MULTIPLY")
+            if specular is None or getattr(specular, "use_clamp", False) \
+                    or not constant(specular.inputs[1], minimum=0.0):
+                return False
+            red = only_link(specular.inputs[0])
+            return red is not None and red.from_node == separate and same_socket(red.from_socket, separate.outputs[0])
+        return False
+
+    def constant(socket, expected=None, minimum=None, maximum=None):
+        value = socket.default_value
+        return not socket.links and math.isfinite(value) \
+            and (expected is None or abs(value - expected) < 1e-6) \
+            and (minimum is None or value >= minimum) and (maximum is None or value <= maximum)
+
+    def math_source(socket, operation):
+        link = only_link(socket)
+        if link is not None and link.from_node.type == "MATH" and link.from_node.operation == operation \
+                and same_socket(link.from_socket, link.from_node.outputs[0]):
+            return link.from_node
+        return None
+
+    def source_automatic_albedo(obj, index, slot, material):
+        identity = obj.as_pointer(), index
+        if identity in source_done:
+            return True
+        shader = active_shader(material)
+        if shader is None:
+            return False
+        base = only_link(shader.inputs["Base Color"])
+        own = owned_ramp(shader)
+        if base is not None and base.from_node.type == "TEX_IMAGE" and usable_image(base.from_node.image):
+            source_done.add(identity)
+            return True
+        texture = False
+        if own is not None and own.label == "Gorilla hair colour fallback":
+            shade = only_link(own.inputs[0])
+            original = only_link(shade.from_node.inputs[0]) if shade is not None and shade.from_node.type == "RGBTOBW" else None
+            texture = original is not None and original.from_node.type == "TEX_IMAGE" and usable_image(original.from_node.image)
+        natural = authored_slot_colours(obj, index)
+        if not texture and not natural:
+            return False
+        known = base is None or (base.from_node.type == "VERTEX_COLOR" and base.from_node.layer_name == "ColorMap"
+                                and same_socket(base.from_socket, base.from_node.outputs["Color"])) \
+            or (base.from_node.type == "TEX_IMAGE" and not usable_image(base.from_node.image)) \
+            or own is not None or native_finished_shader(material.node_tree, shader)
+        if not texture and not (natural and known):
+            return False
+        # An OBJECT override also protects already-correct ColorMap from a
+        # subsequent recolour of a material shared with another scene object.
+        copy = material.copy()
+        try:
+            target, tree = active_shader(copy), copy.node_tree
+            if texture:
+                if not restore_automatic_albedo(target, owned_ramp(target), tree):
+                    raise RuntimeError("The copied shader no longer contains its original albedo.")
+            else:
+                vertex = tree.nodes.new("ShaderNodeVertexColor")
+                vertex.layer_name = "ColorMap"
+                vertex.label = "Gorilla natural hair colour"
+                tree.links.new(vertex.outputs["Color"], target.inputs["Base Color"])
+            previous_link = slot.link
+            try:
+                slot.link = "OBJECT"
+                slot.material = copy
+            except (RuntimeError, ReferenceError):
+                slot.link = previous_link
+                raise
+            repaired.add(copy.as_pointer())
+            source_done.add(identity)
+            print("  authored hair albedo restored on source slot:", material.name, flush=True)
+            return True
+        except (AttributeError, KeyError, TypeError, ValueError, RuntimeError, ReferenceError):
+            materials = getattr(getattr(bpy, "data", None), "materials", None)
+            if materials is not None:
+                try:
+                    materials.remove(copy)
+                except (RuntimeError, ReferenceError):
+                    pass
+            raise
+
     def native_hair_shader(material):
         if not material.use_nodes or material.node_tree is None:
             return None
@@ -250,29 +497,15 @@ def _register_hair_colour_repair():
             if shader.type != "BSDF_PRINCIPLED":
                 continue
             base = only_link(shader.inputs["Base Color"])
-            alpha = only_link(shader.inputs["Alpha"])
-            rough = only_link(shader.inputs["Roughness"])
-            if base is None or alpha is None or rough is None:
+            separate = native_coverage(tree, shader)
+            if base is None or separate is None:
                 continue
             vertex = base.from_node
-            separate = alpha.from_node
-            if vertex.type != "VERTEX_COLOR" or vertex.layer_name != "ColorMap" \
-                    or separate.type != "SEPARATE_COLOR" or getattr(separate, "mode", "RGB") != "RGB":
+            if vertex.type != "VERTEX_COLOR" or vertex.layer_name != "ColorMap":
                 continue
-            if not same_socket(base.from_socket, vertex.outputs["Color"]) \
-                    or not same_socket(alpha.from_socket, separate.outputs[1]) \
-                    or rough.from_node != separate or not same_socket(rough.from_socket, separate.outputs[0]):
+            if not same_socket(base.from_socket, vertex.outputs["Color"]):
                 continue
-            image_link = only_link(separate.inputs[0])
-            if image_link is None or image_link.from_node.type != "TEX_IMAGE" \
-                    or not usable_image(image_link.from_node.image) \
-                    or not same_socket(image_link.from_socket, image_link.from_node.outputs["Color"]):
-                continue
-            active_output = any(node.type == "OUTPUT_MATERIAL" and getattr(node, "is_active_output", True)
-                                and any(link.from_node == shader for link in node.inputs["Surface"].links)
-                                for node in tree.nodes)
-            if active_output:
-                return tree, shader, separate
+            return tree, shader, separate
         return None
 
     def repair(scene, unused_depsgraph=None):
@@ -286,18 +519,27 @@ def _register_hair_colour_repair():
                 if material is None:
                     continue
                 identity = material.as_pointer()
-                if identity in repaired:
-                    continue
                 created = []
                 restore = None
                 try:
+                    slot_stem = source_hair_slot(obj, index) if slots is not None else None
+                    source = source_identities.get(obj.as_pointer()) if slots is not None else None
+                    if source is not None and source.get("name") in source_material_stems and slot_stem is None:
+                        continue  # A proven primary hair mesh can also contain accessory slots.
+                    if slot_stem is not None and automatic and source_automatic_albedo(obj, index, slots[index], material):
+                        continue
+                    if identity in repaired:
+                        continue
+                    current_stem = slot_stem or stem
+                    slot_natural = authored_slot_colours(obj, index) if slot_stem is not None else None
                     active = active_shader(material)
                     own = owned_ramp(active) if active is not None else None
                     if own is not None:
                         if restore_automatic_albedo(active, own, material.node_tree):
                             repaired.add(identity)
-                        elif stem is not None and slots is not None and automatic and natural_primary_colours(obj, stem):
-                            generic_hair_fallback(obj, index, slots[index], material, stem)
+                        elif current_stem is not None and slots is not None and automatic \
+                                and (natural_primary_colours(obj, current_stem) if slot_natural is None else slot_natural):
+                            generic_hair_fallback(obj, index, slots[index], material, current_stem, slot_natural)
                         else:
                             own.color_ramp.elements[0].color = dark + (1.0,)
                             own.color_ramp.elements[1].color = light + (1.0,)
@@ -305,8 +547,8 @@ def _register_hair_colour_repair():
                         continue
                     found = native_hair_shader(material)
                     if found is None:
-                        if stem is not None and slots is not None:
-                            generic_hair_fallback(obj, index, slots[index], material, stem)
+                        if current_stem is not None and slots is not None:
+                            generic_hair_fallback(obj, index, slots[index], material, current_stem, slot_natural)
                         continue
                     tree, shader, separate = found
                     base_input = shader.inputs["Base Color"]

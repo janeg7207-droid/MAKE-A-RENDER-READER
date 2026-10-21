@@ -176,6 +176,31 @@ internal static class Program
             var refreshedInventory = DiscoveryAttireInventory.Refresh(oldMappedInventory, new[] { separate });
             var separatedCatalog = DiscoveryAttireCatalog.Find(selected312, refreshedInventory, fixtureTable);
             Equal("Refreshing remembered locations resolves seven exact active CM Punk mappings in separate packs", 7, separatedCatalog.Sources.Count);
+            // A broad library scan skips helper/hidden pack wrappers, but a
+            // character explicitly selected inside one is still a valid source.
+            string wrappedLibrary = Path.Combine(temporary, "wrapped-library");
+            foreach (string wrapper in new[] { "_SeparatePack", ".SeparatePack", "cache" })
+            {
+                string wrappedCharacter = Path.Combine(wrappedLibrary, wrapper, "Characters", "312_CM_Punk");
+                Copy(sourceModel, Path.Combine(wrappedCharacter, knownPaths[0].Substring("312_CM_Punk/".Length).Replace('/', Path.DirectorySeparatorChar)));
+                var remembered = ModelLibrary.Scan(wrappedCharacter);
+                Equal("An explicit source inside a skipped wrapper has its exact active mapping: " + wrapper, 1,
+                    DiscoveryAttireCatalog.Find(selected312, remembered, fixtureTable).Sources.Count);
+                var retained = DiscoveryAttireInventory.Refresh(remembered, new[] { wrappedLibrary, wrappedCharacter });
+                Equal("Refresh retains an explicitly remembered source below a skipped wrapper: " + wrapper, 1,
+                    retained.Count(item => item.Folder == wrappedCharacter));
+                Equal("Refresh retains its exact active costume below a skipped wrapper: " + wrapper, 1,
+                    DiscoveryAttireCatalog.Find(selected312, retained, fixtureTable).Sources.Count);
+                Equal("A remembered source survives when only its broad collection is supplied: " + wrapper, 1,
+                    DiscoveryAttireInventory.Refresh(remembered, new[] { wrappedLibrary }).Count(item => item.Folder == wrappedCharacter));
+                Equal("An explicit descendant root is scanned even without an old candidate: " + wrapper, 1,
+                    DiscoveryAttireInventory.Refresh(new ModelCandidate[0], new[] { wrappedLibrary, wrappedCharacter }).Count(item => item.Folder == wrappedCharacter));
+                Equal("Repeated refresh keeps one source below a skipped wrapper: " + wrapper, 1,
+                    DiscoveryAttireInventory.Refresh(retained, new[] { wrappedLibrary, wrappedCharacter }).Count);
+            }
+            Equal("Overlapping healthy collection and character roots still produce one source per pack", 7,
+                DiscoveryAttireInventory.Refresh(refreshedInventory, new[] { separate }.Concat(refreshedInventory.Select(item => item.Folder)))
+                    .Count(item => item.Folder.StartsWith(separate + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)));
             Equal("Each resolved active attire retains its distinct complete source root", 7,
                 separatedCatalog.Sources.Select(source => source.SourceFolder).Distinct(StringComparer.OrdinalIgnoreCase).Count());
             Equal("Cross-root sources never switch CM Punk to custom logical slot 1481", true,

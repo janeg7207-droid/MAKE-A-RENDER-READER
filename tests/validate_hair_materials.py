@@ -158,9 +158,22 @@ class MeshObject:
             self.data.color_attributes["ColorMap"] = types.SimpleNamespace(data=[
                 types.SimpleNamespace(color_srgb=tuple(value) + (1.0,)) for value in colours])
         self.material_slots = [MaterialSlot(self, index) for index in range(len(self.data.materials))]
+        self.properties = {}
 
     def as_pointer(self):
         return id(self)
+
+    def get(self, key, default=None):
+        return self.properties.get(key, default)
+
+    def __getitem__(self, key):
+        return self.properties[key]
+
+    def __setitem__(self, key, value):
+        self.properties[key] = value
+
+    def __contains__(self, key):
+        return key in self.properties
 
 
 def shader(material):
@@ -682,6 +695,288 @@ def main():
           "A valid lazy or packed image was mistaken for missing pixels")
     check(lazy.size_reads == 1, "Repeated frames reloaded the same texture dimensions")
 
+    # Execute the real provenance reader on native-style multi-material meshes.
+    # M_Hair imports as h_acce:skinned when its last material is an accessory;
+    # the original renderer can already have removed ColorMap from the shader.
+    geometry = runpy.run_path(str(Path(__file__).resolve().parents[1] / "src/renderer/gorilla_geometry.py"))
+    provenance_reads = {}
+    def read_provenance(obj):
+        key = obj.as_pointer()
+        provenance_reads[key] = provenance_reads.get(key, 0) + 1
+        return geometry["read_provenance"](obj)
+    sys.modules["gorilla_geometry"] = types.SimpleNamespace(read_provenance=read_provenance)
+
+    def source_object(source, materials, colours, faces=None, name="h_acce:skinned", domain="CORNER", vertices=None):
+        obj = MeshObject(name, materials[0], colours=colours)
+        obj.data.materials = list(materials)
+        obj.material_slots = [MaterialSlot(obj, index) for index in range(len(materials))]
+        obj.data.vertices = [None] * (len(colours) if vertices is None else vertices)
+        obj.data.color_attributes["ColorMap"].domain = domain
+        obj.data.polygons = []
+        obj.data.loops = []
+        for slot_index, indices in (faces if faces is not None else [(0, list(range(len(colours))))]):
+            start = len(obj.data.loops)
+            obj.data.loops.extend(types.SimpleNamespace(vertex_index=value) for value in indices)
+            obj.data.polygons.append(types.SimpleNamespace(material_index=slot_index, loop_start=start,
+                loop_total=len(indices), loop_indices=range(start, start + len(indices))))
+        values = dict(revision=1, path="/fixtures/Characters/420/420_Attire.mcd", sha256="0" * 64,
+                      index=0, name=source, flags=0, vertices=len(obj.data.vertices),
+                      remap=geometry["_pack_remap"](range(len(obj.data.vertices)), len(obj.data.vertices)), role="attire")
+        for key, prop in geometry["_FIELDS"].items():
+            obj[prop] = values[key]
+        check(geometry["read_provenance"](obj) is not None, "The source fixture must pass the actual provenance reader")
+        provenance_reads[obj.as_pointer()] = 0
+        return obj
+
+    white_palette = ((0.65, 0.65, 0.65), (1.0, 1.0, 1.0))
+    authored_results = []
+    for source in ("M_Hair", "M_Hair_Ent", "M_Combinations", "M_Mustache", "M_Beard"):
+        stem = {"M_Hair": "hair", "M_Hair_Ent": "hair", "M_Combinations": "combinations",
+                "M_Mustache": "mustache", "M_Beard": "beard"}[source]
+        for rebuilt in (False, True):
+            material = hair_material(stem + "_ALPHA:skinned.001")
+            if rebuilt:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    native_rebuild(mesh(material), "native_rai.dds", *white_palette, 0.6, 1.0, 0.12, 0.06)
+            accessory = generic("h_acce:skinned", colour_texture=True, alpha=True)
+            colours = [(0.0, 0.0, 0.0)] * 3 + [(1.0, 1.0, 1.0)] * 3
+            obj = source_object(source, [material, accessory], colours, faces=[(0, [0, 1, 2]), (1, [3, 4, 5])])
+            original = shader(material)
+            before_base = list(original.inputs["Base Color"].links)
+            alpha, rough = connection(original.inputs["Alpha"]), connection(original.inputs["Roughness"])
+            specular = connection(original.inputs["Specular IOR Level"])
+            accessory_links = list(accessory.node_tree.links)
+            callback, unused = load_wrapper(*white_palette, choice="auto")
+            with contextlib.redirect_stdout(io.StringIO()):
+                callback(types.SimpleNamespace(objects=[obj]))
+            fixed_material = obj.material_slots[0].material
+            fixed = shader(fixed_material)
+            check(fixed_material is not material and obj.material_slots[0].link == "OBJECT",
+                  "Source-aware hair restoration did not isolate its material")
+            check(fixed.inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR"
+                  and fixed.inputs["Base Color"].links[0].from_node.layer_name == "ColorMap",
+                  "Authored source colours did not override a native white ramp: " + source + str(rebuilt))
+            check(connection(fixed.inputs["Alpha"]) == alpha and connection(fixed.inputs["Roughness"]) == rough
+                  and fixed.inputs["Roughness"].default_value == original.inputs["Roughness"].default_value
+                  and connection(fixed.inputs["Specular IOR Level"]) == specular,
+                  "Source-aware restoration changed native coverage, roughness or specular")
+            check(obj.material_slots[1].material is accessory and list(accessory.node_tree.links) == accessory_links,
+                  "The h_acce material slot changed with primary hair")
+            check(obj.data.materials[0] is material and list(original.inputs["Base Color"].links) == before_base,
+                  "The source DATA material was overwritten")
+            count = len(fixed_material.node_tree.nodes)
+            with contextlib.redirect_stdout(io.StringIO()):
+                callback(types.SimpleNamespace(objects=[obj]))
+            check(obj.material_slots[0].material is fixed_material and len(fixed_material.node_tree.nodes) == count,
+                  "Repeated frames grew a source-aware material")
+            check(provenance_reads[obj.as_pointer()] == 1, "Source identity was reread each frame")
+            authored_results.append({"source": source, "native_whole_material_rebuild": rebuilt,
+                                     "authored_black_preserved": True, "accessory_unchanged": True})
+
+    # The exact unlabelled main-module RAI ramp is separate from its whole-
+    # material constructor. Reproduce that shape from our known native repair,
+    # then remove only the labels before exercising Auto.
+    main_ramp = hair_material("hair_ALPHA:skinned")
+    main_obj = source_object("M_Hair", [main_ramp], [(0.012, 0.012, 0.012)] * 3)
+    callback, unused = load_wrapper(*white_palette)
+    callback(types.SimpleNamespace(objects=[main_obj]))
+    for node in main_ramp.node_tree.nodes:
+        node.label = ""
+    check(shader(main_ramp).inputs["Base Color"].links[0].from_node.type == "VECT_MATH",
+          "The unlabelled main RAI ramp was not reproduced")
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[main_obj]))
+    check(shader(main_obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR",
+          "Auto missed the original unlabelled MULTIPLY_ADD RAI graph")
+
+    # Per-slot sampling excludes accessory and unused data. A white hair slot
+    # cannot borrow dark vertices from another material or an unreferenced tail.
+    white_source = hair_material("hair_ALPHA:skinned")
+    white_obj = source_object("M_Hair", [white_source, generic("h_acce:skinned")],
+                             [(1.0, 1.0, 1.0)] * 3 + [(0.0, 0.0, 0.0)] * 3000,
+                             faces=[(0, [0, 1, 2]), (1, [3, 4, 5])])
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[white_obj]))
+    check(shader(white_obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type != "VERTEX_COLOR",
+          "Unused or accessory dark colours authorized white primary hair")
+    generic_white = generic("m_hair_ALPHA:skinned", vertex=True)
+    generic_white_obj = source_object("M_Hair", [generic_white, generic("h_acce:skinned")],
+        [(1.0, 1.0, 1.0)] * 3 + [(0.0, 0.0, 0.0)] * 3000, faces=[(0, [0, 1, 2]), (1, [3, 4, 5])])
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[generic_white_obj]))
+    check(shader(generic_white_obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VALTORGB",
+          "The legacy whole-mesh natural check overrode per-slot source rejection")
+
+    for source in ("S_Hair", "S_Hair_Ent", "Body", "Unknown"):
+        control = hair_material("hair_ALPHA:skinned")
+        obj = source_object(source, [control], [(0.4, 0.0, 0.0)] * 3)
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        callback(types.SimpleNamespace(objects=[obj]))
+        check(obj.material_slots[0].material is control
+              and shader(control).inputs["Base Color"].links[0].from_node.type != "VERTEX_COLOR",
+              "A scalp/control or unknown source was treated as authored primary hair")
+    for invalid in ("missing", "changed_vertex_count"):
+        material = hair_material("hair_ALPHA:skinned")
+        obj = source_object("M_Hair", [material], [(0.0, 0.0, 0.0)] * 3)
+        if invalid == "missing":
+            obj.properties.clear()
+        else:
+            obj.data.vertices.append(None)
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        callback(types.SimpleNamespace(objects=[obj]))
+        check(obj.material_slots[0].material is material,
+              "Missing or stale source proof authorized a renamed primary hair mesh")
+
+    # Even an accessory with a hair-like graph remains excluded by the exact
+    # source material slot identity. Unknown procedural hair stays intact too.
+    accessory_native = hair_material("h_acce:skinned")
+    accessory_obj = source_object("M_Hair", [accessory_native], [(0.0, 0.0, 0.0)] * 3)
+    original_link = shader(accessory_native).inputs["Base Color"].links[0]
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[accessory_obj]))
+    check(shader(accessory_native).inputs["Base Color"].links[0] is original_link,
+          "A proven primary hair mesh authorized its h_acce material")
+    procedural = hair_material("hair_ALPHA:skinned")
+    math_node = procedural.node_tree.nodes.new("ShaderNodeMath")
+    math_node.operation = "SINE"
+    procedural.node_tree.links.new(math_node.outputs[0], shader(procedural).inputs["Base Color"])
+    procedural_obj = source_object("M_Hair", [procedural], [(0.0, 0.0, 0.0)] * 3)
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[procedural_obj]))
+    check(procedural_obj.material_slots[0].material is procedural
+          and shader(procedural).inputs["Base Color"].links[0].from_node is math_node,
+          "Source provenance authorized an unknown procedural graph")
+    alpha_colour = hair_material("hair_ALPHA:skinned")
+    alpha_bsdf = shader(alpha_colour)
+    vertex = alpha_bsdf.inputs["Base Color"].links[0].from_node
+    alpha_colour.node_tree.links.new(vertex.outputs["Alpha"], alpha_bsdf.inputs["Base Color"])
+    alpha_obj = source_object("M_Hair", [alpha_colour], [(0.012, 0.012, 0.012)] * 3)
+    alpha_link = alpha_bsdf.inputs["Base Color"].links[0]
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[alpha_obj]))
+    check(alpha_obj.material_slots[0].material is alpha_colour and alpha_bsdf.inputs["Base Color"].links[0] is alpha_link,
+          "A custom vertex-alpha colour graph was mistaken for native ColorMap albedo")
+    for difference in ("variation", "coverage_channel", "coverage_clamp", "roughness", "HSV", "missing_image"):
+        lookalike = hair_material("hair_ALPHA:skinned")
+        with contextlib.redirect_stdout(io.StringIO()):
+            native_rebuild(mesh(lookalike), "native_rai.dds", *white_palette, 0.6, 1.0, 0.12, 0.06)
+        bsdf = shader(lookalike)
+        colour = bsdf.inputs["Base Color"].links[0].from_node
+        ramp = colour.inputs[0].links[0].from_node
+        separate = ramp.inputs[0].links[0].from_node
+        alpha = bsdf.inputs["Alpha"].links[0].from_node
+        if difference == "variation":
+            colour.inputs["Scale"].links[0].from_node.inputs[1].default_value = 0.66
+        elif difference == "coverage_channel":
+            cut = alpha.inputs[0].links[0].from_node
+            lookalike.node_tree.links.new(separate.outputs[0], cut.inputs[0])
+        elif difference == "coverage_clamp":
+            alpha.use_clamp = False
+        elif difference == "roughness":
+            lookalike.node_tree.links.new(separate.outputs[0], bsdf.inputs["Roughness"])
+        elif difference == "HSV":
+            separate.mode = "HSV"
+        else:
+            separate.inputs[0].links[0].from_node.image = image("missing-native-rai.dds", size=(0, 0))
+        obj = source_object("M_Hair", [lookalike], [(0.012, 0.012, 0.012)] * 3)
+        link = bsdf.inputs["Base Color"].links[0]
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        callback(types.SimpleNamespace(objects=[obj]))
+        check(obj.material_slots[0].material is lookalike and bsdf.inputs["Base Color"].links[0] is link,
+              "An inexact native procedural lookalike was changed: " + difference)
+
+    for bad in ("empty_slot", "unsupported_domain", "nonfinite", "outside_range"):
+        material = generic("hair_ALPHA:skinned", vertex=True)
+        colours = [(0.012, 0.012, 0.012)] * 3
+        if bad == "nonfinite":
+            colours[0] = (float("nan"), 0.0, 0.0)
+        elif bad == "outside_range":
+            colours[0] = (-0.1, 0.0, 0.0)
+        obj = source_object("M_Hair", [material], colours, faces=[] if bad == "empty_slot" else None)
+        if bad == "unsupported_domain":
+            obj.data.color_attributes["ColorMap"].domain = "EDGE"
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        callback(types.SimpleNamespace(objects=[obj]))
+        check(shader(obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VALTORGB",
+              "Invalid or unreferenced source colour data authorized authored Auto: " + bad)
+
+    # A material already visited through a body may be in the material-wide
+    # repaired set. The source slot must still receive its own authored copy.
+    for hair_first in (False, True):
+        shared = hair_material("hair_ALPHA:skinned")
+        hair_obj = source_object("M_Hair", [shared], [(0.012, 0.012, 0.012)] * 3)
+        body_obj = MeshObject("body:skinned", shared, shared_data=hair_obj.data)
+        callback, unused = load_wrapper(*white_palette)
+        callback(types.SimpleNamespace(objects=[body_obj]))
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        objects = [hair_obj, body_obj] if hair_first else [body_obj, hair_obj]
+        callback(types.SimpleNamespace(objects=objects))
+        fixed = hair_obj.material_slots[0].material
+        check(fixed is not shared and body_obj.material_slots[0].material is shared
+              and hair_obj.data.materials[0] is shared,
+              "Source-aware Auto leaked its copy to a shared body or mesh")
+        check(shader(fixed).inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR",
+              "Material-wide repair order suppressed authored source albedo")
+
+    # Manual choices remain effective on the actual h_acce object name and
+    # a cached native ramp returns to exact authored ColorMap on Auto.
+    manual_dark, manual_light = (0.2, 0.1, 0.03), (0.8, 0.6, 0.3)
+    callback, unused = load_wrapper(manual_dark, manual_light)
+    callback(types.SimpleNamespace(objects=[main_obj]))
+    manual_material = main_obj.material_slots[0].material
+    colour = shader(manual_material).inputs["Base Color"].links[0].from_node
+    ramp = colour.inputs[0].links[0].from_node
+    check(ramp.color_ramp.elements[0].color == manual_dark + (1.0,)
+          and ramp.color_ramp.elements[1].color == manual_light + (1.0,),
+          "Source-aware Auto prevented a subsequent explicit manual palette")
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[main_obj]))
+    check(shader(main_obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR",
+          "Cached native manual ramp did not restore authored Auto albedo")
+
+    for cached in (False, True):
+        material = generic("hair_ALPHA:skinned", colour_texture=True, alpha=True)
+        obj = source_object("M_Hair", [material], [(0.0, 0.0, 0.0)] * 3)
+        if cached:
+            callback, unused = load_wrapper(manual_dark, manual_light)
+            callback(types.SimpleNamespace(objects=[obj]))
+        callback, unused = load_wrapper(*white_palette, choice="auto")
+        callback(types.SimpleNamespace(objects=[obj]))
+        check(shader(obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "TEX_IMAGE",
+              "Authored ColorMap overrode a valid original/cached albedo texture")
+
+    class CountedColours(list):
+        reads = 0
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+    bounded = hair_material("hair_ALPHA:skinned")
+    bounded_obj = source_object("M_Hair", [bounded], [(0.012, 0.012, 0.012)] * 30000)
+    layer = bounded_obj.data.color_attributes["ColorMap"]
+    layer.data = CountedColours(layer.data)
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[bounded_obj]))
+    count = layer.data.reads
+    callback(types.SimpleNamespace(objects=[bounded_obj]))
+    check(0 < count <= 2048 and layer.data.reads == count,
+          "Authored per-slot diagnostics exceeded their cap or repeated per frame")
+    check(provenance_reads[bounded_obj.as_pointer()] == 1, "Bounded source proof was not cached")
+
+    point = hair_material("hair_ALPHA:skinned")
+    point_obj = source_object("M_Hair", [point], [(1.0, 1.0, 1.0)] * 3 + [(0.0, 0.0, 0.0)] * 3,
+                              faces=[(0, [3, 4, 5])], domain="POINT")
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[point_obj]))
+    check(shader(point_obj.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR",
+          "POINT-domain ColorMap did not use the slot's referenced vertex indices")
+    blond_material = hair_material("hair_ALPHA:skinned")
+    blond_source = source_object("M_Hair", [blond_material], natural + natural[:1])
+    callback, unused = load_wrapper(*white_palette, choice="auto")
+    callback(types.SimpleNamespace(objects=[blond_source]))
+    check(shader(blond_source.material_slots[0].material).inputs["Base Color"].links[0].from_node.type == "VERTEX_COLOR"
+          and blond_source.data.color_attributes["ColorMap"].data[0].color_srgb[:3] == natural[0],
+          "Source-aware Auto replaced authored blond with an invented dark shade")
+
     # Invalid/missing colour settings must never create a tint or duplicate a handler.
     sys.argv = ["blender", "--", "capture", "output", "clip"]
     namespace = runpy.run_path(str(args.wrapper), run_name="__main__")
@@ -701,11 +996,19 @@ def main():
               "nonnull_invalid_images": invalid_image_results,
               "valid_lazy_packed_images_preserved": True,
               "image_dimensions_checked_once_per_datablock": True,
+              "validated_source_provenance_reader_executed": True,
+              "authored_source_slot_results": authored_results,
+              "native_unlabelled_finished_ramps_restore_authored_auto": True,
+              "source_material_accessories_and_control_meshes_excluded": True,
+              "source_shared_material_order_independent": True,
+              "source_manual_auto_manual_supported": True,
+              "source_colour_reads_capped_2048_and_cached": True,
               "alpha_not_invented_when_missing": True,
               "original_bytecode_unchanged": True, "windows_blender_images_or_game_executed": False}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
+    print(str(checks) + " checks passed.")
 
 
 if __name__ == "__main__":

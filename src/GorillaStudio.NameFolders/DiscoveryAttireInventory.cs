@@ -13,7 +13,6 @@ namespace GorillaStudio.NameFolders
             CancellationToken token = default(CancellationToken))
         {
             var candidates = new Dictionary<string, ModelCandidate>(StringComparer.OrdinalIgnoreCase);
-            var scanned = new List<string>();
             IEnumerable<string> locations = (roots ?? new string[0]).Concat((previous ?? new ModelCandidate[0])
                 .Where(item => item != null).Select(item => item.Folder));
             foreach (string raw in locations.Where(path => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
@@ -21,8 +20,10 @@ namespace GorillaStudio.NameFolders
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path.Length))
             {
                 token.ThrowIfCancellationRequested();
-                if (scanned.Any(root => SameOrChild(raw, root))) continue;
-                scanned.Add(raw);
+                // A collection scan can intentionally skip a pack wrapper.
+                // Only a discovered character proves that a remembered or
+                // explicitly selected descendant is already covered.
+                if (candidates.Keys.Any(root => SameOrChild(raw, root))) continue;
                 foreach (ModelCandidate model in ModelLibrary.Scan(raw, token))
                 {
                     token.ThrowIfCancellationRequested();
