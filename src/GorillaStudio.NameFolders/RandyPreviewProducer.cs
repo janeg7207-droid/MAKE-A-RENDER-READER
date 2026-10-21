@@ -14,6 +14,10 @@ namespace GorillaStudio.NameFolders
     public static partial class FolderBridge
     {
         private static readonly SemaphoreSlim RandyPreviewGate = new SemaphoreSlim(1, 1);
+        private static readonly HashSet<Window> randyPreviewBusyWindows = new HashSet<Window>();
+
+        private static bool RandyPreviewOwnsNativeBusy(Window window)
+        { return randyPreviewBusyWindows.Contains(window); }
 
         internal static async Task<RandyTauntPreviewResult> PrepareRandyTauntPreviewAsync(Window window, string key,
             Action<string> progress, CancellationToken cancellationToken, bool allowRender, bool automatic = false)
@@ -66,7 +70,7 @@ namespace GorillaStudio.NameFolders
                 string cachedBeforeWait = null;
                 bool cacheHit = await Task.Run(() => {
                     RandyTauntPreviewContext cachedContext = RandyProducerContext(application, engineRoot, key, directory, blender, game);
-                    return RandyTauntPreviewCache.TryRead(store, cachedContext, out cachedBeforeWait);
+                    return RandyTauntPreviewCache.TryReadCaptured(store, cachedContext, out cachedBeforeWait);
                 }, cancellationToken);
                 ensureCurrent();
                 if (cacheHit) return new RandyTauntPreviewResult(cachedBeforeWait, true);
@@ -129,11 +133,11 @@ namespace GorillaStudio.NameFolders
                         Task<string> extraction = RequestGameModelAsync(window,
                             new RosterEntry { Id = RandyPreviewAssets.LogicalId, Name = "Randy Orton" },
                             RandyPreviewAssets.StockFolderKey, report, lifetime.TrackProcess);
-                        if (busy != null) { busy.SetValue(window, true); ownsBusy = true; }
+                        if (busy != null) { busy.SetValue(window, true); ownsBusy = true; randyPreviewBusyWindows.Add(window); }
                         directory = await extraction;
                         ensureCurrent();
                     }
-                    else if (busy != null) { busy.SetValue(window, true); ownsBusy = true; }
+                    else if (busy != null) { busy.SetValue(window, true); ownsBusy = true; randyPreviewBusyWindows.Add(window); }
                     cancellationToken.ThrowIfCancellationRequested();
                     string inspected = directory;
                     directory = await Task.Run(() => RandyPreviewAssets.Validate(inspected), cancellationToken);
@@ -142,7 +146,7 @@ namespace GorillaStudio.NameFolders
                         application, engineRoot, key, directory, blender, game), cancellationToken);
                     ensureCurrent();
                     string cached = null;
-                    bool ready = await Task.Run(() => RandyTauntPreviewCache.TryRead(store, context, out cached), cancellationToken);
+                    bool ready = await Task.Run(() => RandyTauntPreviewCache.TryReadCaptured(store, context, out cached), cancellationToken);
                     ensureCurrent();
                     if (ready) return new RandyTauntPreviewResult(cached, true);
                     Directory.CreateDirectory(output);
@@ -185,7 +189,7 @@ namespace GorillaStudio.NameFolders
                         if (!stopped) await Task.Delay(250);
                     }
                     lifetime.Dispose();
-                    if (ownsBusy && busy != null) busy.SetValue(window, false);
+                    if (ownsBusy && busy != null) { busy.SetValue(window, false); randyPreviewBusyWindows.Remove(window); }
                     foreach (BatchEnabledRestore control in controls) control.Restore();
                     if (window.IsLoaded) UpdateDiscoveryRenderControls(window);
                 }

@@ -161,6 +161,7 @@ namespace GorillaStudio.NameFolders
             state.Timer.Start();
             ClearRandyBrowserPreview(window);
             UpdateRandyPreviewButton(window, state);
+            AttachRandyPreviewBuildControls(window);
         }
 
         private static void ArmAutomaticTauntInput(Window window, AutomaticTauntPreview state)
@@ -200,12 +201,16 @@ namespace GorillaStudio.NameFolders
             var preview = AutomaticTauntField(window, "PreviewButton") as Button;
             if (preview == null) return;
             bool valid = RandyTauntPreviewState.ValidKey(AutomaticTauntKey(state.List.SelectedItem));
-            preview.IsEnabled = valid && !state.Queue.IsRunning && !AutomaticTauntBlocked(window);
+            bool canPreemptBuild = RandyPreviewBuildActive(window) && RandyPreviewOwnsNativeBusy(window)
+                && !AutomaticTauntContextChanging(window);
+            preview.IsEnabled = valid && !state.ForegroundRequested && !state.Queue.IsRunning
+                && (canPreemptBuild || !AutomaticTauntBlocked(window));
         }
 
         private static void RequestAutomaticTauntPreview(Window window, AutomaticTauntPreview state, bool manual)
         {
             if (state.Closed) return;
+            CancelRandyPreviewBuild(window, "Paused for the selected taunt. Completed previews are saved.");
             string key = AutomaticTauntKey(state.List.SelectedItem), context = RandyPreviewContext(window);
             if (!RandyTauntPreviewState.ValidKey(key)) { CancelAutomaticTauntIntent(state); return; }
             if (!manual && state.RequestedInput == state.InputGeneration && state.Intent != null
@@ -229,7 +234,7 @@ namespace GorillaStudio.NameFolders
 
         private static async Task TryAutomaticTauntPreviewAsync(Window window, AutomaticTauntPreview state)
         {
-            if (state.Closed || state.ForegroundRequested || state.Queue.IsRunning || state.Intent == null
+            if (state.Closed || state.ForegroundRequested || RandyPreviewBuildActive(window) || state.Queue.IsRunning || state.Intent == null
                 || state.Schedule == null || state.Schedule.Completed) return;
             RandyTauntPreviewIntent intent = state.Intent;
             RandyTauntPreviewSchedule schedule = state.Schedule;
@@ -430,28 +435,32 @@ namespace GorillaStudio.NameFolders
                 && state.Schedule != null && !state.Schedule.Completed;
         }
 
-        internal static async Task CancelAndDrainAutomaticRandyPreviewAsync(Window window)
+        internal static async Task CancelAndDrainAutomaticRandyPreviewAsync(Window window, bool includeBuild = true, bool includeManual = false)
         {
             if (window == null) return;
             if (!window.Dispatcher.CheckAccess())
             {
-                await window.Dispatcher.InvokeAsync(new Func<Task>(() => CancelAndDrainAutomaticRandyPreviewAsync(window))).Task.Unwrap();
+                await window.Dispatcher.InvokeAsync(new Func<Task>(() => CancelAndDrainAutomaticRandyPreviewAsync(window, includeBuild, includeManual))).Task.Unwrap();
                 return;
             }
             AutomaticTauntPreview state;
-            if (!automaticTauntPreviews.TryGetValue(window, out state) || (state.Manual && !state.RunningAutomatic)) return;
-            bool previousForeground = state.ForegroundRequested;
-            state.ForegroundRequested = true;
+            automaticTauntPreviews.TryGetValue(window, out state);
+            bool previousForeground = state != null && state.ForegroundRequested;
+            if (state != null) state.ForegroundRequested = true;
             try
             {
-                Task drainage = state.RunningAutomatic ? state.RunningDone?.Task : null;
+                // Explicit MAKE and Batch own the renderer next. A builder
+                // remains active until its actual producer has drained.
+                if (includeBuild) await CancelAndDrainRandyPreviewBuildAsync(window);
+                if (state == null || (state.Manual && !state.RunningAutomatic && !includeManual)) return;
+                Task drainage = state.RunningAutomatic || includeManual ? state.RunningDone?.Task : null;
                 CancelAutomaticTauntIntent(state);
                 if (drainage != null) await drainage;
                 // Drop any later browse request made while the foreground
                 // action was waiting for its owned process to exit.
                 CancelAutomaticTauntIntent(state);
             }
-            finally { state.ForegroundRequested = previousForeground; }
+            finally { if (state != null) state.ForegroundRequested = previousForeground; }
         }
 
         internal static bool IsRandyTauntPreviewImage(Window window, BitmapSource image)

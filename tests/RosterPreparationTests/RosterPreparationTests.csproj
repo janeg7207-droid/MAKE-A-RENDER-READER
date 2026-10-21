@@ -5,5 +5,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/FolderBridge.cs" Link="FolderBridge.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireDisplay.cs" Link="DiscoveryAttireDisplay.cs" />
   </ItemGroup>
 </Project>

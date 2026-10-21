@@ -72,6 +72,7 @@ internal static class Program
         Equal(2, State.AttireInventoryCount);
         Equal(true, State.RegisteredAttireContext);
         Equal(State.Root, State.RegisteredAttireSource);
+        Equal(State.Root, State.RegisteredAttireRoots.Single());
         Equal(true, State.Commits.All(thread => thread == State.UiThread));
         Equal(true, State.DiskThreads.Count >= 8);
         Equal(true, State.DiskThreads.All(thread => thread != State.UiThread));
@@ -95,6 +96,7 @@ internal static class Program
         // Resolve its unambiguous active default before creating native aliases.
         State.Reset();
         string activeSource = Directory.CreateDirectory(Path.Combine(State.Root, "Active default source")).FullName;
+        State.Entry.Source = "Mapped model folder";
         State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
         Equal(true, await FolderBridge.PrepareRosterAsync(State.Root, null) != null);
         Equal(activeSource, State.PlannedEntry.Folder);
@@ -103,6 +105,21 @@ internal static class Program
         Equal(4000, State.Registered.Id);
 
         State.Reset();
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
+        Equal(true, await FolderBridge.PrepareRosterAsync(State.Root, null) != null);
+        Equal(State.Root, State.PlannedEntry.Folder);
+        Equal(1506, State.AttireId);
+
+        State.Reset();
+        State.ChooseCharacterFolder = false;
+        State.Entry.Source = "Profile";
+        State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
+        Equal(true, await FolderBridge.PrepareRosterAsync(State.Root, null) != null);
+        Equal(State.Root, State.PlannedEntry.Folder);
+        Equal(1506, State.AttireId);
+
+        State.Reset();
+        State.Entry.Source = "Mapped model folder";
         State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800 });
         bool inactiveRejected = false;
         try { await FolderBridge.PrepareRosterAsync(State.Root, null); }
@@ -112,6 +129,7 @@ internal static class Program
         Equal(0, State.Commits.Count);
 
         State.Reset();
+        State.Entry.Source = "Mapped model folder";
         State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = activeSource, SourceId = 1800, IsDefault = true });
         State.DiscoverySources.Add(new DiscoveryAttireSource { SourceFolder = Path.Combine(State.Root, "Another default source"), SourceId = 1801, IsDefault = true });
         inactiveRejected = false;
@@ -240,6 +258,7 @@ internal static class State
     internal static int QuickOpenCount, FullOpenCount, MetadataReadyCount, MetadataReadyThread, MetadataReadyAtPicker, MetadataWarningsThread;
     internal static string MetadataSourceOverride, MetadataReadySource, PickerSource;
     internal static bool ExpectWorkers, BlockPictures, MutateOnDispose, CancelPicker, Refreshed, ThrowPictures, ThrowRead, ThrowMetadata;
+    internal static bool ChooseCharacterFolder;
     internal static readonly List<string> MetadataWarnings = new List<string>();
     internal static readonly List<string> PickerMetadataWarnings = new List<string>();
     internal static readonly ManualResetEventSlim ReleasePictures = new ManualResetEventSlim(false);
@@ -250,6 +269,7 @@ internal static class State
     internal static DiscoveryAttireCatalogResult AttireResult;
     internal static bool RegisteredAttireContext;
     internal static string RegisteredAttireSource;
+    internal static string[] RegisteredAttireRoots;
     internal static readonly List<DiscoveryAttireSource> DiscoverySources = new List<DiscoveryAttireSource>();
     internal static void Reset()
     {
@@ -260,6 +280,7 @@ internal static class State
         MetadataSourceOverride = MetadataReadySource = PickerSource = null;
         MetadataWarnings.Clear(); PickerMetadataWarnings.Clear();
         ExpectWorkers = true; BlockPictures = MutateOnDispose = CancelPicker = Refreshed = ThrowPictures = ThrowRead = ThrowMetadata = false;
+        ChooseCharacterFolder = true;
         ReleasePictures.Reset(); DiskThreads.Clear(); Commits.Clear(); Registered = PlannedEntry = null;
         AttireInventoryCount = 0; AttireResult = null; RegisteredAttireContext = false; RegisteredAttireSource = null;
         DiscoverySources.Clear();
@@ -326,8 +347,28 @@ namespace GorillaStudio.NameFolders
         public bool IsDefault { get; set; }
         public int SourceId { get; set; }
     }
+    public sealed class DiscoveryAttireReference
+    {
+        public int LogicalId, MappingId, CostumeIndex;
+        public uint CostumeKey;
+        public ulong ModelHash;
+        public string DisplayName, Issue;
+        public bool IsDefault;
+    }
+    public sealed class AlternateAttire
+    {
+        public string DiscoveryKey, DisplayName, UnavailableReason, RelativePath;
+        public ulong DiscoveryModelHash;
+        public bool IsDefault;
+        public bool IsAvailable { get { return string.IsNullOrWhiteSpace(UnavailableReason); } }
+    }
+    internal static class DiscoveryAttireOptions
+    { internal static bool IsLocalChoice(string alias, string source, string relative) { return false; } }
     public sealed class DiscoveryAttireCatalogResult
-    { public List<DiscoveryAttireSource> Sources { get; } = new List<DiscoveryAttireSource>(); }
+    {
+        public List<DiscoveryAttireSource> Sources { get; } = new List<DiscoveryAttireSource>();
+        public List<DiscoveryAttireReference> References { get; } = new List<DiscoveryAttireReference>();
+    }
     internal static class DiscoveryAttireCatalog
     {
         internal static DiscoveryAttireCatalogResult Find(RosterEntry entry, IEnumerable<ModelCandidate> models, string table, CancellationToken token)
@@ -367,14 +408,14 @@ namespace GorillaStudio.NameFolders
         {
             State.FullOpenCount++;
             State.Disk(); return new RosterSessionData { Entries = new List<RosterEntry> { State.Entry },
-                ChooseCharacterFolder = true, DiscoveryTable = State.RosterTable };
+                ChooseCharacterFolder = State.ChooseCharacterFolder, DiscoveryTable = State.RosterTable };
         }
         internal static RosterSessionData OpenQuick(string root, IEnumerable<RosterEntry> saved, string file, string bundled)
         {
             State.QuickOpenCount++; State.Disk();
             if (State.ThrowMetadata) throw new InvalidDataException("Invalid profile metadata");
             return new RosterSessionData { Entries = new List<RosterEntry> { State.Entry },
-                ChooseCharacterFolder = true, DiscoveryTable = State.RosterTable, Warnings = State.MetadataWarnings.ToList() };
+                ChooseCharacterFolder = State.ChooseCharacterFolder, DiscoveryTable = State.RosterTable, Warnings = State.MetadataWarnings.ToList() };
         }
     }
     internal static class RosterAccess
@@ -388,6 +429,7 @@ namespace GorillaStudio.NameFolders
         public RosterEntry SelectedEntry { get { return State.Entry; } }
         public string SelectedFolder { get { return State.Root; } }
         public string CurrentRosterFile { get { return State.RosterTable; } }
+        internal List<string> CurrentModelSearchRoots { get { return new List<string> { State.Root }; } }
         public bool DataRefreshed { get { return State.Refreshed; } }
         internal List<ModelCandidate> CurrentModelInventory { get { return new List<ModelCandidate> {
             new ModelCandidate { Folder = State.Root, Name = "Default", SourceId = 1506 },
@@ -440,6 +482,7 @@ namespace GorillaStudio.NameFolders
     internal sealed class DirectAttirePlan { public bool WrapDirectModel = false; public string CacheSuffix = null, BaseModelFolder = null; }
     internal static class AutomaticAttire
     {
+        internal static string CharacterRoot(string source, int id) { return source; }
         internal static DirectAttirePlan Plan(string source, int id)
         { State.Disk(); State.AttireId = id; return new DirectAttirePlan(); }
     }
@@ -461,10 +504,11 @@ namespace GorillaStudio.NameFolders
         private static void RememberRenderTable(string alias, string table) { State.Commit(); }
         private static void RememberPreparedRender(string alias, CharacterFolderPlan plan, RosterEntry entry, Dictionary<ulong, string> pictures) { State.Commit(); }
         private static void RegisterDiscoveryAttires(string alias, RosterEntry entry, IEnumerable<ModelCandidate> inventory,
-            DiscoveryAttireCatalogResult result, string sourceFolder = null)
+            DiscoveryAttireCatalogResult result, string sourceFolder = null, IEnumerable<string> modelRoots = null)
         {
             State.Commit(); State.RegisteredAttireContext = ReferenceEquals(result, State.AttireResult);
             State.RegisteredAttireSource = sourceFolder;
+            State.RegisteredAttireRoots = modelRoots?.ToArray() ?? new string[0];
         }
         private static void ResolveDiscoveryAttireSources(DiscoveryAttireCatalogResult result, CancellationToken token)
         { State.Disk(); }

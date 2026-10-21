@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/BatchRenderPlan.cs" Link="BatchRenderPlan.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/AutomaticAttire.cs" Link="AutomaticAttire.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireCatalog.cs" Link="DiscoveryAttireCatalog.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireOptions.cs" Link="DiscoveryAttireOptions.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />

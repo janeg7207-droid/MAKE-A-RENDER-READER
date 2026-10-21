@@ -89,6 +89,29 @@ internal static class Program
             Throws<ArgumentOutOfRangeException>("Out-of-range physical body IDs fail clearly", () => AutomaticAttire.Plan(direct, 65536));
             Equal("Planning leaves the source model unchanged", "fixture", File.ReadAllText(Path.Combine(direct, "Attire.mcd")));
 
+            string punkDefault = Path.GetDirectoryName(Model("roots/Characters/312_CM_Punk/312_Default_Attire/312_Attire.mcd"));
+            string punkRoot = Directory.GetParent(punkDefault).FullName;
+            Model("roots/Characters/312_CM_Punk/Pink April/Attire.mcd");
+            Equal("A selected attire child expands to its explicitly owned character root", punkRoot, AutomaticAttire.CharacterRoot(punkDefault, 312));
+            Equal("Character-root expansion is idempotent", punkRoot, AutomaticAttire.CharacterRoot(punkRoot, 312));
+            Equal("A logical slot sharing the body cannot establish another owner", punkDefault, AutomaticAttire.CharacterRoot(punkDefault, 1481));
+            string plainOwned = Path.GetDirectoryName(Model("owned-plain/Punk/312_Default_Attire/312_Attire.mcd"));
+            Model("owned-plain/Punk/BaseModel/baseModel.mcd");
+            Equal("A plain character name can prove ownership with its body and one physical ID", Directory.GetParent(plainOwned).FullName, AutomaticAttire.CharacterRoot(plainOwned, 312));
+            string plainUnproven = Path.GetDirectoryName(Model("unowned-plain/Punk/312_Default_Attire/312_Attire.mcd"));
+            Model("unowned-plain/Punk/Purple/Attire.mcd");
+            Equal("A name and neighbouring attire alone never prove a plain parent owns the model", plainUnproven, AutomaticAttire.CharacterRoot(plainUnproven, 312));
+            string mixedOwned = Path.GetDirectoryName(Model("mixed-owned/Characters/312_CM_Punk/312_Default_Attire/312_Attire.mcd"));
+            Model("mixed-owned/Characters/312_CM_Punk/576_Finn/576_Attire.mcd");
+            Equal("A parent containing a different numbered persona is never promoted", mixedOwned, AutomaticAttire.CharacterRoot(mixedOwned, 312));
+            string linkedRoot = Path.Combine(root, "linked-owner", "Characters", "312_CM_Punk");
+            Directory.CreateDirectory(linkedRoot);
+            string linkedChild = Path.Combine(linkedRoot, "312_Default_Attire");
+            Directory.CreateSymbolicLink(linkedChild, direct);
+            Equal("A linked source cannot use its surrounding name to bypass source validation", linkedChild, AutomaticAttire.CharacterRoot(linkedChild, 312));
+            Directory.Delete(linkedChild);
+            Equal("The BaseModel directory is never promoted into a wearable character source", ownBody, AutomaticAttire.CharacterRoot(ownBody, 215));
+
             Console.WriteLine("PASS " + passed + " automatic attire policy checks");
         }
         finally { Directory.Delete(root, true); }

@@ -218,7 +218,18 @@ namespace GorillaStudio.NameFolders
                 {
                     status.Text = "Reading attire models for " + row.Entry.Name + "…";
                     DiscoveryAttireSource selectedDiscovery = SelectedDiscoveryAttireSource(owner);
-                    DiscoveryAttireCatalogResult discovery = await Task.Run(() => DiscoveryAttireCatalog.Find(row.Entry, inventory, table));
+                    string currentFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
+                    DiscoveryAttireBinding currentBinding = DiscoveryAttireFor(owner, currentFolder);
+                    if (string.IsNullOrWhiteSpace(row.Entry.Folder) && currentBinding != null
+                        && currentBinding.Context.Entry.Id == row.Entry.Id
+                        && SameAttireFolder(currentBinding.Context.Entry.RosterTable, row.Entry.RosterTable ?? table))
+                    {
+                        row.Entry = BatchRenderPlan.Copy(row.Entry);
+                        row.Entry.Folder = currentBinding.SourceFolder;
+                        row.Entry.SourceId = currentBinding.Context.Entry.SourceId;
+                    }
+                    row.Entry = await Task.Run(() => BatchRenderPlan.CharacterEntry(row.Entry));
+                    DiscoveryAttireCatalogResult discovery = await Task.Run(() => BatchRenderPlan.FindAttires(row.Entry, inventory, table));
                     if (discovery.References.Count == 0 && discovery.Issues.Count > 0)
                         throw new InvalidOperationException(string.Join("\n", discovery.Issues));
                     List<BatchAttireSelection> available;
@@ -231,7 +242,7 @@ namespace GorillaStudio.NameFolders
                         if (current == null && selectedDiscovery != null && selectedDiscovery.LogicalId == row.Entry.Id)
                         {
                             string key = DiscoveryAttireReferenceKey(selectedDiscovery);
-                            BatchAttireSelection same = await Task.Run(() => available.Where(choice => choice.DiscoveryKey == key).FirstOrDefault(choice =>
+                            BatchAttireSelection same = await Task.Run(() => available.Where(choice => choice.IsAvailable && choice.DiscoveryKey == key).FirstOrDefault(choice =>
                             {
                                 try { return string.Equals(DirectoryLinks.Resolve(choice.SourceFolder).TrimEnd('\\', '/'), selectedDiscovery.SourceFolder.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase); }
                                 catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is Win32Exception) { return false; }
@@ -249,6 +260,7 @@ namespace GorillaStudio.NameFolders
                             model.Entry.Folder = await RequestGameModelAsync(model.Entry, model.Entry.StockFolder, message => status.Text = message);
                             if (!Directory.Exists(model.Entry.Folder)) throw new IOException("The game model was not extracted.");
                         }
+                        model.Entry = await Task.Run(() => BatchRenderPlan.CharacterEntry(model.Entry));
                         List<AlternateAttire> local = await Task.Run(() => AlternateAttires.Read(model.Entry.Folder));
                         row.Entry = BatchRenderPlan.Copy(model.Entry);
                         available = local.Select(attire => new BatchAttireSelection { SourceFolder = row.Entry.Folder, SourceId = row.Entry.SourceId,

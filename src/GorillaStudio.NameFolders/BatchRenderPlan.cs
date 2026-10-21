@@ -20,6 +20,8 @@ namespace GorillaStudio.NameFolders
         public string DiscoveryKey { get; set; }
         public ulong DiscoveryModelHash { get; set; }
         public bool IsDefault { get; set; }
+        public string UnavailableReason { get; set; }
+        public bool IsAvailable { get { return string.IsNullOrWhiteSpace(UnavailableReason); } }
         internal bool RequiresDiscoverySourceProof { get; set; }
     }
 
@@ -54,8 +56,8 @@ namespace GorillaStudio.NameFolders
         public static BatchRenderPlan Create(IEnumerable<RosterEntry> selected, IEnumerable<ModelCandidate> inventory, string rosterTable)
         {
             var plan = new BatchRenderPlan();
-            var models = (inventory ?? Enumerable.Empty<ModelCandidate>()).ToList();
-            var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(Copy).ToList();
+            var models = CharacterModels(inventory);
+            var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(CharacterEntry).ToList();
             var unique = rows.GroupBy(entry => entry.Id).Where(group => group.Count() == 1 && group.Key >= 1 && group.Key <= 65535).Select(group => group.First()).ToList();
             var mapped = MappedModelLibrary.FindMatches(unique, models, rosterTable);
             var ready = new HashSet<RosterEntry>(unique.Where(ReadyFolder));
@@ -117,6 +119,35 @@ namespace GorillaStudio.NameFolders
                 SourceId = entry.SourceId, IsMod = entry.IsMod, Source = entry.Source, StockFolder = entry.StockFolder };
         }
 
+        /// <summary>Expands an explicitly selected attire child only when its character parent is proven.</summary>
+        public static RosterEntry CharacterEntry(RosterEntry entry)
+        {
+            if (entry == null) throw new ArgumentNullException("entry");
+            RosterEntry result = Copy(entry);
+            if (Directory.Exists(result.Folder))
+            {
+                int physical = CharacterFolders.PhysicalId(result.Folder) ?? (result.SourceId > 0 ? result.SourceId : result.Id);
+                if (physical >= 1 && physical <= 65535) result.Folder = AutomaticAttire.CharacterRoot(result.Folder, physical);
+            }
+            return result;
+        }
+
+        private static List<ModelCandidate> CharacterModels(IEnumerable<ModelCandidate> inventory)
+        {
+            return (inventory ?? Enumerable.Empty<ModelCandidate>()).Where(item => item != null).Select(item => {
+                string folder = item.Folder;
+                int physical = CharacterFolders.PhysicalId(folder) ?? item.SourceId;
+                if (Directory.Exists(folder) && physical >= 1 && physical <= 65535)
+                    folder = AutomaticAttire.CharacterRoot(folder, physical);
+                return new ModelCandidate { Folder = folder, Name = item.Name, SourceId = item.SourceId };
+            }).GroupBy(item => item.Folder ?? "", StringComparer.OrdinalIgnoreCase).Select(group => group.First()).ToList();
+        }
+
+        public static DiscoveryAttireCatalogResult FindAttires(RosterEntry entry, IEnumerable<ModelCandidate> inventory, string rosterTable)
+        {
+            return DiscoveryAttireCatalog.Find(CharacterEntry(entry), CharacterModels(inventory), rosterTable);
+        }
+
         public static BatchRenderPlan WithAttires(BatchRenderPlan original, IDictionary<int, List<BatchAttireSelection>> selections)
         {
             return ExpandAttires(original, selections, false);
@@ -143,6 +174,7 @@ namespace GorillaStudio.NameFolders
         public static List<BatchAttireSelection> AvailableAttires(RosterEntry entry, DiscoveryAttireCatalogResult catalog)
         {
             if (entry == null) throw new ArgumentNullException("entry");
+            entry = CharacterEntry(entry);
             var sources = (catalog == null ? Enumerable.Empty<DiscoveryAttireSource>() : catalog.Sources)
                 .Where(source => source != null && source.LogicalId == entry.Id && source.Issue == null
                     && Directory.Exists(source.SourceFolder)).ToList();
@@ -178,6 +210,17 @@ namespace GorillaStudio.NameFolders
                         IsDefault = attire.IsDefault && !mappedDefault });
                 }
             }
+            var known = new HashSet<string>(result.Where(choice => !string.IsNullOrWhiteSpace(choice.DiscoveryKey)).Select(choice => choice.DiscoveryKey), StringComparer.Ordinal);
+            foreach (DiscoveryAttireReference reference in catalog == null ? Enumerable.Empty<DiscoveryAttireReference>() : catalog.References)
+            {
+                if (reference == null || reference.LogicalId != entry.Id) continue;
+                string key = reference.LogicalId.ToString(CultureInfo.InvariantCulture) + ":" + reference.CostumeKey.ToString(CultureInfo.InvariantCulture)
+                    + ":" + reference.MappingId.ToString(CultureInfo.InvariantCulture) + ":" + reference.CostumeIndex.ToString(CultureInfo.InvariantCulture);
+                if (!known.Add(key)) continue;
+                result.Add(new BatchAttireSelection { DiscoveryKey = key, DisplayName = reference.DisplayName,
+                    DiscoveryModelHash = reference.ModelHash, IsDefault = reference.IsDefault,
+                    UnavailableReason = reference.Issue ?? "Its exact mapped MCD was not found in the extracted model folders. Load or extract that model source to use this attire." });
+            }
             return result;
         }
 
@@ -202,9 +245,8 @@ namespace GorillaStudio.NameFolders
         public static BatchRenderPlan CreateWithAttires(IEnumerable<RosterEntry> selected, IEnumerable<ModelCandidate> inventory,
             string rosterTable, IDictionary<int, List<BatchAttireSelection>> selections)
         {
-            var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(Copy).ToList();
-            var models = (inventory ?? Enumerable.Empty<ModelCandidate>()).Where(item => item != null).Select(item =>
-                new ModelCandidate { Folder = item.Folder, Name = item.Name, SourceId = item.SourceId }).ToList();
+            var rows = (selected ?? Enumerable.Empty<RosterEntry>()).Where(entry => entry != null).Select(CharacterEntry).ToList();
+            var models = CharacterModels(inventory);
             var normalized = new Dictionary<int, List<BatchAttireSelection>>();
             foreach (var group in rows.GroupBy(entry => entry.Id).Where(group => group.Count() == 1 && group.Key >= 1 && group.Key <= 65535))
             {
@@ -216,6 +258,7 @@ namespace GorillaStudio.NameFolders
                 foreach (BatchAttireSelection choice in choices)
                 {
                     if (choice == null) throw new ArgumentException("Choose an actual attire model for " + entry.Name + ".");
+                    if (!choice.IsAvailable) throw new InvalidOperationException("The selected attire for " + entry.Name + " is unavailable: " + choice.UnavailableReason);
                     if (!string.IsNullOrWhiteSpace(choice.DiscoveryKey))
                     {
                         if (catalog == null) catalog = DiscoveryAttireCatalog.Find(entry, models, rosterTable);
@@ -251,7 +294,7 @@ namespace GorillaStudio.NameFolders
         public static DiscoveryAttireCatalogResult RefreshDiscoveryAttires(BatchRenderJob job, IEnumerable<ModelCandidate> inventory, string rosterTable)
         {
             if (job == null || job.Entry == null) throw new ArgumentException("A wrestler job is required.", "job");
-            var result = DiscoveryAttireCatalog.Find(job.Entry, inventory, rosterTable);
+            var result = FindAttires(job.Entry, inventory, rosterTable);
             if (!string.IsNullOrWhiteSpace(job.AttireDiscoveryKey))
                 VerifyDiscoveryChoice(job.Entry, new BatchAttireSelection { SourceFolder = job.Entry.Folder,
                     SourceId = job.Entry.SourceId, RelativePath = job.AttireSourceRelativePath,
@@ -317,6 +360,7 @@ namespace GorillaStudio.NameFolders
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (BatchAttireSelection choice in selected)
                 {
+                    if (choice != null && !choice.IsAvailable) throw new InvalidOperationException("The selected attire for " + source.Entry.Name + " is unavailable: " + choice.UnavailableReason);
                     if (choice == null || string.IsNullOrWhiteSpace(choice.RelativePath)) throw new ArgumentException("Choose an actual attire model for " + source.Entry.Name + ".");
                     string folder = choice.SourceFolder ?? source.Entry.Folder;
                     if (!verifiedDiscovery && (!string.IsNullOrWhiteSpace(choice.DiscoveryKey) || !SameSource(folder, source.Entry.Folder)))

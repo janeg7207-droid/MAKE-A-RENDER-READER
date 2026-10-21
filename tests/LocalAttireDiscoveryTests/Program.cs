@@ -100,6 +100,24 @@ internal static class Program
             Equal("A profile with no available mapped asset can still choose its eleven local models", 11, manual.Count);
             Equal("Manual local models do not claim a missing Discovery costume identity", false, manual.Any(item => item.DiscoveryKey != null));
             Equal("The native source default is the only fallback when no mapped default exists", expected[0], manual.Single(item => item.IsDefault).RelativePath);
+            var listed = DiscoveryAttireDisplay.Merge(manual, stock);
+            Equal("Logical 312 lists all eleven named active costumes and all eleven valid local files", 22, listed.Count);
+            Equal("Missing active mappings stay visible without claiming their models exist", 11, listed.Count(item => !item.IsAvailable));
+            Equal("All eleven copied local model files remain available", 11, listed.Count(item => item.IsAvailable));
+            Equal("Every missing costume retains its exact Discovery tuple", true, stock.References.All(reference => listed.Any(item => item.DiscoveryKey == DiscoveryAttireDisplay.ReferenceKey(reference))));
+            Equal("PINK APRIL remains visible as the unavailable Discovery default", true, listed.Any(item => !item.IsAvailable && item.IsDefault && item.DisplayName.StartsWith("PINK APRIL")));
+            Equal("The zero-hash SUMMERSLAM mapping remains unavailable with an explanation", true, listed.Any(item => !item.IsAvailable && item.DiscoveryModelHash == 0 && item.DisplayName.StartsWith("SUMMERSLAM '26") && !string.IsNullOrWhiteSpace(item.UnavailableReason)));
+            Equal("Unavailable rows cannot invent a render path", false, listed.Where(item => !item.IsAvailable).Any(item => item.RelativePath != null || item.SourceFolder != null));
+            var correctlyKeyed = mapped.Select(item => new AlternateAttire { SourceFolder = item.SourceFolder,
+                SourceRelativePath = item.SourceRelativePath, RelativePath = item.RelativePath, DisplayName = item.DisplayName,
+                DiscoveryKey = DiscoveryAttireDisplay.ReferenceKey(found.Sources.Single()), IsDefault = item.IsDefault }).ToList();
+            Equal("A genuinely available custom mapping never gets a duplicate missing row", 11,
+                DiscoveryAttireDisplay.Merge(DiscoveryAttireOptions.Combine(character, character, local, correctlyKeyed, true), found).Count);
+            string selectedChild = Path.Combine(character, "312_Default_Attire");
+            Equal("A selected Default_Attire child resolves to the complete proven 312 character", character, AutomaticAttire.CharacterRoot(selectedChild, 312));
+            Equal("Loading the proven character root reveals all eleven sibling attires", 11,
+                AlternateAttires.Read(AutomaticAttire.CharacterRoot(selectedChild, 312)).Count);
+            Equal("An unrelated logical owner cannot broaden that child source", selectedChild, AutomaticAttire.CharacterRoot(selectedChild, 1481));
 
             var cache = new AlternateAttireCatalog();
             var before = await cache.ReadAsync(character, false);
@@ -114,6 +132,86 @@ internal static class Program
             Equal("Refresh does not change the selected logical profile", 1481, entry.Id);
             Equal("Refresh does not change the selected physical source", character, entry.Folder);
             cache.Close();
+            string deep = "Imported Pack/Costumes/Season/Version/Model/Blue/Attire.mcd";
+            Copy(sourceModel, Path.Combine(character, deep.Replace('/', Path.DirectorySeparatorChar)));
+            Equal("Nested attire packs deeper than four folders are not silently omitted", true,
+                AlternateAttires.Read(character).Any(item => item.RelativePath == deep));
+            var oldInventory = DiscoveryAttireInventory.Refresh(new ModelCandidate[0], new[] { Path.Combine(temporary, "Characters") });
+            string external = Path.Combine(temporary, "remembered-mod-library");
+            Directory.CreateDirectory(external);
+            var beforeExternal = DiscoveryAttireInventory.Refresh(oldInventory, new[] { external });
+            string externalModel = Path.Combine(external, "Separate New Pack", "Characters", "312_New_Attire", "Default_Attire", "Attire.mcd");
+            Copy(sourceModel, externalModel);
+            var afterExternal = DiscoveryAttireInventory.Refresh(beforeExternal, new[] { external });
+            Equal("A remembered collection root discovers a newly added separate character source", true,
+                afterExternal.Any(item => item.Folder == Path.GetDirectoryName(Path.GetDirectoryName(externalModel))));
+            Equal("The new source was absent from the old candidate snapshot", false,
+                beforeExternal.Any(item => item.Folder == Path.GetDirectoryName(Path.GetDirectoryName(externalModel))));
+            Equal("Inventory refresh never changes the selected logical wrestler", 1481, entry.Id);
+            string separate = Path.Combine(temporary, "separate-mapped-locations");
+            Directory.CreateDirectory(separate);
+            var oldMappedInventory = DiscoveryAttireInventory.Refresh(inventory, new[] { separate });
+            // These virtual paths were independently joined from the original
+            // stock_index.json to the uploaded profile's exact model hashes.
+            // Copies exercise routing only; no different outfit art is claimed.
+            string[] knownPaths = {
+                "312_CM_Punk/312_Mutiny_Faction/312_Attire.mcd",
+                "312_CM_Punk/AJ_Lee_Husband/Attire.mcd",
+                "312_CM_Punk/Bad_Blood_2024/Attire.mcd",
+                "312_CM_Punk/Raw_2026/Attire.mcd",
+                "312_CM_Punk/Raw_Netflix_2025/Attire.mcd",
+                "312_CM_Punk/WM41_2025/Attire.mcd",
+                "312_CM_Punk/WarGames_2025/Attire.mcd"
+            };
+            for (int index = 0; index < knownPaths.Length; index++)
+            {
+                string relative = knownPaths[index];
+                Equal("Every separated path is an exact active logical-312 hash: " + relative, true,
+                    cm.Any(reference => reference.ModelHash == CharacterMappingReader.ModelPathHash("characters/" + relative)));
+                Copy(sourceModel, Path.Combine(separate, "Pack " + index, "Characters", relative.Replace('/', Path.DirectorySeparatorChar)));
+            }
+            var selected312 = new RosterEntry { Id = 312, Name = "CM PUNK", SourceId = 312, Folder = character, RosterTable = fixtureTable };
+            Equal("An old source snapshot cannot see newly added separate model packs", 0,
+                DiscoveryAttireCatalog.Find(selected312, oldMappedInventory, fixtureTable).Sources.Count);
+            var refreshedInventory = DiscoveryAttireInventory.Refresh(oldMappedInventory, new[] { separate });
+            var separatedCatalog = DiscoveryAttireCatalog.Find(selected312, refreshedInventory, fixtureTable);
+            Equal("Refreshing remembered locations resolves seven exact active CM Punk mappings in separate packs", 7, separatedCatalog.Sources.Count);
+            Equal("Each resolved active attire retains its distinct complete source root", 7,
+                separatedCatalog.Sources.Select(source => source.SourceFolder).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            Equal("Cross-root sources never switch CM Punk to custom logical slot 1481", true,
+                separatedCatalog.Sources.All(source => source.LogicalId == 312 && source.MappingId == 312));
+            Equal("The unavailable PINK APRIL default is not replaced with another mapped outfit", false,
+                separatedCatalog.Sources.Any(source => source.IsDefault));
+            Equal("An explicitly chosen local source survives availability of other mapped roots", null,
+                DiscoveryAttireDisplay.DefaultSource(separatedCatalog, character, true));
+            bool refusedInferred = false;
+            try { DiscoveryAttireDisplay.DefaultSource(separatedCatalog, character, false); }
+            catch (InvalidDataException) { refusedInferred = true; }
+            Equal("An inferred unrelated source cannot silently replace a missing active default", true, refusedInferred);
+            Equal("A selected exact mapped source remains selected without a default switch", null,
+                DiscoveryAttireDisplay.DefaultSource(separatedCatalog, separatedCatalog.Sources[0].SourceFolder, false));
+            Equal("A validated local default remains selectable without a fake Discovery key", expected[0],
+                DiscoveryAttireDisplay.LocalDefault(character, character, local).RelativePath);
+            var separatedChoices = separatedCatalog.Sources.Select(source => new AlternateAttire {
+                SourceFolder = source.SourceFolder, SourceRelativePath = source.RelativePath,
+                DiscoveryKey = DiscoveryAttireDisplay.ReferenceKey(source), DiscoveryModelHash = source.ModelHash,
+                IsDefault = source.IsDefault, DisplayName = source.DisplayName
+            }).ToList();
+            var allSeparated = DiscoveryAttireDisplay.Merge(separatedChoices, separatedCatalog);
+            Equal("All eleven active Discovery names remain shown across separate packs", 11, allSeparated.Count);
+            Equal("Only the seven copied, hash-proven cross-root models are selectable", 7, allSeparated.Count(item => item.IsAvailable));
+            Equal("Three absent nonzero assets and the zero-hash mapping remain visibly unavailable", 4, allSeparated.Count(item => !item.IsAvailable));
+            Equal("Rebuilding the display does not duplicate missing active references", 11,
+                DiscoveryAttireDisplay.Merge(allSeparated, separatedCatalog).Count);
+            foreach (DiscoveryAttireSource source in separatedCatalog.Sources)
+            {
+                Equal("Cross-root selection validates inside its own complete model root: " + source.DisplayName,
+                    source.RelativePath, AlternateAttires.Validate(source.SourceFolder, source.RelativePath));
+                string[] render = AlternateAttires.Apply("gorilla_render.py", new[] { source.SourceFolder, "roman3",
+                    Path.Combine(temporary, "output"), "slot=312", "screens=both" }, source.RelativePath);
+                Equal("Cross-root rendering preserves logical 312: " + source.DisplayName, true, render.Contains("slot=312"));
+                Equal("Cross-root rendering does not splice the MCD into another source: " + source.DisplayName, source.SourceFolder, render[0]);
+            }
             Equal("A different wrestler's missing relative path cannot be selected locally", false,
                 DiscoveryAttireOptions.IsLocalChoice(character, character, "../OtherWrestler/Attire.mcd"));
             Equal("A removed local model cannot be rendered silently as the default", false,
@@ -130,7 +228,7 @@ internal static class Program
                 DisplayName = item.DisplayName, DiscoveryKey = item.DiscoveryKey, IsDefault = item.IsDefault
             }).ToList();
             var wrappedChoices = DiscoveryAttireOptions.Combine(alias, character, wrapped, wrappedMapped, true);
-            Equal("Compatibility aliases retain every source-local attire", 12, wrappedChoices.Count);
+            Equal("Compatibility aliases retain every source-local attire", 13, wrappedChoices.Count);
             Equal("Compatibility wrappers do not duplicate the mapped default", 1, wrappedChoices.Count(item => item.DiscoveryKey != null));
             string wrappedAdded = AlternateAttires.AliasRelativePath(alias, added);
             Equal("A wrapped local choice remains selectable from its original source", true,

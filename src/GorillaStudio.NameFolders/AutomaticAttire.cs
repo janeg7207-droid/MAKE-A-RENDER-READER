@@ -19,6 +19,35 @@ namespace GorillaStudio.NameFolders
     /// </summary>
     public static class AutomaticAttire
     {
+        // A model picker can land inside Default_Attire. Expand only a proven
+        // character owner so its sibling attires remain visible; a shared base
+        // ID or a neighbouring name alone never establishes that ownership.
+        public static string CharacterRoot(string source, int sourceId)
+        {
+            if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source))
+                throw new DirectoryNotFoundException("Choose an existing wrestler model folder.");
+            if (sourceId < 1 || sourceId > 65535) throw new ArgumentOutOfRangeException("sourceId");
+            string original = Path.GetFullPath(source).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if ((File.GetAttributes(original) & FileAttributes.ReparsePoint) != 0
+                || string.Equals(Path.GetFileName(original), "BaseModel", StringComparison.OrdinalIgnoreCase)
+                || !Directory.GetFiles(original).Any(path => IsMcd(path)
+                    && !string.Equals(Path.GetFileName(path), "baseModel.mcd", StringComparison.OrdinalIgnoreCase))) return original;
+            DirectoryInfo parent = Directory.GetParent(original);
+            if (parent == null || (File.GetAttributes(parent.FullName) & FileAttributes.ReparsePoint) != 0) return original;
+            int? owner = CharacterFolders.PhysicalId(parent.FullName);
+            if (!owner.HasValue || owner.Value != sourceId) return original;
+            int? explicitOwner = FolderNames.ExistingId(parent.Name);
+            bool characterDirectory = parent.Parent != null && string.Equals(parent.Parent.Name, "Characters", StringComparison.OrdinalIgnoreCase)
+                && explicitOwner.HasValue && explicitOwner.Value == sourceId;
+            if (!characterDirectory && BodyFolder(parent.FullName) == null) return original;
+            foreach (string child in Directory.GetDirectories(parent.FullName))
+            {
+                int? childId = FolderNames.ExistingId(Path.GetFileName(child));
+                if (childId.HasValue && childId.Value != sourceId) return original;
+            }
+            return parent.FullName;
+        }
+
         public static bool HasNativeAttire(string source)
         {
             if (string.IsNullOrWhiteSpace(source) || !Directory.Exists(source)) return false;

@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -60,6 +61,13 @@ namespace GorillaStudio.NameFolders
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             controls.Choice = new ComboBox { FontSize = gear.FontSize, MinWidth = 80, Style = gear.Style,
                 ToolTip = "Choose an extracted attire belonging to this wrestler, including separate sources linked by Discovery. Gear above selects entrance or ring pieces within that model." };
+            var itemStyle = new Style(typeof(ComboBoxItem), controls.Choice.ItemContainerStyle);
+            itemStyle.Setters.Add(new Setter(ToolTipService.ShowOnDisabledProperty, true));
+            var unavailable = new DataTrigger { Binding = new Binding("IsAvailable"), Value = false };
+            unavailable.Setters.Add(new Setter(UIElement.IsEnabledProperty, false));
+            unavailable.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding("UnavailableReason")));
+            itemStyle.Triggers.Add(unavailable);
+            controls.Choice.ItemContainerStyle = itemStyle;
             controls.Refresh = new Button { Content = "↻", Margin = new Thickness(5, 0, 0, 0), Padding = new Thickness(6, 0, 6, 0),
                 ToolTip = "Read this wrestler's attire folders again, including newly added models." };
             Grid.SetColumn(controls.Refresh, 1);
@@ -74,6 +82,8 @@ namespace GorillaStudio.NameFolders
                 if (controls.Updating || controls.Switching) return;
                 if (AttireBusy(window)) { FillAttires(window, controls, false); return; }
                 var selected = controls.Choice.SelectedItem as AlternateAttire;
+                if (selected != null && !selected.IsAvailable)
+                { controls.Note.Text = selected.UnavailableReason; SelectExistingAttire(controls); return; }
                 if (selected != null && selected.SourceFolder != null)
                 {
                     _ = LoadDiscoveryAttireSourceAsync(window, controls, selected);
@@ -320,9 +330,13 @@ namespace GorillaStudio.NameFolders
                         controls.Choice.Items.Add(controls.MissingChoice); controls.Choice.SelectedItem = controls.MissingChoice;
                         controls.Note.Text = "Selected attire was removed. Choose another model.";
                     }
-                    else controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires."
-                        : models.Count == 0 ? "No extracted attire models in this character folder."
-                        : models.Count + (models.Count == 1 ? " model available" : " models available") + " · Refresh after adding one";
+                    else
+                    {
+                        int available = models.Count(item => item.IsAvailable);
+                        controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires."
+                            : available == 0 ? "No model files available. Missing Discovery attires stay listed above."
+                            : available + (available == 1 ? " model available" : " models available") + " · Refresh after adding one";
+                    }
                     string mappingNote = DiscoveryAttireIssueNote(owner, folder);
                     if (!string.IsNullOrWhiteSpace(mappingNote)) controls.Note.Text += "\n" + mappingNote;
                 }

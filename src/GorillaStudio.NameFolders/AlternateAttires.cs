@@ -19,6 +19,9 @@ namespace GorillaStudio.NameFolders
         public string SourceFolder { get; internal set; }
         public string SourceRelativePath { get; internal set; }
         public string DiscoveryKey { get; internal set; }
+        public ulong DiscoveryModelHash { get; internal set; }
+        public string UnavailableReason { get; internal set; }
+        public bool IsAvailable { get { return string.IsNullOrWhiteSpace(UnavailableReason); } }
         public override string ToString() { return DisplayName; }
     }
 
@@ -83,7 +86,7 @@ namespace GorillaStudio.NameFolders
             return Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         }
 
-        private static void Scan(string root, string relative, int depth, List<string> models, ref int entries)
+        private static void Scan(string root, string relative, int depth, List<string> models, ref int entries, bool directOnly = false)
         {
             string folder = relative.Length == 0 ? root : Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
             foreach (string file in Directory.GetFiles(folder).OrderBy(path => path, StringComparer.Ordinal))
@@ -94,7 +97,14 @@ namespace GorillaStudio.NameFolders
                     || string.Equals(name, "baseModel.mcd", StringComparison.OrdinalIgnoreCase)) continue;
                 models.Add(relative.Length == 0 ? name : relative + "/" + name);
             }
-            if (depth >= 4) return;
+            if (directOnly) return;
+            if (depth >= 64)
+            {
+                if (Directory.GetDirectories(folder).Any(path => !string.Equals(Path.GetFileName(path), "Textures", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(Path.GetFileName(path), "BaseModel", StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidDataException("This character has too many nested attire folders. Choose a folder closer to the models.");
+                return;
+            }
             foreach (string child in Directory.GetDirectories(folder).OrderBy(path => path, StringComparer.Ordinal))
             {
                 if (++entries > 8192) throw new InvalidDataException("This character contains too many folders to list its attires. Choose its character folder.");
@@ -104,7 +114,7 @@ namespace GorillaStudio.NameFolders
                 // A compatibility Default_Attire can itself be a junction. Read
                 // its direct models, but never follow linked trees recursively.
                 bool link = (File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0;
-                Scan(root, relative.Length == 0 ? name : relative + "/" + name, link ? 4 : depth + 1, models, ref entries);
+                Scan(root, relative.Length == 0 ? name : relative + "/" + name, depth + 1, models, ref entries, link);
             }
         }
 

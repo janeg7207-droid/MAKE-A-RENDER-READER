@@ -32,7 +32,7 @@ internal static class Program
             File.WriteAllText(Path.Combine(model, "BaseModel/baseModel.mcd"), "Randy base");
             File.WriteAllText(Path.Combine(model, "161_Default_Attire/161_Attire.mcd"), "Randy clothes");
             good = Path.Combine(app, "data/library/previews_game/tgood.png");
-            Bundled(); AtlasValidation(); Private(); NativeResult(); FacialCache();
+            Bundled(); AtlasValidation(); Private(); FreshCapturedRead(); NativeResult(); FacialCache();
             if (args.Length > 0) Actual(args[0]);
             Console.WriteLine("PASS " + checks + " Randy taunt preview cache checks");
         }
@@ -132,6 +132,70 @@ internal static class Program
         string manifest = Path.Combine(Path.GetDirectoryName(path), "manifest.json"); var decoded = PreviewJson.Read(File.ReadAllText(manifest)); decoded["model"] = "Adam Cole";
         File.WriteAllText(manifest, PreviewJson.Write(decoded));
         Check(!RandyTauntPreviewCache.TryRead(cache, context, out path), "A saved image for another actor cannot masquerade as the dedicated Randy cache");
+    }
+    private static void FreshCapturedRead()
+    {
+        string storage = Path.Combine(root, "fresh-captured-cache"), path;
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, null, out path) && path == null,
+            "A null freshly captured context cannot return a cache image");
+        var context = RandyTauntPreviewCache.CaptureContext(app, overlay, "tgood", model, "fresh captured lookup");
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "A fresh-context cache miss returns no image");
+        Check(RandyTauntPreviewCache.Publish(storage, context, good, out path),
+            "The captured-lookup fixture publishes a validated private atlas");
+        string published = path, manifest = Path.Combine(Path.GetDirectoryName(path), "manifest.json");
+        Check(RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == published,
+            "An immediately captured context reads the same validated private atlas");
+        Check(RandyTauntPreviewCache.TryRead(storage, context, out path) && path == published,
+            "The public guarded lookup retains the same successful behavior");
+
+        string body = Path.Combine(model, "BaseModel/baseModel.mcd");
+        byte[] originalBody = File.ReadAllBytes(body); DateTime bodyTime = File.GetLastWriteTimeUtc(body);
+        byte[] changedBody = (byte[])originalBody.Clone(); changedBody[0] ^= 1;
+        File.WriteAllBytes(body, changedBody); File.SetLastWriteTimeUtc(body, bodyTime);
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "Final source validation rejects an already-stale captured context despite preserved size and mtime");
+        Check(!RandyTauntPreviewCache.TryRead(storage, context, out path) && path == null,
+            "The public double-guard path continues to reject the same stale source");
+        File.WriteAllBytes(body, originalBody); File.SetLastWriteTimeUtc(body, bodyTime);
+        Check(RandyTauntPreviewCache.TryReadCaptured(storage, context, out path),
+            "Restoring the exact source makes its original captured identity current again");
+
+        byte[] originalAtlas = File.ReadAllBytes(published);
+        byte[] corrupted = (byte[])originalAtlas.Clone(); corrupted[corrupted.Length - 1] ^= 1;
+        File.WriteAllBytes(published, corrupted);
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "Captured lookup still rejects a malformed private PNG CRC");
+        File.WriteAllBytes(published, Png(3, 1));
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "Captured lookup rejects a valid PNG whose bytes do not match its saved manifest");
+        File.WriteAllBytes(published, originalAtlas);
+
+        string originalManifest = File.ReadAllText(manifest);
+        var changedManifest = PreviewJson.Read(originalManifest); changedManifest["model"] = "Adam Cole";
+        File.WriteAllText(manifest, PreviewJson.Write(changedManifest));
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "Captured lookup cannot reuse another actor's saved image");
+        File.WriteAllText(manifest, "{ malformed manifest");
+        Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+            "Captured lookup rejects malformed cache metadata");
+        File.WriteAllText(manifest, originalManifest);
+
+        string moved = Path.Combine(root, "captured-linked-atlas.png");
+        File.Move(published, moved);
+        try
+        {
+            File.CreateSymbolicLink(published, moved);
+            Check(!RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == null,
+                "Captured lookup preserves the private-atlas link guard");
+        }
+        finally
+        {
+            if (File.Exists(published)) File.Delete(published);
+            File.Move(moved, published);
+        }
+        Check(RandyTauntPreviewCache.TryReadCaptured(storage, context, out path) && path == published,
+            "All captured-lookup validation cases preserve the recoverable original cache");
     }
     private static void NativeResult()
     {

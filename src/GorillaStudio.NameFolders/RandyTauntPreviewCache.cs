@@ -105,6 +105,16 @@ namespace GorillaStudio.NameFolders
         {
             atlasPath = null;
             if (context == null || !context.IsCurrent()) return false;
+            return TryReadCaptured(storageRoot, context, out atlasPath);
+        }
+
+        // Only for a context captured immediately by the same cache lookup.
+        // The final complete source check still runs before any successful
+        // return, including when this context has already become stale.
+        internal static bool TryReadCaptured(string storageRoot, RandyTauntPreviewContext context, out string atlasPath)
+        {
+            atlasPath = null;
+            if (context == null) return false;
             try
             {
                 string folder = CacheFolder(storageRoot, context), path = Path.Combine(folder, "atlas.png");

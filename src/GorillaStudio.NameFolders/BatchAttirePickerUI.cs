@@ -45,30 +45,33 @@ namespace GorillaStudio.NameFolders
             controls.Children.Add(all); controls.Children.Add(none); controls.Children.Add(accept); controls.Children.Add(cancel);
             Grid.SetRow(controls, 3); grid.Children.Add(controls);
             var selected = new HashSet<string>((current ?? new List<BatchAttireSelection>()).Select(choice => BatchRenderPlan.SelectionIdentity(choice, entry.Folder)), StringComparer.OrdinalIgnoreCase);
-            if (current == null && available.Count > 0)
-                selected.Add(BatchRenderPlan.SelectionIdentity(available.FirstOrDefault(attire => attire.IsDefault) ?? available.First(), entry.Folder));
+            BatchAttireSelection first = available.FirstOrDefault(attire => attire.IsAvailable && attire.IsDefault)
+                ?? available.FirstOrDefault(attire => attire.IsAvailable);
+            if (current == null && first != null)
+                selected.Add(BatchRenderPlan.SelectionIdentity(first, entry.Folder));
             var checks = new Dictionary<BatchAttireSelection, CheckBox>();
             Action update = () =>
             {
                 int total = checks.Values.Count(check => check.IsChecked == true);
-                count.Text = total.ToString(CultureInfo.InvariantCulture) + " checked · " + total.ToString(CultureInfo.InvariantCulture) + " separate output file(s)";
+                count.Text = total.ToString(CultureInfo.InvariantCulture) + " checked · " + total.ToString(CultureInfo.InvariantCulture) + " separate output file(s)"
+                    + (available.Any(attire => !attire.IsAvailable) ? " · " + available.Count(attire => !attire.IsAvailable).ToString(CultureInfo.InvariantCulture) + " unavailable" : "");
                 accept.IsEnabled = total > 0;
             };
             foreach (BatchAttireSelection attire in available)
             {
                 var label = new StackPanel();
-                label.Children.Add(new TextBlock { Text = attire.DisplayName + (attire.IsDefault ? " (default)" : ""), Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
-                label.Children.Add(new TextBlock { Text = (attire.SourceFolder ?? entry.Folder) + "\n" + attire.RelativePath,
+                label.Children.Add(new TextBlock { Text = attire.DisplayName + (attire.IsDefault ? " (default)" : "") + (attire.IsAvailable ? "" : " · unavailable"), Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
+                label.Children.Add(new TextBlock { Text = attire.IsAvailable ? (attire.SourceFolder ?? entry.Folder) + "\n" + attire.RelativePath : attire.UnavailableReason,
                     Foreground = Brushes.LightGray, FontSize = 11, TextWrapping = TextWrapping.Wrap });
-                var check = new CheckBox { Content = label, IsChecked = selected.Contains(BatchRenderPlan.SelectionIdentity(attire, entry.Folder)), Margin = new Thickness(4, 7, 4, 7) };
+                var check = new CheckBox { Content = label, IsEnabled = attire.IsAvailable, IsChecked = attire.IsAvailable && selected.Contains(BatchRenderPlan.SelectionIdentity(attire, entry.Folder)), Margin = new Thickness(4, 7, 4, 7), ToolTip = attire.UnavailableReason };
                 check.Checked += (sender, args) => update(); check.Unchecked += (sender, args) => update();
                 checks.Add(attire, check); items.Children.Add(check);
             }
-            all.Click += (sender, args) => { foreach (CheckBox check in checks.Values) check.IsChecked = true; };
+            all.Click += (sender, args) => { foreach (CheckBox check in checks.Values) if (check.IsEnabled) check.IsChecked = true; };
             none.Click += (sender, args) => { foreach (CheckBox check in checks.Values) check.IsChecked = false; };
             accept.Click += (sender, args) => { if (checks.Values.Any(check => check.IsChecked == true)) dialog.DialogResult = true; };
             update();
-            return dialog.ShowDialog() == true ? available.Where(attire => checks[attire].IsChecked == true)
+            return dialog.ShowDialog() == true ? available.Where(attire => attire.IsAvailable && checks[attire].IsChecked == true)
                 .Select(attire => new BatchAttireSelection { SourceFolder = attire.SourceFolder, SourceId = attire.SourceId,
                     DiscoveryKey = attire.DiscoveryKey, DiscoveryModelHash = attire.DiscoveryModelHash, IsDefault = attire.IsDefault,
                     RelativePath = attire.RelativePath, DisplayName = attire.DisplayName }).ToList() : null;

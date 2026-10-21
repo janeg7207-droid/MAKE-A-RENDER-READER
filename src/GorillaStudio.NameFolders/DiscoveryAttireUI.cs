@@ -18,6 +18,7 @@ namespace GorillaStudio.NameFolders
         {
             internal RosterEntry Entry;
             internal ModelCandidate[] Inventory;
+            internal string[] ModelRoots;
             internal DiscoveryAttireCatalogResult Result;
         }
 
@@ -41,11 +42,14 @@ namespace GorillaStudio.NameFolders
         // Register the complete selected-roster catalog, rather than just the
         // root that happened to be loaded first. Alias switches reuse it.
         internal static void RegisterDiscoveryAttires(string alias, RosterEntry entry,
-            IEnumerable<ModelCandidate> inventory, DiscoveryAttireCatalogResult result, string sourceFolder = null)
+            IEnumerable<ModelCandidate> inventory, DiscoveryAttireCatalogResult result, string sourceFolder = null,
+            IEnumerable<string> modelRoots = null)
         {
             if (string.IsNullOrWhiteSpace(alias) || entry == null || result == null) return;
             var context = new DiscoveryAttireContext {
                 Entry = CopyRosterEntry(entry), Result = result,
+                ModelRoots = (modelRoots ?? new string[0]).Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                 Inventory = (inventory ?? new ModelCandidate[0]).Where(item => item != null)
                     .Select(item => new ModelCandidate { Folder = item.Folder, Name = item.Name, SourceId = item.SourceId }).ToArray()
             };
@@ -95,10 +99,11 @@ namespace GorillaStudio.NameFolders
         private static IReadOnlyList<AlternateAttire> DiscoveryAttireChoices(object owner, string alias, IReadOnlyList<AlternateAttire> local)
         {
             DiscoveryAttireBinding binding = DiscoveryAttireFor(owner, alias);
-            if (binding == null || binding.Context.Result.Sources.Count == 0) return local;
+            if (binding == null) return local;
             var mapped = binding.Context.Result.Sources.Select(source => new AlternateAttire {
                 SourceFolder = source.SourceFolder, SourceRelativePath = source.RelativePath,
                 DiscoveryKey = DiscoveryAttireReferenceKey(source),
+                DiscoveryModelHash = source.ModelHash,
                 RelativePath = SameAttireFolder(source.SourceFolder, binding.SourceFolder)
                     ? AlternateAttires.AliasRelativePath(alias, source.RelativePath) : null,
                 IsDefault = source.IsDefault,
@@ -107,7 +112,8 @@ namespace GorillaStudio.NameFolders
             // Keep exact mapped labels/defaults and add explicit local clothes
             // from the loaded character. Local choices do not create mappings
             // or change the selected wrestler's logical roster slot.
-            return DiscoveryAttireOptions.Combine(alias, binding.SourceFolder, local, mapped, true);
+            return DiscoveryAttireDisplay.Merge(DiscoveryAttireOptions.Combine(alias, binding.SourceFolder, local, mapped,
+                binding.Context.Result.References.Count > 0), binding.Context.Result);
         }
 
         private static bool HasDiscoveryAttireChoices(object owner, string alias)
@@ -136,10 +142,12 @@ namespace GorillaStudio.NameFolders
             DiscoveryAttireSource source = binding.Context.Result.Sources
                 .Where(item => SameAttireFolder(item.SourceFolder, binding.SourceFolder))
                 .OrderBy(item => item.IsDefault ? 0 : 1).FirstOrDefault();
-            if (source == null) throw new InvalidOperationException("The selected character source has no active Discovery attire. Select one of its mapped sources.");
-            string relative = AlternateAttires.Validate(alias, AlternateAttires.AliasRelativePath(alias, source.RelativePath));
+            AlternateAttire localDefault = source == null ? DiscoveryAttireDisplay.LocalDefault(alias, binding.SourceFolder, AlternateAttires.Read(alias)) : null;
+            if (source == null && localDefault == null)
+                throw new InvalidOperationException("The selected character source has no available attire. Select one of its mapped sources.");
+            string relative = AlternateAttires.Validate(alias, source == null ? localDefault.RelativePath : AlternateAttires.AliasRelativePath(alias, source.RelativePath));
             controls.Generation++; controls.Folder = alias; controls.Selected = relative;
-            controls.SelectedDiscoveryKey = DiscoveryAttireReferenceKey(source);
+            controls.SelectedDiscoveryKey = source == null ? null : DiscoveryAttireReferenceKey(source);
             controls.Target = binding.Context.Entry.Id.ToString(CultureInfo.InvariantCulture);
             controls.Mapped = true;
             ResetAttireChoices(controls);
@@ -156,8 +164,7 @@ namespace GorillaStudio.NameFolders
 
         internal static string DiscoveryAttireReferenceKey(DiscoveryAttireSource source)
         {
-            return source.LogicalId.ToString(CultureInfo.InvariantCulture) + ":" + source.CostumeKey.ToString(CultureInfo.InvariantCulture)
-                + ":" + source.MappingId.ToString(CultureInfo.InvariantCulture) + ":" + source.CostumeIndex.ToString(CultureInfo.InvariantCulture);
+            return DiscoveryAttireDisplay.ReferenceKey(source);
         }
 
         internal static DiscoveryAttireSource SelectedDiscoveryAttireSource(object owner)
@@ -254,14 +261,18 @@ namespace GorillaStudio.NameFolders
             try
             {
                 controls.Note.Text = "Reading Discovery's active attire mappings…";
+                ModelCandidate[] inventory = null;
                 DiscoveryAttireCatalogResult updated = await Task.Run(() => {
-                    var found = DiscoveryAttireCatalog.Find(binding.Context.Entry, binding.Context.Inventory,
+                    inventory = DiscoveryAttireInventory.Refresh(binding.Context.Inventory,
+                        binding.Context.ModelRoots.Concat(new[] { binding.SourceFolder }), CancellationToken.None).ToArray();
+                    var found = DiscoveryAttireCatalog.Find(binding.Context.Entry, inventory,
                         binding.Context.Entry.RosterTable, CancellationToken.None);
                     ResolveDiscoveryAttireSources(found, CancellationToken.None);
                     return found;
                 });
                 if (!controls.Closed && !controls.Switching && SameAttireFolder(alias, AttireField(owner, "Folder") as string)
-                    && ReferenceEquals(binding, DiscoveryAttireFor(owner, alias))) binding.Context.Result = updated;
+                    && ReferenceEquals(binding, DiscoveryAttireFor(owner, alias)))
+                { binding.Context.Inventory = inventory; binding.Context.Result = updated; }
             }
             catch (Exception error) when (AttireError(error))
             {

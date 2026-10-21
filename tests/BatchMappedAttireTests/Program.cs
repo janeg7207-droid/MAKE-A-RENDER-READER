@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Security.Cryptography;
 using GorillaStudio.NameFolders;
 
 internal static class Program
@@ -13,7 +14,7 @@ internal static class Program
     private static int passed;
     private static int failed;
 
-    private static int Main()
+    private static int Main(string[] args)
     {
         temporary = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "gorilla-batch-mapped-" + Guid.NewGuid().ToString("N"))).FullName;
         try
@@ -26,10 +27,173 @@ internal static class Program
             LocalExtrasInActiveSources();
             LocalExtraRevalidation();
             MappedDefaultLabelWins();
+            UnavailableActiveReferences();
+            NarrowSourceSafety();
+            if (args.Length > 0) ActualPunkAndNarrowRouting(args[0]);
             Console.WriteLine("PASS " + passed + " batch mapped-attire checks; failures " + failed);
             return failed == 0 ? 0 : 1;
         }
         finally { Directory.Delete(temporary, true); }
+    }
+
+    private static void NarrowSourceSafety()
+    {
+        foreach (string scenario in new[] { "different-child-id", "unproven-parent", "different-owner" })
+        Check("Narrow batch sources cannot borrow siblings through " + scenario, () => {
+            string parent = Path.Combine(temporary, "narrow-safety-" + scenario,
+                scenario == "unproven-parent" ? "UnprovenCollection" : "Characters", scenario == "unproven-parent" ? "312_CM_Punk" : scenario == "different-owner" ? "999_Other_Character" : "312_CM_Punk");
+            string narrow = Path.Combine(parent, "312_Default_Attire");
+            Write(Path.Combine(narrow, "Attire.mcd"), Encoding.ASCII.GetBytes("selected routing fixture"));
+            string sibling = Path.Combine(parent, scenario == "different-child-id" ? "999_Unrelated" : "312_Alternate");
+            Write(Path.Combine(sibling, "Attire.mcd"), Encoding.ASCII.GetBytes("unselected routing fixture"));
+            var entry = new RosterEntry { Id = 312, Name = "CM Punk", SourceId = 312, Folder = narrow };
+            Equal(narrow, BatchRenderPlan.CharacterEntry(entry).Folder);
+            List<BatchAttireSelection> choices = BatchRenderPlan.AvailableAttires(entry, new DiscoveryAttireCatalogResult());
+            Equal(1, choices.Count); Equal(narrow, choices[0].SourceFolder); Equal("Attire.mcd", choices[0].RelativePath);
+        });
+        Check("A narrow source still needs exact logical ownership before another persona can schedule its siblings", () => {
+            string parent = Path.Combine(temporary, "narrow-cross-owner", "Characters", "312_CM_Punk");
+            string narrow = Path.Combine(parent, "312_Default_Attire"), sibling = Path.Combine(parent, "312_Alternate");
+            Write(Path.Combine(narrow, "Attire.mcd"), Encoding.ASCII.GetBytes("selected routing fixture"));
+            Write(Path.Combine(sibling, "Attire.mcd"), Encoding.ASCII.GetBytes("unselected routing fixture"));
+            var entry = new RosterEntry { Id = 313, Name = "Other persona", SourceId = 313, Folder = null };
+            Reject(() => BatchRenderPlan.CreateWithAttires(new[] { entry }, ModelLibrary.Scan(parent), null,
+                new Dictionary<int, List<BatchAttireSelection>> { { 313, new List<BatchAttireSelection> {
+                    new BatchAttireSelection { SourceFolder = parent, RelativePath = "312_Alternate/Attire.mcd", DisplayName = "Unrelated312" } } } }));
+        });
+    }
+
+    private static void UnavailableActiveReferences()
+    {
+        Fixture fixture = Minimal("unavailable-active-references");
+        fixture.Profiles.Add(Profile(312, 312, Attire(100, "Original unavailable", 100U, 0), Attire(101, "Named alternate unavailable", 101U, 1)));
+        fixture.Costumes.Add(Costume(312, 100U, 0)); fixture.Costumes.Add(Costume(312, 101U, 1));
+        fixture.Mappings.Add(Mapping(312, 100U, 0, "Missing/Default/Original.mcd"));
+        fixture.Mappings.Add(Mapping(312, 101U, 1, "Missing/Alternate/Attire.mcd"));
+        fixture.Save();
+        var entry = new RosterEntry { Id = 312, Name = "CM Punk", SourceId = 312, RosterTable = fixture.Table };
+        DiscoveryAttireCatalogResult catalog = Find(fixture, 312);
+        List<BatchAttireSelection> choices = BatchRenderPlan.AvailableAttires(entry, catalog);
+        Check("Missing active references remain visible with their exact labels and identities", () => {
+            Equal(2, choices.Count); Equal("Original unavailable,Named alternate unavailable", string.Join(",", choices.Select(choice => choice.DisplayName)));
+            Equal(2, choices.Select(choice => choice.DiscoveryKey).Distinct().Count());
+            Equal(true, choices.All(choice => !choice.IsAvailable && !string.IsNullOrWhiteSpace(choice.UnavailableReason)));
+        });
+        Check("An unresolved reference has no invented model folder or MCD path", () => {
+            Equal(true, choices.All(choice => choice.SourceFolder == null && choice.RelativePath == null && choice.SourceId == 0));
+        });
+        Check("A disabled active reference cannot be scheduled as a render", () => {
+            foreach (BatchAttireSelection choice in choices)
+            {
+                InvalidOperationException error = Throws<InvalidOperationException>(() => Plan(fixture, entry, new List<BatchAttireSelection> { choice }));
+                Equal(true, error.Message.Contains("unavailable")); Equal(true, error.Message.Contains(choice.UnavailableReason));
+            }
+        });
+        Check("A forged path cannot make a disabled active reference executable", () => {
+            fixture.Model("312_CM_Punk/312_Default_Attire/312_Attire.mcd");
+            entry.Folder = fixture.Candidates.Single().Folder;
+            choices[0].SourceFolder = entry.Folder; choices[0].RelativePath = "312_Default_Attire/312_Attire.mcd";
+            Reject(() => Plan(fixture, entry, new List<BatchAttireSelection> { choices[0] }));
+        });
+        Check("A ready local outfit stays usable beside missing named Discovery attires", () => {
+            List<BatchAttireSelection> mixed = BatchRenderPlan.AvailableAttires(entry, catalog);
+            Equal(3, mixed.Count); Equal(1, mixed.Count(choice => choice.IsAvailable)); Equal(2, mixed.Count(choice => !choice.IsAvailable));
+            BatchRenderJob local = Plan(fixture, entry, mixed.Where(choice => choice.IsAvailable).ToList()).Jobs.Single();
+            Equal(312, local.Entry.Id); Equal(true, string.IsNullOrWhiteSpace(local.AttireDiscoveryKey));
+        });
+        Check("Unavailable references do not leak to another logical wrestler", () => {
+            Equal(0, BatchRenderPlan.AvailableAttires(new RosterEntry { Id = 313, Name = "Another persona" }, catalog).Count);
+        });
+    }
+
+    private static void ActualPunkAndNarrowRouting(string dataRoot)
+    {
+        string table = Path.Combine(dataRoot, "Roster", "CharProfileTable.jsfb");
+        string realRoot = Path.Combine(dataRoot, "Characters", "312_CM_Punk");
+        string realModel = Path.Combine(realRoot, "312_Default_Attire", "312_Attire.mcd");
+        string beforeTable = FileSha(table), beforeModel = FileSha(realModel);
+        var entry = new RosterEntry { Id = 312, Name = "CM Punk", SourceId = 312, RosterTable = table, Folder = realRoot };
+        List<ModelCandidate> realInventory = ModelLibrary.Scan(realRoot);
+        DiscoveryAttireCatalogResult actual = BatchRenderPlan.FindAttires(entry, realInventory, table);
+        List<BatchAttireSelection> realChoices = BatchRenderPlan.AvailableAttires(entry, actual);
+        Check("Uploaded CM Punk312 has eleven active named references and zero exact mapped sources", () => {
+            Equal(11, actual.References.Count); Equal(0, actual.Sources.Count);
+            Equal(11, actual.References.Select(reference => reference.CostumeKey).Distinct().Count());
+            Equal(true, actual.References.All(reference => !string.IsNullOrWhiteSpace(reference.DisplayName)));
+        });
+        Check("Uploaded CM Punk312 exposes every unavailable reference plus its one real local MCD", () => {
+            Equal(12, realChoices.Count); Equal(11, realChoices.Count(choice => !choice.IsAvailable));
+            Equal("312_Default_Attire/312_Attire.mcd", realChoices.Single(choice => choice.IsAvailable).RelativePath);
+            Equal(true, string.IsNullOrWhiteSpace(realChoices.Single(choice => choice.IsAvailable).DiscoveryKey));
+        });
+        Check("Uploaded unavailable CM Punk reference remains rejected even with a ready local fallback", () => {
+            Reject(() => BatchRenderPlan.CreateWithAttires(new[] { entry }, realInventory, table,
+                new Dictionary<int, List<BatchAttireSelection>> { { 312, new List<BatchAttireSelection> { realChoices.First(choice => !choice.IsAvailable) } } }));
+        });
+        string copyRoot = Path.Combine(temporary, "copied-real-mcd-routing-only", "Characters", "312_CM_Punk");
+        // These byte-identical copies prove path routing only. They do not claim
+        // additional uploaded costumes, model changes, or renderer execution.
+        foreach (string child in new[] { "312_Default_Attire", "312_Alternate_RoutingFixture", "312_Second_RoutingFixture" })
+        {
+            string destination = Path.Combine(copyRoot, child, "312_Attire.mcd"); Directory.CreateDirectory(Path.GetDirectoryName(destination)); File.Copy(realModel, destination);
+        }
+        string narrow = Path.Combine(copyRoot, "312_Default_Attire");
+        var narrowEntry = new RosterEntry { Id = 312, Name = "CM Punk", SourceId = 312, RosterTable = table, Folder = narrow };
+        List<ModelCandidate> narrowInventory = ModelLibrary.Scan(narrow);
+        DiscoveryAttireCatalogResult copiedCatalog = BatchRenderPlan.FindAttires(narrowEntry, narrowInventory, table);
+        List<BatchAttireSelection> copiedChoices = BatchRenderPlan.AvailableAttires(narrowEntry, copiedCatalog);
+        Check("A narrow selected Default_Attire expands only to its proven312 character parent", () => {
+            Equal(copyRoot, BatchRenderPlan.CharacterEntry(narrowEntry).Folder); Equal(narrow, narrowEntry.Folder);
+            Equal(copyRoot, BatchRenderPlan.CharacterEntry(BatchRenderPlan.CharacterEntry(narrowEntry)).Folder);
+        });
+        Check("Narrow and complete source selections reveal the same contained sibling MCDs", () => {
+            RosterEntry full = BatchRenderPlan.Copy(narrowEntry); full.Folder = copyRoot;
+            List<BatchAttireSelection> fullChoices = BatchRenderPlan.AvailableAttires(full, BatchRenderPlan.FindAttires(full, ModelLibrary.Scan(copyRoot), table));
+            Equal(3, copiedChoices.Count(choice => choice.IsAvailable)); Equal(11, copiedChoices.Count(choice => !choice.IsAvailable));
+            Equal(string.Join("\n", fullChoices.Select(choice => BatchRenderPlan.SelectionIdentity(choice)).OrderBy(key => key)), string.Join("\n", copiedChoices.Select(choice => BatchRenderPlan.SelectionIdentity(choice)).OrderBy(key => key)));
+            Equal(0, copiedCatalog.Sources.Count);
+        });
+        var selected = copiedChoices.Where(choice => choice.IsAvailable).Take(2).ToList();
+        BatchRenderPlan plan = BatchRenderPlan.CreateWithAttires(new[] { narrowEntry }, narrowInventory, table,
+            new Dictionary<int, List<BatchAttireSelection>> { { 312, selected } });
+        Check("Two copied-MCD attire routes preserve logical312 and physical312 independently", () => {
+            Equal(2, plan.Jobs.Count); Equal(0, plan.Skipped.Count);
+            Equal(true, plan.Jobs.All(job => job.Entry.Id == 312 && job.Entry.SourceId == 312 && job.Entry.Folder == copyRoot));
+            Equal(2, plan.Jobs.Select(job => job.AttireSourceRelativePath).Distinct().Count());
+        });
+        Check("The same taunt reaches both explicit312 attire paths without a nested wrapper", () => {
+            foreach (BatchRenderJob job in plan.Jobs)
+            {
+                string relative = BatchRenderPlan.AliasAttirePath(job, AutomaticAttire.Plan(job.Entry.Folder, 312).WrapDirectModel);
+                string[] args = AlternateAttires.Apply("gorilla_render.py", new[] { job.Entry.Folder, "same-taunt.npz", "output", "wid=312" }, relative);
+                Equal(copyRoot, args[0]); Equal("same-taunt.npz", args[1]); Equal("wid=312", args[3]);
+                Equal("attire=" + job.AttireSourceRelativePath, args.Last()); Equal(true, File.Exists(Path.Combine(args[0], relative)));
+                Equal(11, BatchRenderPlan.RefreshDiscoveryAttires(job, narrowInventory, table).References.Count);
+            }
+        });
+        Check("Both312 attire outputs coexist as separate files in the normal output folder", () => {
+            string output = Path.Combine(temporary, "copied312-normal-output");
+            foreach (BatchRenderJob job in plan.Jobs)
+            {
+                job.OutputDirectory = Path.Combine(temporary, "copied312-workspace", BatchRenderPlan.WorkspaceName(job));
+                job.RenderPath = Path.Combine(job.OutputDirectory, "312_CM_Punk.gmr"); Write(job.RenderPath, Render((byte)job.VariantIndex, 312));
+                BatchRenderPlan.PublishCompleted(job, output);
+            }
+            Equal(2, plan.Jobs.Select(job => job.PublishedRenderPath).Distinct().Count());
+            Equal(true, plan.Jobs.All(job => Path.GetFileName(job.PublishedRenderPath).StartsWith("312_", StringComparison.Ordinal)));
+        });
+        Check("A removed copied sibling remains a failed selection rather than another outfit", () => {
+            BatchRenderJob job = plan.Jobs[1]; File.Delete(Path.Combine(job.Entry.Folder, job.AttireSourceRelativePath));
+            Reject(() => BatchRenderPlan.RefreshDiscoveryAttires(job, narrowInventory, table));
+        });
+        Check("Uploaded CM Punk model and roster bytes remain unchanged after all batch checks", () => {
+            Equal(beforeTable, FileSha(table)); Equal(beforeModel, FileSha(realModel));
+        });
+    }
+
+    private static string FileSha(string path)
+    {
+        using (var stream = File.OpenRead(path)) using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(stream));
     }
 
     private static void SplitSources()

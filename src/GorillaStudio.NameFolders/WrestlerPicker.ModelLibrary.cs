@@ -24,6 +24,8 @@ namespace GorillaStudio.NameFolders
         private int modelScanVersion;
         private bool modelSelectionBusy;
         private bool offeredModelLibrarySetup;
+        internal List<string> CurrentModelSearchRoots
+        { get { return SearchRoots().Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList(); } }
         private FlowLayoutPanel rosterActions;
         private readonly CancellationTokenSource modelLifetime = new CancellationTokenSource();
 
