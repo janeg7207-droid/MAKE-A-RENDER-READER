@@ -32,7 +32,7 @@ internal static class Program
             File.WriteAllText(Path.Combine(model, "BaseModel/baseModel.mcd"), "Randy base");
             File.WriteAllText(Path.Combine(model, "161_Default_Attire/161_Attire.mcd"), "Randy clothes");
             good = Path.Combine(app, "data/library/previews_game/tgood.png");
-            Bundled(); AtlasValidation(); Private(); NativeResult();
+            Bundled(); AtlasValidation(); Private(); NativeResult(); FacialCache();
             if (args.Length > 0) Actual(args[0]);
             Console.WriteLine("PASS " + checks + " Randy taunt preview cache checks");
         }
@@ -145,6 +145,148 @@ internal static class Program
         result["gmr"] = "someone.gmr"; Check(!RandyTauntPreviewCache.TryGetPlayAtlas(lines(), out path), "A full wrestler render cannot populate the Randy preview cache"); result.Remove("gmr");
         result["frames"] = 0; Check(!RandyTauntPreviewCache.TryGetPlayAtlas(lines(), out path), "No-frame results cannot publish a preview"); result["frames"] = 30;
         result.Remove("play"); result["preview"] = good; Check(!RandyTauntPreviewCache.TryGetPlayAtlas(lines(), out path), "A contact sheet is never substituted for a timed playback atlas");
+    }
+    private static void FacialCache()
+    {
+        string faceApp = Path.Combine(root, "facial-app"), faceOverlay = Path.Combine(root, "facial-overlay");
+        string faceCache = Path.Combine(root, "facial-private-cache"), path;
+        byte[] originalMale = FacialNpz(0.25f), editedMale = FacialNpz(0.5f);
+        foreach (string target in new[] { faceApp, faceOverlay })
+        {
+            foreach (string directory in new[] { "data/library/previews_game", "data/library/faces", "data/gamepack/decoded", "data/faces/male", "data/faces/female" })
+                Directory.CreateDirectory(Path.Combine(target, directory));
+            File.WriteAllBytes(Path.Combine(target, "data/gamepack/decoded/62247a000.npz"), Encoding.UTF8.GetBytes("exact body motion"));
+            File.WriteAllBytes(Path.Combine(target, "data/library/faces/facial_6368.npz"), FacialNpz(0));
+            File.WriteAllBytes(Path.Combine(target, "data/library/previews_game/tface.png"), Png(2, 1));
+            File.WriteAllBytes(Path.Combine(target, "data/faces/male/tface.npz"), originalMale);
+            File.WriteAllBytes(Path.Combine(target, "data/faces/female/tface.npz"), FacialNpz(0.75f));
+            var row = Row("tface"); row["face"] = "facial_6368.npz"; Manifest(target, row);
+            FacialIndex(target, FacialRecord());
+        }
+        string atlas = Path.Combine(faceApp, "data/library/previews_game/tface.png");
+        string male = Path.Combine(faceOverlay, "data/faces/male/tface.npz");
+        string female = Path.Combine(faceOverlay, "data/faces/female/tface.npz");
+        string index = Path.Combine(faceOverlay, "data/faces/index.json");
+        Check(RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path) && path == atlas,
+            "Unchanged per-taunt male facial data preserves the instant stock Randy atlas");
+        var context = RandyTauntPreviewCache.CaptureContext(faceApp, faceOverlay, "tface", model, "indexed facial case");
+        Check(RandyTauntPreviewCache.Publish(faceCache, context, atlas, out path)
+            && RandyTauntPreviewCache.TryRead(faceCache, context, out path),
+            "A completed Randy preview records its indexed male facial source");
+        string refreshedFaces = Path.Combine(root, "facial-refreshed-overlay");
+        foreach (string original in Directory.GetFiles(faceOverlay, "*", SearchOption.AllDirectories))
+        {
+            string copied = Path.Combine(refreshedFaces, Path.GetRelativePath(faceOverlay, original));
+            Directory.CreateDirectory(Path.GetDirectoryName(copied)); File.Copy(original, copied);
+            File.SetLastWriteTimeUtc(copied, File.GetLastWriteTimeUtc(original).AddMinutes(5));
+        }
+        var refreshedContext = RandyTauntPreviewCache.CaptureContext(faceApp, refreshedFaces, "tface", model, "indexed facial case");
+        Check(refreshedContext.Fingerprint == context.Fingerprint && RandyTauntPreviewCache.TryRead(faceCache, refreshedContext, out path),
+            "An unchanged indexed facial source survives fresh overlay paths and copied timestamps");
+
+        File.WriteAllBytes(female, FacialNpz(1));
+        Check(context.IsCurrent() && RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "Female facial bytes do not invalidate a male Randy preview");
+        var femaleAlias = FacialRecord(); femaleAlias["female"] = "female/other.npz";
+        File.WriteAllBytes(Path.Combine(faceOverlay, "data/faces/female/other.npz"), FacialNpz(0.9f));
+        FacialIndex(faceOverlay, femaleAlias);
+        Check(context.IsCurrent() && RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "An unused female index alias does not invalidate male Randy playback");
+        FacialIndex(faceOverlay, FacialRecord(), true);
+        File.WriteAllText(index, "\n  " + File.ReadAllText(index).Replace(",", ",\n  ") + "\n");
+        Check(context.IsCurrent() && RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "Unrelated facial index rows and JSON formatting do not invalidate this taunt");
+        FacialIndex(faceOverlay, FacialRecord());
+
+        DateTime stamp = File.GetLastWriteTimeUtc(male);
+        Check(originalMale.Length == editedMale.Length, "The facial mutation fixture preserves its file size");
+        File.WriteAllBytes(male, editedMale); File.SetLastWriteTimeUtc(male, stamp);
+        Check(!RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "Changed male facial bytes reject a stock preview despite preserved size and mtime");
+        Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, context, out path),
+            "Changed male facial bytes invalidate a private Randy preview despite preserved size and mtime");
+        File.WriteAllBytes(male, originalMale); File.SetLastWriteTimeUtc(male, stamp);
+        Check(context.IsCurrent(), "Restoring the exact male facial source restores its original identity");
+
+        var shifted = FacialRecord(); shifted["offset"] = 2; FacialIndex(faceOverlay, shifted);
+        Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && !RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "A changed per-taunt facial offset invalidates both stock and private previews");
+        FacialIndex(faceOverlay, FacialRecord());
+
+        File.WriteAllText(index, "{}");
+        var absent = RandyTauntPreviewCache.CaptureContext(faceApp, faceOverlay, "tface", model, "absent facial alias");
+        Check(RandyTauntPreviewCache.Publish(faceCache, absent, atlas, out path)
+            && RandyTauntPreviewCache.TryRead(faceCache, absent, out path),
+            "A generated fallback preview records that its per-taunt facial alias is absent");
+        Check(!RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "An absent indexed facial alias cannot reuse a stock atlas made with that facial motion");
+        FacialIndex(faceOverlay, FacialRecord());
+        Check(!absent.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, absent, out path),
+            "Repairing an absent facial alias invalidates the older fallback preview");
+
+        File.WriteAllText(index, "{ malformed index");
+        Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && !RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "A malformed facial index falls back and cannot reuse an indexed facial preview");
+        var malformed = RandyTauntPreviewCache.CaptureContext(faceApp, faceOverlay, "tface", model, "malformed facial alias");
+        Check(RandyTauntPreviewCache.Publish(faceCache, malformed, atlas, out path),
+            "A generated preview may record the native fallback for a malformed facial index");
+        FacialIndex(faceOverlay, FacialRecord());
+        Check(!malformed.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, malformed, out path),
+            "Repairing a malformed index invalidates its previous fallback preview");
+
+        File.WriteAllBytes(Path.Combine(faceOverlay, "data/escaped.npz"), originalMale);
+        var escaped = FacialRecord(); escaped["male"] = "../escaped.npz"; FacialIndex(faceOverlay, escaped);
+        Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && !RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "A facial path outside the face directory cannot reuse an indexed preview");
+        var outOfBounds = FacialRecord(); outOfBounds["offset"] = 1000000000; FacialIndex(faceOverlay, outOfBounds);
+        Check(!context.IsCurrent() && !RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && !RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "An out-of-bounds facial offset falls back and cannot reuse indexed playback");
+        FacialIndex(faceOverlay, FacialRecord());
+        Check(context.IsCurrent() && RandyTauntPreviewCache.TryRead(faceCache, context, out path)
+            && RandyTauntPreviewCache.TryGetBundled(faceApp, faceOverlay, "tface", out path),
+            "Restoring the valid index restores the original stock and private preview identities");
+    }
+
+    private static Dictionary<string, object> FacialRecord()
+    { return new Dictionary<string, object> { { "male", "male/tface.npz" }, { "female", "female/tface.npz" }, { "offset", 0 }, { "events", 3 } }; }
+    private static void FacialIndex(string target, Dictionary<string, object> row, bool unrelated = false)
+    {
+        var document = new Dictionary<string, object> { { "tface", row } };
+        if (unrelated)
+        {
+            document["another_taunt"] = new Dictionary<string, object> { { "male", "male/another.npz" }, { "female", "female/another.npz" }, { "offset", 1 }, { "events", 8 } };
+            File.WriteAllBytes(Path.Combine(target, "data/faces/male/another.npz"), FacialNpz(0.1f));
+            File.WriteAllBytes(Path.Combine(target, "data/faces/female/another.npz"), FacialNpz(0.2f));
+        }
+        File.WriteAllText(Path.Combine(target, "data/faces/index.json"), PreviewJson.Write(document));
+    }
+    private static byte[] FacialNpz(float value)
+    {
+        using (var output = new MemoryStream())
+        {
+            using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
+            {
+                FacialArray(archive, "ids", "<u4", "(1,)", BitConverter.GetBytes((uint)123));
+                FacialArray(archive, "values", "<f4", "(1, 4)", new[] { value, 0f, 0f, value }.SelectMany(BitConverter.GetBytes).ToArray());
+            }
+            return output.ToArray();
+        }
+    }
+    private static void FacialArray(ZipArchive archive, string name, string type, string shape, byte[] values)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(name + ".npy", CompressionLevel.NoCompression);
+        entry.LastWriteTime = new DateTimeOffset(2024, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        string descriptor = "{'descr': '" + type + "', 'fortran_order': False, 'shape': " + shape + ", }";
+        byte[] header = Encoding.ASCII.GetBytes(descriptor + new string(' ', (64 - ((10 + descriptor.Length + 1) % 64)) % 64) + "\n");
+        using (var writer = new BinaryWriter(entry.Open(), Encoding.ASCII))
+        { writer.Write(new byte[] { 0x93, 78, 85, 77, 80, 89, 1, 0 }); writer.Write((ushort)header.Length); writer.Write(header); writer.Write(values); }
     }
     private static void Actual(string actual)
     {

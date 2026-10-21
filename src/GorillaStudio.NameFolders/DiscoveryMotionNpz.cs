@@ -11,6 +11,44 @@ namespace GorillaStudio.NameFolders
     // to import a Discovery animation on the user's computer.
     public static class DiscoveryMotionNpz
     {
+        internal static bool MatchesTiming(string path, int frames, float fps)
+        {
+            if (!File.Exists(path) || frames <= 0 || float.IsNaN(fps) || float.IsInfinity(fps) || fps <= 0) return false;
+            try
+            {
+                using (var file = File.OpenRead(path))
+                using (var archive = new ZipArchive(file, ZipArchiveMode.Read))
+                {
+                    ZipArchiveEntry metadata = archive.GetEntry("hd.npy");
+                    if (metadata == null || metadata.Length > 32768) return false;
+                    using (var reader = new BinaryReader(metadata.Open(), Encoding.ASCII))
+                    {
+                        string header = ReadHeader(reader);
+                        if (header == null || !header.Contains("'<U") || !header.Contains("'shape': ()")) return false;
+                        var json = new StringBuilder();
+                        while (json.Length < 4096)
+                        {
+                            byte[] character = reader.ReadBytes(4);
+                            if (character.Length == 0) break;
+                            if (character.Length != 4 || character[1] != 0 || character[2] != 0 || character[3] != 0) return false;
+                            json.Append((char)character[0]);
+                        }
+                        if (reader.BaseStream.ReadByte() != -1) return false;
+                        var info = DiscoveryTauntLibrary.JsonObject(json.ToString());
+                        double originalFps = info.ContainsKey("fps") ? Convert.ToDouble(info["fps"], CultureInfo.InvariantCulture) : double.NaN;
+                        return info.ContainsKey("frames") && Convert.ToInt32(info["frames"], CultureInfo.InvariantCulture) == frames
+                            && !double.IsNaN(originalFps) && !double.IsInfinity(originalFps) && Math.Abs(originalFps - fps) <= 0.000001;
+                    }
+                }
+            }
+            catch (Exception error) when (error is IOException || error is InvalidDataException || error is ArgumentException
+                || error is OverflowException || error is FormatException || error is InvalidCastException
+#if NET8_0_OR_GREATER
+                || error is System.Text.Json.JsonException
+#endif
+                ) { return false; }
+        }
+
         public static bool MatchesPoses(string path, DecodedDiscoveryMotion motion)
         {
             if (!File.Exists(path)) return false;

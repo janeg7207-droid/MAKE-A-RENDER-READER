@@ -17,6 +17,32 @@ namespace GorillaStudio.NameFolders
         }
     }
 
+    /// <summary>Opens cached motion immediately, then debounces one optional render.</summary>
+    public sealed class RandyTauntPreviewSchedule
+    {
+        private readonly bool manual;
+        private bool generation;
+        public long SelectedAtMilliseconds { get; private set; }
+        public bool Completed { get; private set; }
+        public bool AllowRender { get { return manual || generation; } }
+
+        public RandyTauntPreviewSchedule(bool manual, long selectedAtMilliseconds)
+        {
+            this.manual = manual;
+            SelectedAtMilliseconds = selectedAtMilliseconds;
+        }
+
+        public bool QueueGeneration(bool foregroundBusy)
+        {
+            if (foregroundBusy) { Completed = true; return false; }
+            if (Completed || manual || generation) return false;
+            generation = true;
+            return true;
+        }
+
+        public void Complete() { Completed = true; }
+    }
+
     public sealed class RandyTauntPreviewIntent : IDisposable
     {
         private readonly CancellationTokenSource cancellation;

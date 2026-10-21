@@ -8,5 +8,6 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryMotionNpz.cs" Link="DiscoveryMotionNpz.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryTauntLibrary.cs" Link="DiscoveryTauntLibrary.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/VerifiedTauntRecordPack.cs" Link="VerifiedTauntRecordPack.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/TauntFacialSources.cs" Link="TauntFacialSources.cs" />
   </ItemGroup>
 </Project>

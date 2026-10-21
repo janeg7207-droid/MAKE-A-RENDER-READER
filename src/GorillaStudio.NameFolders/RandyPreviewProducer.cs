@@ -16,12 +16,12 @@ namespace GorillaStudio.NameFolders
         private static readonly SemaphoreSlim RandyPreviewGate = new SemaphoreSlim(1, 1);
 
         internal static async Task<RandyTauntPreviewResult> PrepareRandyTauntPreviewAsync(Window window, string key,
-            Action<string> progress, CancellationToken cancellationToken, bool allowRender)
+            Action<string> progress, CancellationToken cancellationToken, bool allowRender, bool automatic = false)
         {
             if (window == null) throw new ArgumentNullException("window");
             if (!window.Dispatcher.CheckAccess())
                 return await window.Dispatcher.InvokeAsync(new Func<Task<RandyTauntPreviewResult>>(() =>
-                    PrepareRandyTauntPreviewAsync(window, key, progress, cancellationToken, allowRender))).Task.Unwrap();
+                    PrepareRandyTauntPreviewAsync(window, key, progress, cancellationToken, allowRender, automatic))).Task.Unwrap();
             if (!RandyTauntPreviewState.ValidKey(key)) throw new ArgumentException("Choose a playable taunt for Randy's preview.", "key");
             cancellationToken.ThrowIfCancellationRequested();
             var unlock = window.GetType().GetMethod("Unlocked", InstanceMembers, null, Type.EmptyTypes, null);
@@ -72,9 +72,8 @@ namespace GorillaStudio.NameFolders
                 if (cacheHit) return new RandyTauntPreviewResult(cachedBeforeWait, true);
             }
 
-            // Browsing the taunt list must never start extraction, skeleton
-            // preparation or a Blender render. Only an explicit Preview may
-            // create an image that is not already available.
+            // The initial automatic lookup is read-only. Only its debounced,
+            // still-current generation phase or manual Preview may render.
             if (!allowRender) return null;
 
             await RandyPreviewGate.WaitAsync(cancellationToken);
@@ -102,7 +101,14 @@ namespace GorillaStudio.NameFolders
                 foreach (string name in new[] { "PreviewButton", "MakeButton", "InstallButton" })
                 {
                     var button = AutomaticTauntField(window, name) as Button;
-                    if (button != null) { controls.Add(new BatchEnabledRestore(button)); button.IsEnabled = false; }
+                    if (button != null)
+                    {
+                        // MAKE's UI wrapper cancels and drains this automatic
+                        // job before entering the native handler. Keep its
+                        // existing eligibility; never enable an ineligible MAKE.
+                        if (automatic && name == "MakeButton" && button.IsEnabled) continue;
+                        controls.Add(new BatchEnabledRestore(button)); button.IsEnabled = false;
+                    }
                 }
                 var busy = window.GetType().GetField("Busy", InstanceMembers);
                 bool ownsBusy = false;

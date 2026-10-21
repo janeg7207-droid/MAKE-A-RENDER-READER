@@ -28,16 +28,19 @@ namespace GorillaStudio.NameFolders
             internal DispatcherTimer Timer;
             internal RandyTauntPreviewIntent Intent;
             internal RandyTauntPreviewIntent RunningIntent;
+            internal RandyTauntPreviewSchedule Schedule;
+            internal TaskCompletionSource<bool> RunningDone;
             internal long InputGeneration;
             internal long RequestedInput;
             internal bool InputArmed;
             internal bool Manual;
             internal bool Closed;
+            internal bool ForegroundRequested;
+            internal bool RunningAutomatic;
             internal string Status;
             internal string DisplayedKey;
             internal string DisplayedContext;
             internal BitmapSource ResultRoot;
-            internal bool Completed;
         }
 
         private static readonly Dictionary<Window, AutomaticTauntPreview> automaticTauntPreviews =
@@ -94,11 +97,31 @@ namespace GorillaStudio.NameFolders
             var make = AutomaticTauntField(window, "MakeButton") as Button;
             if (make != null)
             {
-                make.PreviewMouseLeftButtonDown += (sender, args) => CancelAutomaticTauntIntent(state);
-                make.PreviewKeyDown += (sender, args) => {
-                    if (args.Key == Key.Enter || args.Key == Key.Space) CancelAutomaticTauntIntent(state);
-                };
-                make.Click += (sender, args) => CancelAutomaticTauntIntent(state);
+                MethodInfo originalMake = window.GetType().GetMethod("OnMake", InstanceMembers, null,
+                    new[] { typeof(object), typeof(RoutedEventArgs) }, null);
+                if (originalMake != null)
+                {
+                    make.RemoveHandler(Button.ClickEvent,
+                        (RoutedEventHandler)Delegate.CreateDelegate(typeof(RoutedEventHandler), window, originalMake));
+                    make.Click += async (sender, args) => {
+                        if (state.ForegroundRequested) return;
+                        state.ForegroundRequested = true;
+                        try
+                        {
+                            await CancelAndDrainAutomaticRandyPreviewAsync(window);
+                            if (state.Closed || !window.IsLoaded) return;
+                            CancelAutomaticTauntIntent(state);
+                            originalMake.Invoke(window, new object[] { sender, args });
+                        }
+                        catch (Exception error)
+                        {
+                            if (error is TargetInvocationException && error.InnerException != null) error = error.InnerException;
+                            if (!state.Closed) SetModelStatus(window, "MAKE could not start: " + error.Message);
+                        }
+                        finally { state.ForegroundRequested = false; }
+                    };
+                }
+                else make.Click += (sender, args) => CancelAutomaticTauntIntent(state);
             }
             var install = AutomaticTauntField(window, "InstallButton") as Button;
             if (install != null)
@@ -191,17 +214,25 @@ namespace GorillaStudio.NameFolders
             RandyTauntPreviewIntent previous = state.Intent;
             state.Intent = state.Selection.Select(key, context, state.Closing.Token);
             if (previous != null && !ReferenceEquals(previous, state.RunningIntent)) previous.Dispose();
-            state.Manual = manual; state.Completed = false;
+            state.Manual = manual;
+            state.Schedule = new RandyTauntPreviewSchedule(manual, state.Clock.ElapsedMilliseconds);
             ClearRandyBrowserPreview(window);
             state.Status = "Randy Orton preview queued…";
-            state.Queue.Enqueue(RandyTauntPreviewState.Identity(key, context), state.Clock.ElapsedMilliseconds - (manual ? 1000 : 0));
+            // Cache reads have no debounce. An automatic miss is queued again
+            // with its original selection time before a renderer may start.
+            state.Queue.CancelPending();
+            state.Queue.Enqueue(RandyTauntPreviewState.Identity(key, context), state.Clock.ElapsedMilliseconds - 1000);
             PresentRandyPreviewHint(window, state, key);
+            window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(async () =>
+                await TryAutomaticTauntPreviewAsync(window, state)));
         }
 
         private static async Task TryAutomaticTauntPreviewAsync(Window window, AutomaticTauntPreview state)
         {
-            if (state.Closed || state.Queue.IsRunning || state.Intent == null || state.Completed) return;
+            if (state.Closed || state.ForegroundRequested || state.Queue.IsRunning || state.Intent == null
+                || state.Schedule == null || state.Schedule.Completed) return;
             RandyTauntPreviewIntent intent = state.Intent;
+            RandyTauntPreviewSchedule schedule = state.Schedule;
             string key = AutomaticTauntKey(state.List.SelectedItem), context = RandyPreviewContext(window);
             if (!state.Selection.IsCurrent(intent, key, context)) { CancelAutomaticTauntIntent(state); return; }
             // A producer may return a verified Randy atlas without touching
@@ -213,11 +244,21 @@ namespace GorillaStudio.NameFolders
                     : "Randy preview queued while the current operation finishes…";
                 PresentRandyPreviewHint(window, state, key); return;
             }
+            if (!state.Manual && schedule.AllowRender && AutomaticTauntBlocked(window))
+            {
+                state.Status = "Randy preview queued while the current model or render finishes…";
+                PresentRandyPreviewHint(window, state, key);
+                return;
+            }
             string identity = RandyTauntPreviewState.Identity(key, context);
             AutomaticTauntPreviewRequest request = state.Queue.TryBegin(identity, false, state.Clock.ElapsedMilliseconds);
             if (request == null) return;
             state.RunningIntent = intent;
+            var runningDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            state.RunningDone = runningDone;
             bool manual = state.Manual;
+            state.RunningAutomatic = !manual;
+            bool generationQueued = false;
             try
             {
                 // The separate Randy workflow still uses the application's
@@ -238,11 +279,18 @@ namespace GorillaStudio.NameFolders
                         { state.Status = message; PresentRandyPreviewHint(window, state, key); }
                     };
                     if (window.Dispatcher.CheckAccess()) show(); else window.Dispatcher.BeginInvoke(show);
-                }, intent.Token, manual);
+                }, intent.Token, schedule.AllowRender, !manual);
                 if (state.Closed || !state.Selection.IsCurrent(intent, AutomaticTauntKey(state.List.SelectedItem), RandyPreviewContext(window))) return;
                 if (result == null)
                 {
-                    state.Status = "No saved Randy preview for this taunt yet.\nPress Preview to create it once.";
+                    generationQueued = schedule.QueueGeneration(state.ForegroundRequested
+                        || batchWindows.ContainsKey(window) || combinedGameSetups.Contains(window));
+                    if (generationQueued)
+                    {
+                        state.Queue.Enqueue(identity, schedule.SelectedAtMilliseconds);
+                        state.Status = "Preparing this taunt's Randy preview automatically…";
+                    }
+                    else state.Status = "Studio is busy. Select this taunt again when the current operation finishes.";
                     PresentRandyPreviewHint(window, state, key);
                     return;
                 }
@@ -266,12 +314,21 @@ namespace GorillaStudio.NameFolders
             }
             finally
             {
-                state.Queue.Complete(request);
-                intent.Dispose();
-                if (ReferenceEquals(state.RunningIntent, intent)) state.RunningIntent = null;
-                if (ReferenceEquals(state.Intent, intent)) state.Completed = true;
-                if (state.Closed) state.Closing.Dispose();
-                else UpdateRandyPreviewButton(window, state);
+                try
+                {
+                    state.Queue.Complete(request);
+                    if (!generationQueued) schedule.Complete();
+                    if (!generationQueued || !ReferenceEquals(state.Intent, intent)) intent.Dispose();
+                    if (ReferenceEquals(state.RunningIntent, intent))
+                    { state.RunningIntent = null; state.RunningAutomatic = false; }
+                    if (state.Closed) state.Closing.Dispose();
+                    else UpdateRandyPreviewButton(window, state);
+                }
+                finally
+                {
+                    runningDone.TrySetResult(true);
+                    if (ReferenceEquals(state.RunningDone, runningDone)) state.RunningDone = null;
+                }
             }
         }
 
@@ -369,7 +426,32 @@ namespace GorillaStudio.NameFolders
         {
             AutomaticTauntPreview state;
             return automaticTauntPreviews.TryGetValue(window, out state) && state.Intent != null
-                && state.Selection.IsCurrent(state.Intent, key, RandyPreviewContext(window)) && !state.Completed;
+                && state.Selection.IsCurrent(state.Intent, key, RandyPreviewContext(window))
+                && state.Schedule != null && !state.Schedule.Completed;
+        }
+
+        internal static async Task CancelAndDrainAutomaticRandyPreviewAsync(Window window)
+        {
+            if (window == null) return;
+            if (!window.Dispatcher.CheckAccess())
+            {
+                await window.Dispatcher.InvokeAsync(new Func<Task>(() => CancelAndDrainAutomaticRandyPreviewAsync(window))).Task.Unwrap();
+                return;
+            }
+            AutomaticTauntPreview state;
+            if (!automaticTauntPreviews.TryGetValue(window, out state) || (state.Manual && !state.RunningAutomatic)) return;
+            bool previousForeground = state.ForegroundRequested;
+            state.ForegroundRequested = true;
+            try
+            {
+                Task drainage = state.RunningAutomatic ? state.RunningDone?.Task : null;
+                CancelAutomaticTauntIntent(state);
+                if (drainage != null) await drainage;
+                // Drop any later browse request made while the foreground
+                // action was waiting for its owned process to exit.
+                CancelAutomaticTauntIntent(state);
+            }
+            finally { state.ForegroundRequested = previousForeground; }
         }
 
         internal static bool IsRandyTauntPreviewImage(Window window, BitmapSource image)
@@ -394,7 +476,8 @@ namespace GorillaStudio.NameFolders
         {
             RandyTauntPreviewIntent previous = state.Intent;
             state.Intent = null; state.InputArmed = false; state.InputGeneration++;
-            state.Selection.Cancel(); state.Queue.CancelPending(); state.Completed = false;
+            state.Selection.Cancel(); state.Queue.CancelPending();
+            state.Schedule?.Complete(); state.Schedule = null;
             if (previous != null && !ReferenceEquals(previous, state.RunningIntent)) previous.Dispose();
         }
 

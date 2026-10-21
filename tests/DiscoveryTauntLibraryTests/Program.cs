@@ -262,7 +262,190 @@ internal static class Program
         FallbackTests(root);
         PreparationTests(root);
         VerifiedPackTests(root);
+        FacialAliasTests(root);
+        MotionTimingTests(root);
         SearchTests();
+    }
+
+    private sealed class FacialFixture
+    {
+        internal string App, Data, Storage, Table, Raw, Faces, Index, Stock, Manifest;
+        internal Dictionary<string, object> Entry;
+    }
+
+    private static FacialFixture FacialFixtureAt(string root, string name)
+    {
+        string folder = Directory.CreateDirectory(Path.Combine(root, "facial-alias", name)).FullName;
+        var fixture = new FacialFixture { App = Path.Combine(folder, "app"), Data = Path.Combine(folder, "discovery"), Storage = Path.Combine(folder, "cache") };
+        string library = Directory.CreateDirectory(Path.Combine(fixture.App, "data", "library")).FullName;
+        Directory.CreateDirectory(Path.Combine(fixture.App, "engine"));
+        Directory.CreateDirectory(Path.Combine(fixture.Data, "MoveData"));
+        Directory.CreateDirectory(Path.Combine(fixture.Data, "Animation"));
+        fixture.Faces = Directory.CreateDirectory(Path.Combine(fixture.App, "data", "faces")).FullName;
+        foreach (string gender in new[] { "male", "female" })
+        {
+            string file = Path.Combine(Directory.CreateDirectory(Path.Combine(fixture.Faces, gender)).FullName, "original.npz");
+            using (var archive = ZipFile.Open(file, ZipArchiveMode.Create))
+            using (var writer = new StreamWriter(archive.CreateEntry("fixture.txt").Open())) writer.Write("Harmless " + gender + " facial fixture; not executed by Blender.");
+        }
+        string fallbackFaces = Directory.CreateDirectory(Path.Combine(library, "faces")).FullName;
+        File.Copy(Path.Combine(fixture.Faces, "male", "original.npz"), Path.Combine(fallbackFaces, "facial_6368.npz"));
+        File.Copy(Path.Combine(fixture.Faces, "male", "original.npz"), Path.Combine(fallbackFaces, "legacy-face.npz"));
+        fixture.Index = Path.Combine(fixture.Faces, "index.json");
+        File.WriteAllText(fixture.Index, JsonSerializer.Serialize(new Dictionary<string, object> {
+            { "original", new { male = "male/original.npz", female = "female/original.npz", offset = 0, events = 7 } }
+        }));
+        fixture.Stock = Path.Combine(fixture.App, "data", "gamepack", "decoded", "62541a000.npz");
+        DiscoveryMotionNpz.Write(fixture.Stock, DiscoveryMotionDecoder.Decode(Motion("62541a000", 30)));
+        fixture.Entry = new Dictionary<string, object> { { "key", "original" }, { "name", "Undisputed 2" },
+            { "clip", "62541a000" }, { "cut", null }, { "face", "facial_6368.npz" }, { "face_offset", 0 }, { "seconds", 0.1 } };
+        fixture.Manifest = Path.Combine(library, "taunts.json");
+        WriteFacialManifest(fixture);
+        fixture.Table = Path.Combine(fixture.Data, "MoveData", "CAMMoveData.jsfb"); File.WriteAllBytes(fixture.Table, CamTable());
+        fixture.Raw = Path.Combine(fixture.Data, "Animation", "edited.clip");
+        byte[] changed = Motion("62541a000", 30); Array.Copy(BitConverter.GetBytes(10f), 0, changed, 0xA8 + 4, 4);
+        File.WriteAllBytes(fixture.Raw, changed);
+        return fixture;
+    }
+
+    private static void WriteFacialManifest(FacialFixture fixture)
+    {
+        File.WriteAllText(fixture.Manifest, JsonSerializer.Serialize(new { taunts = new[] { fixture.Entry } }));
+    }
+
+    private static JsonElement ReadFacialIndex(DiscoveryTauntImport import)
+    {
+        using (JsonDocument document = JsonDocument.Parse(File.ReadAllText(Path.Combine(import.Root, "data", "faces", "index.json"))))
+            return document.RootElement.Clone();
+    }
+
+    private static Dictionary<string, string> FacialSourceHashes(FacialFixture fixture)
+    {
+        return Directory.GetFiles(fixture.App, "*", SearchOption.AllDirectories).ToDictionary(path => path, Hash, StringComparer.Ordinal);
+    }
+
+    private static void FacialAliasTests(string root)
+    {
+        var fixture = FacialFixtureAt(root, "compatible-body-edit");
+        Dictionary<string, string> original = FacialSourceHashes(fixture);
+        DiscoveryTauntImport built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+        string key = ManifestKey(Path.Combine(built.Library, "taunts.json"));
+        JsonElement faces = ReadFacialIndex(built);
+        Equal("A same-clip pose edit still receives its independent motion cache key", true, key.StartsWith("original_discovery_", StringComparison.Ordinal));
+        Equal("A compatible body edit retains its own indexed facial source under the new key", true, faces.TryGetProperty(key, out _));
+        Equal("The renamed-key facial alias retains the original male animation", "male/original.npz", faces.GetProperty(key).GetProperty("male").GetString());
+        Equal("The renamed-key facial alias retains the original female animation", "female/original.npz", faces.GetProperty(key).GetProperty("female").GetString());
+        Equal("The exact indexed facial event metadata is preserved", 7, faces.GetProperty(key).GetProperty("events").GetInt32());
+        Equal("Creating a facial alias keeps the original native key available", true, faces.TryGetProperty("original", out _));
+        string privateFaces = Path.Combine(built.Root, "data", "faces"), privateIndex = Path.Combine(privateFaces, "index.json");
+        Equal("The overlay facial directory is private rather than a source-directory link", false, (File.GetAttributes(privateFaces) & FileAttributes.ReparsePoint) != 0);
+        Equal("The writable overlay index is a private file rather than a source-index link", false, (File.GetAttributes(privateIndex) & FileAttributes.ReparsePoint) != 0);
+        Equal("The private index differs from the read-only original index after aliasing", false, Hash(privateIndex) == Hash(fixture.Index));
+        foreach (string gender in new[] { "male", "female" })
+        {
+            Equal("The private facial index reuses the source " + gender + " directory through a separate link", true,
+                (File.GetAttributes(Path.Combine(privateFaces, gender)) & FileAttributes.ReparsePoint) != 0);
+            Equal("The overlay reuses the exact original " + gender + " facial file", Hash(Path.Combine(fixture.Faces, gender, "original.npz")),
+                Hash(Path.Combine(privateFaces, gender, "original.npz")));
+        }
+        Equal("Facial alias generation preserves every bundled source file byte", true, original.All(pair => File.Exists(pair.Key) && Hash(pair.Key) == pair.Value));
+        Equal("Facial alias generation does not create new files in the bundled app", original.Count, Directory.GetFiles(fixture.App, "*", SearchOption.AllDirectories).Length);
+
+        built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+        Equal("Repeating the same import does not duplicate facial aliases", 2, ReadFacialIndex(built).EnumerateObject().Count());
+        byte[] changed = Motion("62541a000", 30); Array.Copy(BitConverter.GetBytes(25f), 0, changed, 0xA8 + 4, 4); File.WriteAllBytes(fixture.Raw, changed);
+        built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+        string next = ManifestKey(Path.Combine(built.Library, "taunts.json")); faces = ReadFacialIndex(built);
+        Equal("A different body edit receives a different versioned motion identity", false, key == next);
+        Equal("A facial-index refresh drops the stale prior motion alias", false, faces.TryGetProperty(key, out _));
+        Equal("A facial-index refresh adds only the current compatible alias", true, faces.TryGetProperty(next, out _) && faces.EnumerateObject().Count() == 2);
+        File.Delete(fixture.Raw); built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+        Equal("Removing an override restores the original motion key", "original", ManifestKey(Path.Combine(built.Library, "taunts.json")));
+        Equal("Removing an override clears its stale facial aliases", 1, ReadFacialIndex(built).EnumerateObject().Count());
+        Equal("Repeated facial-index refreshes preserve the source index", original[fixture.Index], Hash(fixture.Index));
+
+        foreach (string mismatch in new[] { "variant", "frames", "fps", "cut", "offset", "legacy-face" })
+        {
+            fixture = FacialFixtureAt(root, "incompatible-" + mismatch);
+            if (mismatch == "variant")
+            {
+                byte[] table = File.ReadAllBytes(fixture.Table); Write(table, 140, 1u); File.WriteAllBytes(fixture.Table, table);
+                byte[] variant = Motion("62541a001", 30); Array.Copy(BitConverter.GetBytes(10f), 0, variant, 0xA8 + 4, 4); File.WriteAllBytes(fixture.Raw, variant);
+            }
+            else if (mismatch == "frames")
+            {
+                DecodedDiscoveryMotion stock = DiscoveryMotionDecoder.Decode(Motion("62541a000", 30));
+                stock.Frames = 4; stock.Poses = new float[stock.Ids.Length, 4, 7]; stock.Scales = new float[stock.ScaleIds.Length, 4];
+                DiscoveryMotionNpz.Write(fixture.Stock, stock);
+            }
+            else if (mismatch == "fps") DiscoveryMotionNpz.Write(fixture.Stock, DiscoveryMotionDecoder.Decode(Motion("62541a000", 60)));
+            else if (mismatch == "cut") fixture.Entry["cut"] = new[] { 1, 2 };
+            else if (mismatch == "offset") fixture.Entry["face_offset"] = 1;
+            else fixture.Entry["face"] = "legacy-face.npz";
+            WriteFacialManifest(fixture);
+            string sourceIndex = Hash(fixture.Index);
+            built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+            string importedClip = mismatch == "variant" ? "62541a001" : "62541a000";
+            using (JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(built.Library, "taunts.json"))))
+            {
+                JsonElement current = manifest.RootElement.GetProperty("taunts").EnumerateArray().Single(item => item.GetProperty("clip").GetString() == importedClip);
+                key = current.GetProperty("key").GetString();
+                string fallback = current.GetProperty("face").GetString();
+                Equal("A " + mismatch + " mismatch retains the explicitly selected facial fallback", mismatch == "legacy-face" ? "legacy-face.npz" : "facial_6368.npz", fallback);
+                Equal("A " + mismatch + " mismatch keeps its fallback facial asset accessible", true, File.Exists(Path.Combine(built.Library, "faces", fallback)));
+            }
+            faces = ReadFacialIndex(built);
+            Equal("A " + mismatch + " mismatch does not invent a facial alias", false, faces.TryGetProperty(key, out _));
+            Equal("A " + mismatch + " mismatch keeps the source facial index unchanged", sourceIndex, Hash(fixture.Index));
+            Equal("A " + mismatch + " mismatch still imports the actual body motion", true, built.Available > 0 && File.Exists(Path.Combine(built.Root, "data", "gamepack", "decoded", importedClip + ".npz")));
+        }
+
+        foreach (string defect in new[] { "json", "unsafe-path", "missing-file" })
+        {
+            fixture = FacialFixtureAt(root, "invalid-index-" + defect);
+            if (defect == "json") File.WriteAllText(fixture.Index, "{not valid JSON");
+            else File.WriteAllText(fixture.Index, JsonSerializer.Serialize(new Dictionary<string, object> {
+                { "original", new { male = defect == "unsafe-path" ? "../outside.npz" : "male/missing.npz", female = "female/original.npz", offset = 0, events = 7 } }
+            }));
+            string indexHash = Hash(fixture.Index);
+            built = DiscoveryTauntLibrary.Build(fixture.App, fixture.Storage, fixture.Data);
+            key = ManifestKey(Path.Combine(built.Library, "taunts.json"));
+            Equal("A facial-index " + defect + " error does not abort the body/roster import", 1, built.Available);
+            Equal("A facial-index " + defect + " error never creates a guessed alias", false, ReadFacialIndex(built).TryGetProperty(key, out _));
+            Equal("A facial-index " + defect + " error preserves its source for inspection", indexHash, Hash(fixture.Index));
+            Equal("A facial-index " + defect + " error is reported without dropping the motion", true,
+                built.Warnings.Any(warning => warning.IndexOf("facial", StringComparison.OrdinalIgnoreCase) >= 0));
+        }
+    }
+
+    private static void MotionTimingTests(string root)
+    {
+        string path = Path.Combine(root, "facial-timing.npz");
+        DecodedDiscoveryMotion motion = DiscoveryMotionDecoder.Decode(Motion("62541a000", 30));
+        DiscoveryMotionNpz.Write(path, motion);
+        Equal("Facial timing reads the real scalar frame-count/FPS metadata", true, DiscoveryMotionNpz.MatchesTiming(path, motion.Frames, motion.Fps));
+        Equal("Facial timing rejects a different frame count", false, DiscoveryMotionNpz.MatchesTiming(path, motion.Frames + 1, motion.Fps));
+        Equal("Facial timing rejects a different playback rate", false, DiscoveryMotionNpz.MatchesTiming(path, motion.Frames, 60));
+        Equal("Facial timing rejects non-finite requested playback rates", false, DiscoveryMotionNpz.MatchesTiming(path, motion.Frames, float.NaN));
+        motion.Poses[0, 0, 0] = 99;
+        Equal("Pose changes can differ while the stock facial timing remains compatible", true,
+            !DiscoveryMotionNpz.MatchesPoses(path, motion) && DiscoveryMotionNpz.MatchesTiming(path, motion.Frames, motion.Fps));
+        byte[] metadata;
+        using (var archive = ZipFile.OpenRead(path))
+        using (var input = archive.GetEntry("hd.npy").Open())
+        using (var bytes = new MemoryStream()) { input.CopyTo(bytes); metadata = bytes.ToArray(); }
+        string truncated = Path.Combine(root, "facial-timing-truncated.npz");
+        using (var archive = ZipFile.Open(truncated, ZipArchiveMode.Create))
+        using (var output = archive.CreateEntry("hd.npy").Open()) output.Write(metadata, 0, metadata.Length - 1);
+        Equal("Truncated Unicode timing metadata cannot authorize a facial alias", false, DiscoveryMotionNpz.MatchesTiming(truncated, motion.Frames, motion.Fps));
+        string corrupt = Path.Combine(root, "facial-timing-corrupt.npz");
+        File.WriteAllBytes(corrupt, new byte[] { 80, 75, 3, 4, 0 });
+        Equal("A damaged stock NPZ cannot authorize a facial alias", false, DiscoveryMotionNpz.MatchesTiming(corrupt, motion.Frames, motion.Fps));
+        string badJson = Path.Combine(root, "facial-timing-invalid-json.npz");
+        metadata = (byte[])metadata.Clone(); int header = 10 + BitConverter.ToUInt16(metadata, 8); metadata[header] = (byte)'!';
+        using (var archive = ZipFile.Open(badJson, ZipArchiveMode.Create))
+        using (var output = archive.CreateEntry("hd.npy").Open()) output.Write(metadata, 0, metadata.Length);
+        Equal("Malformed stock timing JSON cannot authorize a facial alias", false, DiscoveryMotionNpz.MatchesTiming(badJson, motion.Frames, motion.Fps));
     }
 
     private static VerifiedTauntRecordPack Pack(byte[] body, string clip, bool wrongHash = false,

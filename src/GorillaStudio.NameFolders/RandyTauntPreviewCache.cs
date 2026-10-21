@@ -43,6 +43,9 @@ namespace GorillaStudio.NameFolders
                 object tested;
                 if (!original.TryGetValue("tested_on", out tested) || !RandyLabel(tested)) return false;
                 if (Semantic(original) != Semantic(current)) return false;
+                string originalFacial = TauntFacialSources.Signature(app, original, "male");
+                string currentFacial = TauntFacialSources.Signature(engine, current, "male");
+                if (originalFacial != currentFacial) return false;
                 string[] left = MotionFiles(app, original), right = MotionFiles(engine, current);
                 if (left.Length != right.Length) return false;
                 for (int index = 0; index < left.Length; index++)
@@ -52,6 +55,8 @@ namespace GorillaStudio.NameFolders
                 if (!ValidAtlas(path)) return false;
                 // Source changes during an atlas lookup must never display an older motion.
                 if (Semantic(Entry(app, key)) != Semantic(original) || Semantic(Entry(engine, key)) != Semantic(current)) return false;
+                if (TauntFacialSources.Signature(app, original, "male") != originalFacial
+                    || TauntFacialSources.Signature(engine, current, "male") != currentFacial) return false;
                 atlasPath = path; return true;
             }
             catch { return false; }
@@ -71,13 +76,14 @@ namespace GorillaStudio.NameFolders
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, new UTF8Encoding(false), true))
             {
-                writer.Write("Randy-taunt-atlas-v2;model=161_Randy_Orton_2019;ring;hair=black;quick=1;15fps");
+                writer.Write("Randy-taunt-atlas-v3;model=161_Randy_Orton_2019;ring;hair=black;quick=1;15fps");
                 // Discovery builds a new private overlay directory on refresh.
                 // Its temporary path and copied motion timestamps do not change
                 // Randy's rendered animation. The context retains the actual
                 // source paths for freshness checks, but the key follows bytes.
                 writer.Write(app); writer.Write(model); writer.Write(key); writer.Write(extraSignature ?? "");
                 writer.Write(Semantic(entry));
+                writer.Write(TauntFacialSources.Signature(engine, entry, "male"));
                 foreach (string path in MotionFiles(engine, entry)) WriteMotion(writer, path);
                 foreach (string path in ModelFiles(model)) WriteFile(writer, path, path.EndsWith(".mcd", StringComparison.OrdinalIgnoreCase) || new FileInfo(path).Length <= 1024 * 1024);
                 foreach (string directory in SharedModelDirectories(app, model))

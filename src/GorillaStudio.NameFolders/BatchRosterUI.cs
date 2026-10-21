@@ -91,6 +91,8 @@ namespace GorillaStudio.NameFolders
         {
             Window existing;
             if (batchWindows.TryGetValue(owner, out existing)) { existing.Activate(); return; }
+            await CancelAndDrainAutomaticRandyPreviewAsync(owner);
+            if (!owner.IsLoaded) return;
             if (BatchNativeBusy(owner)) { SetModelStatus(owner, "Wait for the current model or render to finish before opening Batch MAKE."); return; }
             Type type = owner.GetType();
             var unlocked = type.GetMethod("Unlocked", InstanceMembers, null, Type.EmptyTypes, null);

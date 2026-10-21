@@ -10,8 +10,9 @@ namespace GorillaStudio.NameFolders
     }
 
     /// <summary>
-    /// Debounces explicit selections without interrupting a native render. Busy
-    /// work delays the latest request; refreshes and closing cancel queued work.
+    /// Debounces generation phases and retains only the latest queued request.
+    /// Callers cancel their owned processes; the active slot stays occupied
+    /// until they confirm cleanup with Complete.
     /// Time is supplied by the caller's monotonic clock, not the system clock.
     /// </summary>
     public sealed class AutomaticTauntPreviewQueue

@@ -360,7 +360,8 @@ namespace GorillaStudio.NameFolders
                 if (!string.Equals(Path.GetFileName(directory), "data", StringComparison.OrdinalIgnoreCase))
                     DirectoryLinks.EnsureJunction(Path.Combine(overlay, Path.GetFileName(directory)), directory);
             }
-            LinkChildren(baseData, data, new[] { "library", "gamepack", "caps", "start" }, cancellationToken);
+            LinkChildren(baseData, data, new[] { "library", "gamepack", "caps", "start", "faces" }, cancellationToken);
+            Dictionary<string, object> facialIndex = PrepareFacialIndex(applicationRoot, data, result.Warnings, cancellationToken);
             MaterializeDirectory(Path.Combine(baseData, "caps"), Path.Combine(data, "caps"), false, cancellationToken);
             MaterializeDirectory(Path.Combine(baseData, "start"), Path.Combine(data, "start"), false, cancellationToken);
             Directory.CreateDirectory(library);
@@ -518,7 +519,17 @@ namespace GorillaStudio.NameFolders
                                 // The engine retains loop.npz per taunt key. A
                                 // changed motion needs a new key to avoid an old
                                 // pose cache surviving a Discovery refresh.
-                                item["key"] = Convert.ToString(item["key"], CultureInfo.InvariantCulture) + "_discovery_" + hash.Substring(0, 12);
+                                string sourceKey = Convert.ToString(item["key"], CultureInfo.InvariantCulture);
+                                Dictionary<string, object> facialRecord = null;
+                                bool compatibleFace = CompatibleFacialTiming(item, originalClip, frames, fps);
+                                bool facialAlias = compatibleFace
+                                    && TauntFacialSources.TryReadAlias(applicationRoot, facialIndex, sourceKey, out facialRecord);
+                                if (compatibleFace && !facialAlias && facialIndex.ContainsKey(sourceKey))
+                                    result.Warnings.Add("Could not validate the matching facial files for " + sourceKey
+                                        + "; this taunt keeps its generic facial animation.");
+                                item["key"] = sourceKey + "_discovery_" + hash.Substring(0, 12);
+                                if (facialAlias)
+                                    facialIndex[(string)item["key"]] = facialRecord;
                                 item["tested_on"] = new[] { "Discovery motion; preview on your selected wrestler" };
                                 item["cut"] = null;
                                 item["seconds"] = Math.Round(frames / (double)fps, 2);
@@ -577,6 +588,7 @@ namespace GorillaStudio.NameFolders
             manifest["taunts"] = entries;
             progress?.Invoke("Publishing taunt library…");
             cancellationToken.ThrowIfCancellationRequested();
+            WriteAtomic(Path.Combine(data, "faces", "index.json"), Json(facialIndex), cancellationToken);
             WriteAtomic(Path.Combine(library, "taunts.json"), Json(manifest), cancellationToken);
             result.Warnings.AddRange(prepared.Records.Warnings.Where(warning => !result.Warnings.Contains(warning)));
             result.Root = overlay;
@@ -627,6 +639,58 @@ namespace GorillaStudio.NameFolders
                 item["name"] = definition.Name;
                 item["also"] = names.Where(name => !string.IsNullOrWhiteSpace(name) &&
                     !string.Equals(name, definition.Name, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            }
+        }
+
+        private static bool CompatibleFacialTiming(Dictionary<string, object> entry, string originalMotion, int frames, float fps)
+        {
+            object cut;
+            if (!TauntFacialSources.UsesIndexedFace(entry)
+                || (entry.TryGetValue("cut", out cut) && cut != null)) return false;
+            try
+            {
+                return DiscoveryMotionNpz.MatchesTiming(originalMotion, frames, fps);
+            }
+            catch (Exception error) when (error is ArgumentException || error is FormatException || error is InvalidCastException
+                || error is OverflowException) { return false; }
+        }
+
+        private static Dictionary<string, object> PrepareFacialIndex(string applicationRoot, string data,
+            ICollection<string> warnings, CancellationToken token)
+        {
+            string source = Path.Combine(applicationRoot, "data", "faces"), target = Path.Combine(data, "faces");
+            token.ThrowIfCancellationRequested();
+            if (Directory.Exists(target) && (File.GetAttributes(target) & FileAttributes.ReparsePoint) != 0)
+            {
+                if (!string.Equals(DirectoryLinks.Resolve(target), DirectoryLinks.Resolve(source), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("An unexpected link occupies the Discovery facial cache.");
+                Directory.Delete(target);
+            }
+            Directory.CreateDirectory(target);
+            if (Directory.Exists(source))
+                foreach (string child in Directory.EnumerateDirectories(source))
+                {
+                    token.ThrowIfCancellationRequested();
+                    DirectoryLinks.EnsureJunction(Path.Combine(target, Path.GetFileName(child)), child);
+                }
+            string path = Path.Combine(source, "index.json");
+            if (!File.Exists(path)) return new Dictionary<string, object>();
+            try
+            {
+                if (new FileInfo(path).Length > 4 * 1024 * 1024) throw new InvalidDataException("The facial index exceeds its size limit.");
+                var index = JsonObject(File.ReadAllText(path));
+                if (index == null) throw new InvalidDataException("The facial index must be a JSON object.");
+                return index;
+            }
+            catch (Exception error) when (error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+                || error is FormatException || error is InvalidCastException
+#if NET8_0_OR_GREATER
+                || error is System.Text.Json.JsonException
+#endif
+                )
+            {
+                warnings.Add("Could not read the bundled facial index; no imported facial links were added: " + error.Message);
+                return new Dictionary<string, object>();
             }
         }
 

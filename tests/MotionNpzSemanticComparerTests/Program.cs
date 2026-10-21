@@ -55,6 +55,8 @@ internal static class Program
             string faceDirectory = Path.Combine(library, "faces"); Directory.CreateDirectory(faceDirectory);
             File.Copy(Path.Combine(app, "data", "library", "faces", (string)face), Path.Combine(faceDirectory, (string)face));
         }
+        string ownFaces = Path.Combine(overlay, "data", "faces");
+        Directory.CreateSymbolicLink(ownFaces, Path.Combine(app, "data", "faces"));
         string atlas;
         Check(RandyTauntPreviewCache.TryGetBundled(app, overlay, "t62542", out atlas),
             "A real Discovery-reencoded Undisputed 3 reuses its bundled Randy preview without Blender");
