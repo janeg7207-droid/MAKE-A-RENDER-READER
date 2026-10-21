@@ -223,11 +223,9 @@ namespace GorillaStudio.NameFolders
                     List<BatchAttireSelection> current = row.Attires;
                     if (discovery.References.Count > 0)
                     {
-                        if (discovery.Sources.Count == 0) throw new InvalidOperationException("Discovery lists active attires for " + row.Entry.Name
-                            + ", but their exact extracted MCDs were not found.\n" + string.Join("\n", discovery.Issues));
-                        available = discovery.Sources.OrderBy(source => source.IsDefault ? 0 : 1)
-                            .ThenBy(source => source.CostumeIndex).ThenBy(source => source.SourceFolder, StringComparer.OrdinalIgnoreCase)
-                            .Select(BatchRenderPlan.DiscoveryChoice).ToList();
+                        available = await Task.Run(() => BatchRenderPlan.AvailableAttires(row.Entry, discovery));
+                        if (available.Count == 0) throw new InvalidOperationException("No linked or local attire models were found for " + row.Entry.Name
+                            + ".\n" + string.Join("\n", discovery.Issues));
                         if (current == null && selectedDiscovery != null && selectedDiscovery.LogicalId == row.Entry.Id)
                         {
                             string key = DiscoveryAttireReferenceKey(selectedDiscovery);
@@ -261,6 +259,20 @@ namespace GorillaStudio.NameFolders
                             bool wrapped = AutomaticAttire.Plan(row.Entry.Folder, CharacterFolders.PhysicalId(row.Entry.Folder) ?? (row.Entry.SourceId > 0 ? row.Entry.SourceId : row.Entry.Id)).WrapDirectModel;
                             string sourcePath = wrapped && selected.StartsWith("Default_Attire/", StringComparison.OrdinalIgnoreCase) ? selected.Substring("Default_Attire/".Length) : selected;
                             BatchAttireSelection same = available.FirstOrDefault(attire => string.Equals(attire.RelativePath, sourcePath, StringComparison.OrdinalIgnoreCase));
+                            if (same != null) current = new List<BatchAttireSelection> { same };
+                        }
+                    }
+                    if (current == null && selectedDiscovery == null && discovery.References.Count > 0)
+                    {
+                        string loadedFolder = type.GetField("Folder", InstanceMembers)?.GetValue(owner) as string;
+                        DiscoveryAttireBinding binding = DiscoveryAttireFor(owner, loadedFolder);
+                        if (binding != null && binding.Context.Entry.Id == row.Entry.Id)
+                        {
+                            string selected = SelectedAlternateAttire(owner, loadedFolder);
+                            string sourcePath = AlternateAttires.SourceRelativePath(loadedFolder, selected ?? "");
+                            BatchAttireSelection same = available.FirstOrDefault(choice => string.IsNullOrWhiteSpace(choice.DiscoveryKey)
+                                && SameAttireFolder(choice.SourceFolder, binding.SourceFolder)
+                                && string.Equals(choice.RelativePath, sourcePath, StringComparison.OrdinalIgnoreCase));
                             if (same != null) current = new List<BatchAttireSelection> { same };
                         }
                     }
@@ -592,9 +604,9 @@ namespace GorillaStudio.NameFolders
             RememberRenderTable(alias, entry.RosterTable);
             RememberPreparedRender(alias, plan, entry, pictures);
             RegisterDiscoveryAttires(alias, entry, inventory, discovery, source);
-            if (job != null && !string.IsNullOrWhiteSpace(job.AttireDiscoveryKey)
+            if (job != null && job.HasExplicitAttire
                 && !SeedDiscoveryAttireChoice(owner, alias, job.AttireSourceRelativePath, job.AttireDiscoveryKey))
-                throw new InvalidOperationException("The active Discovery attire controls are unavailable. Reopen Gorilla Studio before rendering this batch.");
+                throw new InvalidOperationException("The attire controls are unavailable. Reopen Gorilla Studio before rendering this batch.");
             RegisterSelection(alias, entry);
             var busy = owner.GetType().GetField("Busy", InstanceMembers);
             try

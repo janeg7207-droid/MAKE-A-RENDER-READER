@@ -242,7 +242,7 @@ namespace GorillaStudio.NameFolders
             controls.Note.Text = string.IsNullOrWhiteSpace(folder) ? "Load a wrestler to read its attires." : "Reading attire models…";
             controls.Reading = true;
             int readGeneration = ++controls.ReadGeneration;
-            _ = ReadAttiresAsync(owner, controls, folder, scan, refreshDiscovery, readGeneration);
+            _ = ReadAttiresAsync(owner, controls, folder, scan || changedContext, refreshDiscovery, readGeneration);
         }
 
         private static void ResetAttireChoices(AttireControls controls)

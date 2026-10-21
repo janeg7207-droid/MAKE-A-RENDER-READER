@@ -23,6 +23,9 @@ internal static class Program
             DirectSources();
             InvalidSelections();
             LoadedAttireSelection();
+            LocalExtrasInActiveSources();
+            LocalExtraRevalidation();
+            MappedDefaultLabelWins();
             Console.WriteLine("PASS " + passed + " batch mapped-attire checks; failures " + failed);
             return failed == 0 ? 0 : 1;
         }
@@ -249,11 +252,12 @@ internal static class Program
             choice.DiscoveryModelHash = 0x1234567890ABCDEFUL;
             Reject(() => Plan(fixture, Entry(fixture), new List<BatchAttireSelection> { choice }));
         });
-        Check("An unkeyed choice cannot jump from its saved source to a separate folder", () => {
+        Check("An unkeyed choice may use a separate source proven active for the same logical wrestler", () => {
             Fixture fixture = DemonFixture("unkeyed-cross-root", false); var sources = Find(fixture, 626).Sources.ToList();
             RosterEntry entry = Entry(fixture); entry.Folder = sources[0].SourceFolder;
             BatchAttireSelection choice = BatchRenderPlan.DiscoveryChoice(sources[1]); choice.DiscoveryKey = null;
-            Reject(() => Plan(fixture, entry, new List<BatchAttireSelection> { choice }));
+            BatchRenderJob job = Plan(fixture, entry, new List<BatchAttireSelection> { choice }).Jobs.Single();
+            Equal(sources[1].SourceFolder, job.Entry.Folder); Equal(626, job.Entry.Id);
         });
         Check("An unspecified physical source ID is restored from current verified evidence", () => {
             Fixture fixture = DemonFixture("unspecified-source-id", false); BatchAttireSelection choice = BatchRenderPlan.DiscoveryChoice(Find(fixture, 626).Sources.First());
@@ -275,6 +279,213 @@ internal static class Program
     }
 
     private static RosterEntry Entry(Fixture fixture) { return new RosterEntry { Id = 626, SourceId = 576, Name = "Demon Finn", RosterTable = fixture.Table }; }
+
+    private static void LocalExtrasInActiveSources()
+    {
+        Fixture fixture = ExtrasFixture("cm-punk-extras", 312, "CM_Punk", "CM_Punk_Alternate");
+        List<DiscoveryAttireSource> sources = Find(fixture, 312).Sources.OrderBy(source => source.CostumeIndex).ToList();
+        string extraRoot = sources[1].SourceFolder;
+        var original = ExtraEntry(fixture, 312, sources[0]);
+        List<BatchAttireSelection> available = BatchRenderPlan.AvailableAttires(original, Find(fixture, 312));
+        var choices = new List<BatchAttireSelection> { BatchRenderPlan.DiscoveryChoice(sources[0]),
+            available.Single(choice => choice.SourceFolder == extraRoot && choice.RelativePath == "PINK_APRIL/Attire.mcd"),
+            available.Single(choice => choice.SourceFolder == extraRoot && choice.RelativePath == "SUMMERSLAM/Attire.mcd") };
+        choices[1].SourceId = 65530; choices[2].SourceId = 65531;
+        Dictionary<string, byte[]> before = Snapshot(fixture.Root);
+        BatchRenderPlan plan = Plan(fixture, original, choices);
+        Check("CM Punk's extra MCDs need no individual active costume key inside his proven source", () => {
+            Equal(2, sources.Count); Equal(false, sources.Any(source => source.RelativePath.Contains("PINK_APRIL") || source.RelativePath.Contains("SUMMERSLAM")));
+            Equal(3, plan.Jobs.Count); Equal(0, plan.Skipped.Count);
+        });
+        Check("The available attire catalog includes local extras only from this wrestler's current and proven roots", () => {
+            Equal(6, available.Count);
+            Equal(true, available.All(choice => sources.Any(source => source.SourceFolder == choice.SourceFolder)));
+            Equal(false, available.Any(choice => choice.SourceFolder.Contains("Other_Persona")));
+        });
+        Check("The mapped default takes precedence over duplicate automatic local defaults", () => {
+            Equal(1, available.Count(choice => choice.IsDefault));
+            Equal(sources[0].SourceFolder, available.Single(choice => choice.IsDefault).SourceFolder);
+            Equal(false, string.IsNullOrWhiteSpace(available.Single(choice => choice.IsDefault).DiscoveryKey));
+        });
+        Check("Mixed mapped and local extras retain one logical wrestler and derive each physical ID from its source", () => {
+            Equal(true, plan.Jobs.All(job => job.Entry.Id == 312 && job.HasExplicitAttire && !job.ExtractFromGame));
+            Equal("1201,1202,1202", string.Join(",", plan.Jobs.Select(job => job.Entry.SourceId)));
+            Equal(true, plan.Jobs.Skip(1).All(job => job.Entry.Folder == extraRoot && string.IsNullOrWhiteSpace(job.AttireDiscoveryKey)));
+            Equal(true, plan.Jobs.Skip(1).All(job => job.AttireLocalSourceMustRemainMapped));
+        });
+        Check("Every extra model keeps its own source body and textures", () => {
+            foreach (BatchRenderJob job in plan.Jobs) {
+                Equal("body " + job.Entry.SourceId, File.ReadAllText(Path.Combine(job.Entry.Folder, "BaseModel", "baseModel.mcd")));
+                Equal("texture " + job.Entry.SourceId, File.ReadAllText(Path.Combine(job.Entry.Folder, "Textures", "body.dds")));
+            }
+        });
+        Check("Mapped and extra clothes share the selected taunt while passing their exact contained MCDs", () => {
+            foreach (BatchRenderJob job in plan.Jobs) {
+                string[] args = AlternateAttires.Apply("gorilla_render.py", new[] { job.Entry.Folder, "17330a000.npz", "output" }, BatchRenderPlan.AliasAttirePath(job, false));
+                Equal("17330a000.npz", args[1]); Equal("attire=" + job.AttireSourceRelativePath, args.Last());
+                Equal(true, File.Exists(Path.Combine(args[0], job.AttireSourceRelativePath)));
+            }
+        });
+        Check("Mapped and extra clothes receive distinct workspaces and normal output files", () => {
+            Equal(3, plan.Jobs.Select(BatchRenderPlan.WorkspaceName).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+            string output = Path.Combine(temporary, "extra-output");
+            foreach (BatchRenderJob job in plan.Jobs) {
+                job.OutputDirectory = Path.Combine(temporary, "extra-workspace", BatchRenderPlan.WorkspaceName(job));
+                job.RenderPath = Path.Combine(job.OutputDirectory, "312_CM_Punk.gmr");
+                Write(job.RenderPath, Render((byte)job.VariantIndex, 312));
+                string published = BatchRenderPlan.PublishCompleted(job, output), reason;
+                Equal(true, BatchRenderPlan.VerifyCompleted(published, 312, output, out reason));
+                Equal(true, File.ReadAllBytes(published).SequenceEqual(File.ReadAllBytes(job.RenderPath)));
+            }
+            Equal(3, plan.Jobs.Select(job => job.PublishedRenderPath).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        });
+        Check("A local extra snapshots its supplied roster context and preserves the original row", () => {
+            RosterEntry entry = ExtraEntry(fixture, 312, sources[0]); entry.RosterTable = null;
+            BatchRenderJob job = Plan(fixture, entry, new List<BatchAttireSelection> { choices[1] }).Jobs.Single();
+            Equal(Path.GetFullPath(fixture.Table), job.Entry.RosterTable); Equal(null, entry.RosterTable); Equal(sources[0].SourceFolder, entry.Folder);
+        });
+        Check("Repeated local extra selections are deduplicated by source and contained path", () => {
+            var repeated = new List<BatchAttireSelection> { choices[1], ManualExtra(extraRoot + Path.DirectorySeparatorChar, "PINK_APRIL/Attire.mcd", "Again", 7), choices[2] };
+            Equal(2, Plan(fixture, original, repeated).Jobs.Count);
+        });
+        Check("A valid extra choice can be refreshed against current active source evidence", () => {
+            Equal(2, BatchRenderPlan.RefreshDiscoveryAttires(plan.Jobs[1], fixture.Candidates, fixture.Table).Sources.Count);
+            Equal(1202, plan.Jobs[1].Entry.SourceId);
+        });
+        Check("Planning and publishing mixed extras preserve all source files and Discovery tables", () => Equal(true, SameSnapshot(before, fixture.Root)));
+        Fixture jeff = ExtrasFixture("jeff-hardy-02-extras", 777, "Jeff_Hardy_02", "Jeff_Hardy_02_Alternate");
+        List<DiscoveryAttireSource> jeffSources = Find(jeff, 777).Sources.OrderBy(source => source.CostumeIndex).ToList();
+        Check("Jeff Hardy 02 can batch extra clothes inside his currently loaded source", () => {
+            RosterEntry entry = ExtraEntry(jeff, 777, jeffSources[0]);
+            List<BatchAttireSelection> localChoices = BatchRenderPlan.AvailableAttires(entry, Find(jeff, 777));
+            var first = localChoices.Single(choice => choice.SourceFolder == entry.Folder && choice.RelativePath == "PINK_APRIL/Attire.mcd");
+            var second = localChoices.Single(choice => choice.SourceFolder == entry.Folder && choice.RelativePath == "SUMMERSLAM/Attire.mcd");
+            first.SourceId = 65530; second.SourceId = 65531;
+            BatchRenderPlan local = Plan(jeff, entry, new List<BatchAttireSelection> { first, second });
+            Equal(2, local.Jobs.Count); Equal(true, local.Jobs.All(job => job.Entry.Id == 777 && job.Entry.SourceId == 1201 && job.Entry.Folder == entry.Folder));
+        });
+        Check("Jeff Hardy 02 cannot borrow local extras from another logical persona", () => {
+            string other = jeff.Candidates.Single(item => item.Folder.Contains("Other_Persona")).Folder;
+            Reject(() => Plan(jeff, ExtraEntry(jeff, 777, jeffSources[0]), new List<BatchAttireSelection> {
+                ManualExtra(other, "PINK_APRIL/Attire.mcd", "Wrong persona", 1201) }));
+        });
+        Check("An already chosen local character keeps extra clothes without any Discovery mapping", () => {
+            Fixture local = Minimal("manual-source-without-mapping");
+            local.Model("Chosen_User_Source/Gold/Attire.mcd"); local.Save();
+            var entry = new RosterEntry { Id = 312, Name = "Chosen local character", SourceId = 1201, Folder = local.Candidates.Single().Folder, RosterTable = local.Table };
+            List<BatchAttireSelection> availableLocal = BatchRenderPlan.AvailableAttires(entry, Find(local, 312));
+            BatchRenderJob job = Plan(local, entry, availableLocal).Jobs.Single();
+            Equal(312, job.Entry.Id); Equal(1201, job.Entry.SourceId); Equal("Gold/Attire.mcd", job.AttireSourceRelativePath);
+            Equal(false, job.AttireLocalSourceMustRemainMapped);
+            Equal(0, BatchRenderPlan.RefreshDiscoveryAttires(job, local.Candidates, local.Table).Sources.Count);
+        });
+    }
+
+    private static void LocalExtraRevalidation()
+    {
+        foreach (string mutation in new[] { "active-key", "mapping", "source", "selected-path", "table", "physical-id", "forged-folder", "escape" })
+        Check("A local extra revalidates its original source proof after " + mutation + " changes", () => {
+            Fixture fixture = ExtrasFixture("extra-refresh-" + mutation, 312, "CM_Punk", "CM_Punk_Alternate");
+            List<DiscoveryAttireSource> sources = Find(fixture, 312).Sources.OrderBy(source => source.CostumeIndex).ToList();
+            RosterEntry entry = ExtraEntry(fixture, 312, sources[0]);
+            BatchAttireSelection selected = BatchRenderPlan.AvailableAttires(entry, Find(fixture, 312))
+                .Single(choice => choice.SourceFolder == sources[1].SourceFolder && choice.RelativePath == "PINK_APRIL/Attire.mcd");
+            BatchRenderJob job = Plan(fixture, entry, new List<BatchAttireSelection> { selected }).Jobs.Single();
+            switch (mutation) {
+                case "active-key": fixture.Profiles[0].Attires.RemoveAt(1); fixture.Save(); break;
+                case "mapping": fixture.Mappings.RemoveAt(1); fixture.Save(); break;
+                case "source": Directory.Delete(sources[1].SourceFolder, true); break;
+                case "selected-path": File.Delete(Path.Combine(sources[1].SourceFolder, "PINK_APRIL", "Attire.mcd")); break;
+                case "table": File.Delete(fixture.Table); break;
+                case "physical-id": fixture.Candidates.Single(item => item.Folder == sources[1].SourceFolder).SourceId = 1302; break;
+                case "forged-folder": job.Entry.Folder = fixture.Candidates.Single(item => item.Folder.Contains("Other_Persona")).Folder; break;
+                case "escape": job.AttireSourceRelativePath = "../Other_Persona/PINK_APRIL/Attire.mcd"; break;
+            }
+            Reject(() => BatchRenderPlan.RefreshDiscoveryAttires(job, fixture.Candidates, fixture.Table));
+        });
+        Check("An inactive source cannot become a local extra merely by supplying a matching wrestler ID", () => {
+            Fixture fixture = DemonFixture("extra-inactive-root", false); var sources = Find(fixture, 626).Sources.OrderBy(source => source.CostumeIndex).ToList();
+            string inactive = fixture.Candidates.Single(item => item.Folder.Contains("UnlistedDemon")).Folder;
+            Reject(() => Plan(fixture, new RosterEntry { Id = 626, Folder = sources[0].SourceFolder, SourceId = sources[0].SourceId, RosterTable = fixture.Table },
+                new List<BatchAttireSelection> { ManualExtra(inactive, "Default_Attire/Attire.mcd", "Inactive five", 626) }));
+        });
+        Check("A cross-source local extra must remain a contained relative MCD", () => {
+            Fixture fixture = ExtrasFixture("extra-plan-escape", 312, "CM_Punk", "CM_Punk_Alternate");
+            var sources = Find(fixture, 312).Sources.OrderBy(source => source.CostumeIndex).ToList();
+            foreach (string path in new[] { "../Other_Persona/PINK_APRIL/Attire.mcd", Path.Combine(sources[1].SourceFolder, "PINK_APRIL", "Attire.mcd") })
+                Reject(() => Plan(fixture, ExtraEntry(fixture, 312, sources[0]), new List<BatchAttireSelection> {
+                    ManualExtra(sources[1].SourceFolder, path, "Escaping path", 1202) }));
+        });
+        Check("A local attire job cannot change its logical wrestler after planning", () => {
+            Fixture fixture = ExtrasFixture("extra-logical-id-change", 312, "CM_Punk", "CM_Punk_Alternate");
+            DiscoveryAttireSource source = Find(fixture, 312).Sources.OrderBy(item => item.CostumeIndex).First();
+            RosterEntry entry = ExtraEntry(fixture, 312, source);
+            BatchAttireSelection choice = BatchRenderPlan.AvailableAttires(entry, Find(fixture, 312))
+                .Single(item => item.SourceFolder == source.SourceFolder && item.RelativePath == "PINK_APRIL/Attire.mcd");
+            BatchRenderJob job = Plan(fixture, entry, new List<BatchAttireSelection> { choice }).Jobs.Single();
+            Equal(false, job.AttireLocalSourceMustRemainMapped);
+            job.Entry.Id = 311;
+            Reject(() => BatchRenderPlan.RefreshDiscoveryAttires(job, fixture.Candidates, fixture.Table));
+        });
+        foreach (bool directoryLink in new[] { false, true })
+        Check("A local extra cannot import an outside model through a " + (directoryLink ? "directory" : "file") + " link", () => {
+            Fixture fixture = ExtrasFixture("extra-link-" + directoryLink, 312, "CM_Punk", "CM_Punk_Alternate");
+            var sources = Find(fixture, 312).Sources.OrderBy(source => source.CostumeIndex).ToList();
+            string outside = Path.Combine(temporary, "outside-extra-" + directoryLink); Directory.CreateDirectory(outside);
+            string outsideModel = Path.Combine(outside, "Attire.mcd"); File.WriteAllText(outsideModel, "outside unrelated model");
+            string linkFolder = Path.Combine(sources[1].SourceFolder, "Linked_Extra");
+            if (directoryLink) Directory.CreateSymbolicLink(linkFolder, outside);
+            else { Directory.CreateDirectory(linkFolder); File.CreateSymbolicLink(Path.Combine(linkFolder, "Attire.mcd"), outsideModel); }
+            RosterEntry entry = ExtraEntry(fixture, 312, sources[0]);
+            Equal(false, BatchRenderPlan.AvailableAttires(entry, Find(fixture, 312)).Any(choice => choice.RelativePath == "Linked_Extra/Attire.mcd"));
+            Reject(() => Plan(fixture, entry, new List<BatchAttireSelection> {
+                ManualExtra(sources[1].SourceFolder, "Linked_Extra/Attire.mcd", "Linked unrelated", 1202) }));
+        });
+    }
+
+    private static Fixture ExtrasFixture(string name, int logicalId, string firstName, string secondName)
+    {
+        Fixture fixture = Minimal(name);
+        fixture.Profiles.Add(Profile(logicalId, logicalId - 1, Attire(100, "Mapped original", 100U, 0), Attire(101, "Mapped alternate", 101U, 1)));
+        fixture.Profiles.Add(Profile(logicalId - 1, logicalId - 1, Attire(102, "Other persona", 102U, 0)));
+        fixture.Costumes.Add(Costume(logicalId, 100U, 0)); fixture.Costumes.Add(Costume(logicalId, 101U, 1)); fixture.Costumes.Add(Costume(logicalId - 1, 102U, 0));
+        foreach (var item in new[] { new { Name = firstName, Key = 100U, Index = 0, Id = logicalId, Physical = 1201 },
+            new { Name = secondName, Key = 101U, Index = 1, Id = logicalId, Physical = 1202 },
+            new { Name = "Other_Persona", Key = 102U, Index = 0, Id = logicalId - 1, Physical = 1203 } }) {
+            fixture.Mappings.Add(Mapping(item.Id, item.Key, item.Index, fixture.Model(item.Name + "/Default_Attire/Attire.mcd")));
+            fixture.Model(item.Name + "/PINK_APRIL/Attire.mcd"); fixture.Model(item.Name + "/SUMMERSLAM/Attire.mcd");
+            ModelCandidate candidate = fixture.Candidates.Single(model => Path.GetFileName(model.Folder) == item.Name); candidate.SourceId = item.Physical;
+            Write(Path.Combine(candidate.Folder, "BaseModel", "baseModel.mcd"), Encoding.ASCII.GetBytes("body " + item.Physical));
+            Write(Path.Combine(candidate.Folder, "Textures", "body.dds"), Encoding.ASCII.GetBytes("texture " + item.Physical));
+        }
+        fixture.Save(); return fixture;
+    }
+    private static void MappedDefaultLabelWins()
+    {
+        Check("An extra native-default MCD loses its default label when an explicit mapped default wins", () => {
+            Fixture fixture = Minimal("mapped-default-label");
+            fixture.Profiles.Add(Profile(312, 312, Attire(100, "Explicit mapped outfit", 100U, 0)));
+            fixture.Costumes.Add(Costume(312, 100U, 0));
+            string mapped = fixture.Model("CM_Punk/Default_Attire/Mapped.mcd");
+            fixture.Model("CM_Punk/Default_Attire/Attire.mcd");
+            fixture.Mappings.Add(Mapping(312, 100U, 0, mapped)); fixture.Save();
+            string folder = fixture.Candidates.Single().Folder;
+            AlternateAttire nativeDefault = AlternateAttires.Read(folder).Single(choice => choice.IsDefault);
+            Equal("Default_Attire/Attire.mcd", nativeDefault.RelativePath);
+            Equal(true, nativeDefault.DisplayName.EndsWith(" (default)", StringComparison.OrdinalIgnoreCase));
+            var entry = new RosterEntry { Id = 312, Name = "CM Punk", Folder = folder, SourceId = 999, RosterTable = fixture.Table };
+            List<BatchAttireSelection> choices = BatchRenderPlan.AvailableAttires(entry, Find(fixture, 312));
+            Equal(2, choices.Count); Equal(1, choices.Count(choice => choice.IsDefault));
+            Equal("Default_Attire/Mapped.mcd", choices.Single(choice => choice.IsDefault).RelativePath);
+            Equal(false, string.IsNullOrWhiteSpace(choices.Single(choice => choice.IsDefault).DiscoveryKey));
+            BatchAttireSelection local = choices.Single(choice => string.IsNullOrWhiteSpace(choice.DiscoveryKey));
+            Equal(false, local.IsDefault);
+            Equal(false, local.DisplayName.IndexOf("(default)", StringComparison.OrdinalIgnoreCase) >= 0);
+            Equal(true, local.DisplayName.EndsWith(" (local)", StringComparison.OrdinalIgnoreCase));
+        });
+    }
+    private static RosterEntry ExtraEntry(Fixture fixture, int id, DiscoveryAttireSource source) { return new RosterEntry { Id = id, Name = id == 312 ? "CM Punk" : "Jeff Hardy 02", Folder = source.SourceFolder, SourceId = source.SourceId, RosterTable = fixture.Table }; }
+    private static BatchAttireSelection ManualExtra(string folder, string path, string name, int sourceId) { return new BatchAttireSelection { SourceFolder = folder, RelativePath = path, DisplayName = name, SourceId = sourceId }; }
 
     private static void LoadedAttireSelection()
     {
@@ -329,7 +540,7 @@ internal static class Program
     }
 
     private static BatchRenderPlan Plan(Fixture fixture, RosterEntry entry, List<BatchAttireSelection> selections)
-    { return BatchRenderPlan.CreateWithAttires(new[] { entry }, fixture.Candidates, fixture.Table, new Dictionary<int, List<BatchAttireSelection>> { { 626, selections } }); }
+    { return BatchRenderPlan.CreateWithAttires(new[] { entry }, fixture.Candidates, fixture.Table, new Dictionary<int, List<BatchAttireSelection>> { { entry.Id, selections } }); }
     private static void Reject(Action action)
     {
         try { action(); }
@@ -342,14 +553,14 @@ internal static class Program
     private static bool SameSnapshot(Dictionary<string, byte[]> before, string path) { var after = Snapshot(path); return before.Count == after.Count && before.All(pair => after.ContainsKey(pair.Key) && pair.Value.SequenceEqual(after[pair.Key])); }
 
     // Header-only fixture exercises production publication verification, not movie decoding.
-    private static byte[] Render(byte fill)
+    private static byte[] Render(byte fill, int logicalId = 626)
     {
         using (var stream = new MemoryStream()) using (var writer = new BinaryWriter(stream))
         {
             writer.Write(Encoding.ASCII.GetBytes("BIKi"));
             foreach (uint word in new uint[] { 56, 2, 4, 2, 1024, 1024, 30, 1, 1048576, 0, 57, 61, 64 }) writer.Write(word);
             writer.Write(Enumerable.Repeat(fill, 8).ToArray());
-            byte[] metadata = Encoding.UTF8.GetBytes("{\"format\":\"GorillaRender\",\"version\":1,\"wrestler_id\":626}");
+            byte[] metadata = Encoding.UTF8.GetBytes("{\"format\":\"GorillaRender\",\"version\":1,\"wrestler_id\":" + logicalId.ToString(CultureInfo.InvariantCulture) + "}");
             writer.Write(metadata); writer.Write((uint)metadata.Length); writer.Write(Encoding.ASCII.GetBytes("GMR1")); return stream.ToArray();
         }
     }

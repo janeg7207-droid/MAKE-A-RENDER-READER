@@ -104,8 +104,9 @@ namespace GorillaStudio.NameFolders
                 IsDefault = source.IsDefault,
                 DisplayName = source.DisplayName + (source.IsDefault ? " (default)" : "")
             });
-            // Active profile references are authoritative. Unreferenced local
-            // MCDs can be inactive costumes or a different persona's clothes.
+            // Keep exact mapped labels/defaults and add explicit local clothes
+            // from the loaded character. Local choices do not create mappings
+            // or change the selected wrestler's logical roster slot.
             return DiscoveryAttireOptions.Combine(alias, binding.SourceFolder, local, mapped, true);
         }
 
@@ -126,9 +127,11 @@ namespace GorillaStudio.NameFolders
                 || string.IsNullOrWhiteSpace(alias) || !discoveryAttires.TryGetValue(SelectionPath(alias), out binding)
                 || binding.Context.Result.Sources.Count == 0) return;
             if (SameAttireFolder(controls.Folder, alias) && controls.Selected != null
-                && binding.Context.Result.Sources.Any(item => SameAttireFolder(item.SourceFolder, binding.SourceFolder)
+                && (binding.Context.Result.Sources.Any(item => SameAttireFolder(item.SourceFolder, binding.SourceFolder)
                     && AlternateAttires.AliasRelativePath(alias, item.RelativePath) == controls.Selected
-                    && (controls.SelectedDiscoveryKey == null || DiscoveryAttireReferenceKey(item) == controls.SelectedDiscoveryKey)))
+                    && (controls.SelectedDiscoveryKey == null || DiscoveryAttireReferenceKey(item) == controls.SelectedDiscoveryKey))
+                    || (controls.SelectedDiscoveryKey == null
+                        && DiscoveryAttireOptions.IsLocalChoice(alias, binding.SourceFolder, controls.Selected))))
             { controls.Mapped = true; controls.Target = binding.Context.Entry.Id.ToString(CultureInfo.InvariantCulture); return; }
             DiscoveryAttireSource source = binding.Context.Result.Sources
                 .Where(item => SameAttireFolder(item.SourceFolder, binding.SourceFolder))
@@ -181,6 +184,17 @@ namespace GorillaStudio.NameFolders
             if (owner == null || !attireWindows.TryGetValue(owner, out controls) || controls.Closed) return false;
             if (string.IsNullOrWhiteSpace(alias) || !discoveryAttires.TryGetValue(SelectionPath(alias), out binding))
                 throw new InvalidOperationException("Load the Discovery attire catalog before choosing its model.");
+            if (string.IsNullOrWhiteSpace(discoveryKey))
+            {
+                string local = DiscoveryAttireOptions.ValidateLocalSelection(alias, binding.SourceFolder,
+                    AlternateAttires.AliasRelativePath(alias, sourceRelative));
+                controls.Generation++; controls.Folder = alias; controls.Selected = local;
+                controls.SelectedDiscoveryKey = null;
+                controls.Target = binding.Context.Entry.Id.ToString(CultureInfo.InvariantCulture);
+                controls.Mapped = binding.Context.Result.Sources.Count > 0;
+                ResetAttireChoices(controls);
+                return true;
+            }
             DiscoveryAttireSource source = binding.Context.Result.Sources.FirstOrDefault(item =>
                 SameAttireFolder(item.SourceFolder, binding.SourceFolder) && DiscoveryAttireReferenceKey(item) == discoveryKey
                 && string.Equals(item.RelativePath.Replace('\\', '/'), (sourceRelative ?? "").Replace('\\', '/'), StringComparison.Ordinal));
@@ -210,7 +224,14 @@ namespace GorillaStudio.NameFolders
             if (!binding.Context.Result.Sources.Any(source => SameAttireFolder(source.SourceFolder, binding.SourceFolder)
                 && string.Equals(AlternateAttires.AliasRelativePath(alias, source.RelativePath), controls.Selected, StringComparison.Ordinal)
                 && (controls.SelectedDiscoveryKey == null || DiscoveryAttireReferenceKey(source) == controls.SelectedDiscoveryKey)))
-                throw new InvalidOperationException("Choose an available active Discovery attire before rendering. Refresh the list if the mappings changed.");
+            {
+                if (controls.SelectedDiscoveryKey == null)
+                {
+                    DiscoveryAttireOptions.ValidateLocalSelection(alias, binding.SourceFolder, controls.Selected);
+                    return;
+                }
+                throw new InvalidOperationException("Choose an available attire before rendering. Refresh the list if the mappings or model files changed.");
+            }
         }
 
         private static string DiscoveryAttireIssueNote(object owner, string alias)

@@ -5,6 +5,7 @@
     <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireCatalog.cs" Link="DiscoveryAttireCatalog.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/BatchRenderInstaller.cs" Link="BatchRenderInstaller.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/AlternateAttires.cs" Link="AlternateAttires.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/DiscoveryAttireOptions.cs" Link="DiscoveryAttireOptions.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/PreviewCache.cs" Link="PreviewCache.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/Roster.cs" Link="Roster.cs" />
     <Compile Include="../../src/GorillaStudio.NameFolders/FolderNames.cs" Link="FolderNames.cs" />

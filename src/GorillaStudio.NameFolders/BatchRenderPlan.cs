@@ -20,6 +20,7 @@ namespace GorillaStudio.NameFolders
         public string DiscoveryKey { get; set; }
         public ulong DiscoveryModelHash { get; set; }
         public bool IsDefault { get; set; }
+        internal bool RequiresDiscoverySourceProof { get; set; }
     }
 
     public sealed class BatchRenderJob
@@ -36,6 +37,11 @@ namespace GorillaStudio.NameFolders
         public string AttireDiscoveryKey { get; internal set; }
         public ulong AttireDiscoveryModelHash { get; internal set; }
         public bool HasExplicitAttire { get; internal set; }
+        public bool AttireLocalSourceMustRemainMapped { get; internal set; }
+        internal string AttireLocalSourceFolder { get; set; }
+        internal int AttireLocalSourceId { get; set; }
+        internal int AttireLocalLogicalId { get; set; }
+        internal string AttireLocalSourceRelativePath { get; set; }
         public int VariantIndex { get; internal set; }
     }
 
@@ -133,6 +139,65 @@ namespace GorillaStudio.NameFolders
                 + "\n" + (choice.RelativePath ?? "").Replace('\\', '/') + "\n" + (choice.DiscoveryKey ?? "");
         }
 
+        /// <summary>Lists active mapped choices and extra MCDs contained in the same proven character sources.</summary>
+        public static List<BatchAttireSelection> AvailableAttires(RosterEntry entry, DiscoveryAttireCatalogResult catalog)
+        {
+            if (entry == null) throw new ArgumentNullException("entry");
+            var sources = (catalog == null ? Enumerable.Empty<DiscoveryAttireSource>() : catalog.Sources)
+                .Where(source => source != null && source.LogicalId == entry.Id && source.Issue == null
+                    && Directory.Exists(source.SourceFolder)).ToList();
+            var result = new List<BatchAttireSelection>();
+            var mapped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DiscoveryAttireSource source in sources.OrderBy(source => source.IsDefault ? 0 : 1))
+            {
+                BatchAttireSelection choice = DiscoveryChoice(source);
+                choice.RelativePath = AlternateAttires.Validate(source.SourceFolder, source.RelativePath);
+                if (choice.RelativePath == null) continue;
+                if (mapped.Add(SelectionIdentity(choice))) result.Add(choice);
+                paths.Add(DiscoveryAttireOptions.Key(choice.SourceFolder, choice.RelativePath));
+            }
+            bool mappedDefault = result.Any(choice => choice.IsDefault);
+            var roots = sources.Select(source => source.SourceFolder).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (ReadyFolder(entry) && !roots.Any(folder => SameSource(folder, entry.Folder))) roots.Add(entry.Folder);
+            foreach (string folder in roots)
+            {
+                int sourceId = LocalSourceId(entry, folder, sources);
+                foreach (AlternateAttire attire in AlternateAttires.Read(folder))
+                {
+                    string relative;
+                    try { relative = DiscoveryAttireOptions.ValidateLocalSelection(folder, folder, attire.RelativePath); }
+                    catch (Exception error) when (LocalAttireError(error)) { continue; }
+                    if (!paths.Add(DiscoveryAttireOptions.Key(folder, relative))) continue;
+                    string label = attire.DisplayName ?? relative;
+                    const string defaultSuffix = " (default)";
+                    if (mappedDefault && label.EndsWith(defaultSuffix, StringComparison.OrdinalIgnoreCase))
+                        label = label.Substring(0, label.Length - defaultSuffix.Length);
+                    result.Add(new BatchAttireSelection { SourceFolder = folder, SourceId = sourceId,
+                        RelativePath = relative, DisplayName = label + (sources.Count > 0 ? " (local)" : ""),
+                        IsDefault = attire.IsDefault && !mappedDefault });
+                }
+            }
+            return result;
+        }
+
+        private static bool LocalAttireError(Exception error)
+        {
+            return error is IOException || error is UnauthorizedAccessException || error is ArgumentException
+                || error is System.Security.SecurityException || error is NotSupportedException;
+        }
+
+        private static int LocalSourceId(RosterEntry entry, string folder, IEnumerable<DiscoveryAttireSource> sources)
+        {
+            int[] proven = sources.Where(source => source.LogicalId == entry.Id && SameSource(source.SourceFolder, folder))
+                .Select(source => source.SourceId).Where(id => id > 0 && id <= 65535).Distinct().ToArray();
+            if (proven.Length > 1) throw new InvalidOperationException("The selected character source has different physical model IDs. Choose a specific model folder.");
+            if (proven.Length == 1) return proven[0];
+            if (!SameSource(folder, entry.Folder))
+                throw new InvalidOperationException("The selected local attire no longer belongs to an active Discovery character source. Refresh the attire choices.");
+            return CharacterFolders.PhysicalId(folder) ?? (entry.SourceId > 0 ? entry.SourceId : entry.Id);
+        }
+
         /// <summary>Resolves explicitly selected active costume sources before ordinary ambiguous-model handling.</summary>
         public static BatchRenderPlan CreateWithAttires(IEnumerable<RosterEntry> selected, IEnumerable<ModelCandidate> inventory,
             string rosterTable, IDictionary<int, List<BatchAttireSelection>> selections)
@@ -160,12 +225,19 @@ namespace GorillaStudio.NameFolders
                     }
                     else
                     {
-                        if (!string.IsNullOrWhiteSpace(choice.SourceFolder) && !SameSource(choice.SourceFolder, entry.Folder))
-                            throw new InvalidOperationException("An attire in another model folder requires its exact active Discovery mapping. Refresh the attire choices.");
-                        string relative = AlternateAttires.Validate(entry.Folder, choice.RelativePath);
+                        if (catalog == null) catalog = DiscoveryAttireCatalog.Find(entry, models, rosterTable);
+                        string folder = choice.SourceFolder ?? entry.Folder;
+                        bool currentSource = SameSource(folder, entry.Folder);
+                        bool provenSource = catalog.Sources.Any(source => source.LogicalId == entry.Id && SameSource(source.SourceFolder, folder));
+                        if (!currentSource && !provenSource)
+                            throw new InvalidOperationException("An attire in another model folder requires an active Discovery source for this wrestler. Refresh the attire choices.");
+                        string relative = DiscoveryAttireOptions.ValidateLocalSelection(folder, folder, choice.RelativePath);
                         if (relative == null) throw new ArgumentException("Choose an actual attire model for " + entry.Name + ".");
-                        safe.Add(new BatchAttireSelection { SourceFolder = entry.Folder, SourceId = entry.SourceId,
-                            RelativePath = relative, DisplayName = choice.DisplayName });
+                        safe.Add(new BatchAttireSelection { SourceFolder = folder, SourceId = LocalSourceId(entry, folder, catalog.Sources),
+                            RelativePath = relative, DisplayName = choice.DisplayName, IsDefault = choice.IsDefault,
+                            RequiresDiscoverySourceProof = !currentSource });
+                        if (provenSource && string.IsNullOrWhiteSpace(entry.RosterTable) && !string.IsNullOrWhiteSpace(rosterTable))
+                            entry.RosterTable = Path.GetFullPath(rosterTable);
                     }
                 }
                 normalized[entry.Id] = safe;
@@ -184,6 +256,25 @@ namespace GorillaStudio.NameFolders
                 VerifyDiscoveryChoice(job.Entry, new BatchAttireSelection { SourceFolder = job.Entry.Folder,
                     SourceId = job.Entry.SourceId, RelativePath = job.AttireSourceRelativePath,
                     DiscoveryKey = job.AttireDiscoveryKey, DiscoveryModelHash = job.AttireDiscoveryModelHash }, result);
+            else if (job.HasExplicitAttire)
+            {
+                // Entry.Folder has already been switched to this job's model.
+                // Keep the original validated association instead of treating
+                // that rewritten field as new authorization for any source.
+                if (job.Entry.Id != job.AttireLocalLogicalId || !SameSource(job.Entry.Folder, job.AttireLocalSourceFolder)
+                    || job.Entry.SourceId != job.AttireLocalSourceId
+                    || !string.Equals((job.AttireSourceRelativePath ?? "").Replace('\\', '/'),
+                        job.AttireLocalSourceRelativePath, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The scheduled local attire source changed. Choose its attires again.");
+                if (job.AttireLocalSourceMustRemainMapped)
+                {
+                    var proof = result.Sources.Where(source => source.LogicalId == job.Entry.Id
+                        && SameSource(source.SourceFolder, job.AttireLocalSourceFolder)).ToList();
+                    if (proof.Count == 0 || LocalSourceId(job.Entry, job.Entry.Folder, proof) != job.AttireLocalSourceId)
+                        throw new InvalidOperationException("The selected local attire no longer belongs to an active Discovery source for this wrestler. Refresh its attire choices.");
+                }
+                DiscoveryAttireOptions.ValidateLocalSelection(job.Entry.Folder, job.Entry.Folder, job.AttireSourceRelativePath);
+            }
             return result;
         }
 
@@ -233,10 +324,17 @@ namespace GorillaStudio.NameFolders
                     string relative = AlternateAttires.Validate(folder, choice.RelativePath);
                     if (!seen.Add(SelectionIdentity(choice, source.Entry.Folder))) continue;
                     RosterEntry entry = Copy(source.Entry); entry.Folder = folder;
-                    if (choice.SourceId > 0) entry.SourceId = choice.SourceId;
+                    if (verifiedDiscovery && choice.SourceId > 0) entry.SourceId = choice.SourceId;
+                    else if (string.IsNullOrWhiteSpace(choice.DiscoveryKey))
+                        entry.SourceId = CharacterFolders.PhysicalId(folder) ?? entry.SourceId;
                     plan.Jobs.Add(new BatchRenderJob { Entry = entry, Status = "Ready", HasExplicitAttire = true,
                         AttireSourceRelativePath = relative, AttireName = string.IsNullOrWhiteSpace(choice.DisplayName) ? relative : choice.DisplayName,
                         AttireDiscoveryKey = choice.DiscoveryKey, AttireDiscoveryModelHash = choice.DiscoveryModelHash,
+                        AttireLocalSourceMustRemainMapped = choice.RequiresDiscoverySourceProof,
+                        AttireLocalSourceFolder = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? Path.GetFullPath(folder) : null,
+                        AttireLocalSourceId = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? entry.SourceId : 0,
+                        AttireLocalLogicalId = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? entry.Id : 0,
+                        AttireLocalSourceRelativePath = string.IsNullOrWhiteSpace(choice.DiscoveryKey) ? relative : null,
                         VariantIndex = seen.Count });
                 }
             }
@@ -247,7 +345,9 @@ namespace GorillaStudio.NameFolders
         {
             if (job == null) throw new ArgumentNullException("job");
             if (!job.HasExplicitAttire) return null;
-            string relative = AlternateAttires.Validate(job.Entry.Folder, job.AttireSourceRelativePath);
+            string relative = string.IsNullOrWhiteSpace(job.AttireDiscoveryKey)
+                ? DiscoveryAttireOptions.ValidateLocalSelection(job.Entry.Folder, job.Entry.Folder, job.AttireSourceRelativePath)
+                : AlternateAttires.Validate(job.Entry.Folder, job.AttireSourceRelativePath);
             return directModelWrapped ? "Default_Attire/" + relative : relative;
         }
 
