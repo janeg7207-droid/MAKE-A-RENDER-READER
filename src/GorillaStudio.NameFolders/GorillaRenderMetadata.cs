@@ -18,6 +18,115 @@ namespace GorillaStudio.NameFolders
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
 
         /// <summary>
+        /// Changes only the screen setting of an already completed render. Callers
+        /// that preserve a saved result must invoke this on their private copy.
+        /// Video bytes, picture associations, logical ID and ending are retained.
+        /// </summary>
+        public static bool SetScreens(string path, int wrestlerId, string screens)
+        {
+            if (string.IsNullOrWhiteSpace(path) || wrestlerId < 1 || wrestlerId > 65535 || (screens != "select" && screens != "both")) return false;
+            string temporary = null;
+            try
+            {
+                string full = Path.GetFullPath(path);
+                var original = new FileInfo(full);
+                if (!original.Exists) return false;
+                long length = original.Length, ticks = original.LastWriteTimeUtc.Ticks;
+                using (var source = new FileStream(full, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+                {
+                    long videoLength;
+                    Dictionary<string, object> metadata;
+                    if (!Read(source, out videoLength, out metadata) || !Supported(metadata, wrestlerId)
+                        || !FullVideo(source, videoLength)) return false;
+                    metadata["screens"] = screens;
+                    byte[] json = Utf8.GetBytes(Serialize(metadata));
+                    if (json.Length == 0 || json.Length > 65536) return false;
+                    temporary = Path.Combine(Path.GetDirectoryName(full), "." + Path.GetFileName(full) + ".screens-" + Guid.NewGuid().ToString("N") + ".tmp");
+                    using (var destination = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        source.Position = 0;
+                        CopyExactly(source, destination, videoLength);
+                        destination.Write(json, 0, json.Length);
+                        using (var footer = new BinaryWriter(destination, Utf8, true))
+                        { footer.Write((uint)json.Length); footer.Write(new byte[] { (byte)'G', (byte)'M', (byte)'R', (byte)'1' }); footer.Flush(); }
+                        destination.Flush(true);
+                    }
+                    original.Refresh();
+                    if (!original.Exists || original.Length != length || original.LastWriteTimeUtc.Ticks != ticks) return false;
+                    File.Replace(temporary, full, null); temporary = null;
+                    return true;
+                }
+            }
+            catch (Exception error) when (MetadataError(error)) { return false; }
+            finally
+            {
+                if (temporary != null) try { File.Delete(temporary); } catch (Exception error) when (MetadataError(error)) { }
+            }
+        }
+
+        internal static bool InspectCompleted(string path, int wrestlerId, out long videoLength, out Dictionary<string, object> metadata)
+        {
+            videoLength = 0; metadata = null;
+            try
+            {
+                using (var source = new FileStream(Path.GetFullPath(path), FileMode.Open, FileAccess.Read, FileShare.Read))
+                    return Read(source, out videoLength, out metadata) && Supported(metadata, wrestlerId) && FullVideo(source, videoLength);
+            }
+            catch (Exception error) when (MetadataError(error)) { return false; }
+        }
+
+        internal static bool SameExceptScreens(Dictionary<string, object> left, Dictionary<string, object> right)
+        {
+            if (left == null || right == null) return false;
+            var a = new Dictionary<string, object>(left, StringComparer.Ordinal);
+            var b = new Dictionary<string, object>(right, StringComparer.Ordinal);
+            a.Remove("screens"); b.Remove("screens");
+            return Serialize(a) == Serialize(b);
+        }
+
+        private static bool Supported(Dictionary<string, object> metadata, int wrestlerId)
+        {
+            object format, version;
+            if (metadata == null || !metadata.TryGetValue("format", out format) || (format as string) != "GorillaRender"
+                || !metadata.TryGetValue("version", out version) || !MatchesWrestler(metadata, wrestlerId)) return false;
+            if (version == null || version is string || version is bool) return false;
+            try { return Convert.ToDecimal(version, CultureInfo.InvariantCulture) == 1; }
+            catch (Exception error) when (error is InvalidCastException || error is FormatException || error is OverflowException) { return false; }
+        }
+
+        private static bool FullVideo(FileStream stream, long videoLength)
+        {
+            if (stream.Length - videoLength - 8 > 65536 || stream.Length >= 2147483648L) return false;
+            stream.Position = 0;
+            using (var reader = new BinaryReader(stream, Utf8, true))
+            {
+                if (reader.ReadUInt32() != 0x694B4942 || reader.ReadUInt32() + 8L != videoLength) return false;
+                uint frames = reader.ReadUInt32(), largest = reader.ReadUInt32();
+                if (frames == 0 || frames > 100000 || reader.ReadUInt32() != frames || reader.ReadUInt32() != 1024 || reader.ReadUInt32() != 1024
+                    || reader.ReadUInt32() != 30 || reader.ReadUInt32() != 1 || (reader.ReadUInt32() & 1048576) == 0 || reader.ReadUInt32() != 0) return false;
+                uint previous = reader.ReadUInt32();
+                if ((previous & 1) == 0 || (previous & ~1U) != 44L + (frames + 1L) * 4) return false;
+                for (uint frame = 0; frame < frames; frame++)
+                {
+                    uint next = reader.ReadUInt32(), offset = next & ~1U, old = previous & ~1U;
+                    if (offset <= old || offset - old > largest || offset > videoLength || (frame + 1 < frames && (next & 1) == 0)) return false;
+                    previous = next;
+                }
+                return (previous & ~1U) == videoLength;
+            }
+        }
+
+        private static bool MetadataError(Exception error)
+        {
+            return error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException
+                || error is InvalidOperationException || error is FormatException || error is OverflowException || error is NotSupportedException || error is System.Security.SecurityException
+#if NET8_0_OR_GREATER
+                || error is JsonException
+#endif
+                ;
+        }
+
+        /// <summary>
         /// Replaces the picture keys for the specified logical wrestler. Hashes must be
         /// exactly sixteen hexadecimal characters. Invalid or unreadable inputs return
         /// false and leave the original file untouched. Named keys are removed because

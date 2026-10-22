@@ -29,9 +29,22 @@ namespace GorillaStudio.NameFolders
             public string Name { get { return Entry.Name; } }
             public string Taunt { get { return Entry.Taunt; } }
             public string Attire { get { return Entry.AttireName; } }
+            public string Screens
+            {
+                get
+                {
+                    switch (Entry.Screens)
+                    {
+                        case "select": return "Roster selection";
+                        case "matchcard": return "Match card";
+                        default: return Entry.Screens == "both" || string.IsNullOrWhiteSpace(Entry.Screens) ? "Both screens" : Entry.Screens;
+                    }
+                }
+            }
             public string File { get { return System.IO.Path.GetFileName(Entry.PublishedPath ?? Entry.Path); } }
             public string Details { get { return (Entry.Error == null ? Entry.Path : Entry.Error + "\n" + Entry.Path)
-                + (string.IsNullOrWhiteSpace(Entry.InstallationDetails) ? "" : "\n" + Entry.InstallationDetails); } }
+                + (string.IsNullOrWhiteSpace(Entry.InstallationDetails) ? "" : "\n" + Entry.InstallationDetails)
+                + (Entry.InstalledState == CompletedRenderInstallState.InstalledDifferent ? "\nScreen choices made during installation can cause this difference." : ""); } }
             public string State
             {
                 get
@@ -40,7 +53,7 @@ namespace GorillaStudio.NameFolders
                     switch (Entry.InstalledState)
                     {
                         case CompletedRenderInstallState.InstalledIdentical: return "Installed — identical copy";
-                        case CompletedRenderInstallState.InstalledDifferent: return "Different version installed";
+                        case CompletedRenderInstallState.InstalledDifferent: return "Installed copy differs";
                         case CompletedRenderInstallState.NeedsComparison: return "Installation not fully compared";
                         default: return "Not installed";
                     }
@@ -84,7 +97,28 @@ namespace GorillaStudio.NameFolders
             for (int index = 0; index < 5; index++) grid.RowDefinitions.Add(new RowDefinition { Height = index == 2 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
             dialog.Content = grid;
             var explanation = new TextBlock { Text = "Install renders you have already made. Choose one version per wrestler slot. Existing game files are backed up when replaced.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 12) };
-            grid.Children.Add(explanation);
+            var heading = new StackPanel(); heading.Children.Add(explanation);
+            var screenSettings = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 7) };
+            screenSettings.Children.Add(new TextBlock { Text = "Show on", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0) });
+            var showOn = new ComboBox { MinWidth = 225, SelectedIndex = 0,
+                ToolTip = "Choose where the installed copy appears. Your saved render files stay unchanged." };
+            showOn.Items.Add(new ComboBoxItem { Content = "Roster selection only", Tag = CompletedRenderScreenMode.RosterSelection });
+            showOn.Items.Add(new ComboBoxItem { Content = "Both screens", Tag = CompletedRenderScreenMode.Both });
+            showOn.Items.Add(new ComboBoxItem { Content = "Keep file settings", Tag = CompletedRenderScreenMode.KeepOriginal });
+            showOn.SelectedIndex = 0;
+            screenSettings.Children.Add(showOn); heading.Children.Add(screenSettings);
+            var screenHint = new TextBlock { Text = "The installed copy will appear on roster selection only. Saved source files are retained.",
+                TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.FromRgb(162, 187, 208)), Margin = new Thickness(0, 0, 0, 12) };
+            heading.Children.Add(screenHint); grid.Children.Add(heading);
+            showOn.SelectionChanged += (sender, args) =>
+            {
+                CompletedRenderScreenMode mode = (CompletedRenderScreenMode)((ComboBoxItem)showOn.SelectedItem).Tag;
+                screenHint.Text = mode == CompletedRenderScreenMode.RosterSelection
+                    ? "The installed copy will appear on roster selection only. Saved source files are retained."
+                    : mode == CompletedRenderScreenMode.Both
+                        ? "The installed copy allows both screens. Match cards still require compatible screen layouts."
+                        : "Each installed copy keeps the screen settings already saved in its file.";
+            };
             var searchRow = new DockPanel { Margin = new Thickness(0, 0, 0, 9) };
             var sourceButtons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             var addFiles = CompletedRenderButton("Add files…");
@@ -121,6 +155,7 @@ namespace GorillaStudio.NameFolders
             AddCompletedRenderColumn(table, "Wrestler", "Name", 170);
             AddCompletedRenderColumn(table, "Taunt", "Taunt", 150);
             AddCompletedRenderColumn(table, "Attire", "Attire", 130);
+            AddCompletedRenderColumn(table, "File screens", "Screens", 130);
             AddCompletedRenderColumn(table, "Status", "State", 205);
             table.Columns.Add(new DataGridTextColumn { Header = "File", Binding = new Binding("File"), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star), MinWidth = 180 });
             Grid.SetRow(table, 2); grid.Children.Add(table);
@@ -133,7 +168,7 @@ namespace GorillaStudio.NameFolders
             var open = CompletedRenderButton("Open file folder");
             var cancelScan = CompletedRenderButton("Cancel scan");
             var checkSetup = CompletedRenderButton("Check match-card setup…");
-            checkSetup.ToolTip = "Read the current setup report. Running setup or enabling the plugin remains a separate explicit action.";
+            checkSetup.ToolTip = "Check the installed slot when an unambiguous copy is found, otherwise the selected saved file. Running setup or enabling the plugin remains separate.";
             var installSelected = CompletedRenderButton("Install selected"); installSelected.IsEnabled = false;
             var close = CompletedRenderButton("Close");
             foreach (Button action in new[] { selectAll, clear, open, cancelScan, checkSetup, installSelected, close }) actions.Children.Add(action);
@@ -154,6 +189,7 @@ namespace GorillaStudio.NameFolders
             Action controls = () =>
             {
                 searchRow.IsEnabled = !installing;
+                showOn.IsEnabled = !installing;
                 table.IsEnabled = !installing;
                 selectAll.IsEnabled = clear.IsEnabled = !installing && !scanning;
                 open.IsEnabled = !installing && table.SelectedItem is CompletedRenderRow;
@@ -213,7 +249,15 @@ namespace GorillaStudio.NameFolders
                 var selected = table.SelectedItem as CompletedRenderRow;
                 if (selected == null || !selected.IsValid) selected = rows.FirstOrDefault(row => row.Selected && row.IsValid);
                 if (selected == null) { status.Text = "Select a completed render row, then check its match-card setup."; return; }
-                ShowPlaybackCheck(owner, selected.Entry.Path, selected.Id);
+                string checkPath = selected.Entry.Path;
+                if ((selected.Entry.InstalledState == CompletedRenderInstallState.InstalledIdentical
+                    || selected.Entry.InstalledState == CompletedRenderInstallState.InstalledDifferent)
+                    && !string.IsNullOrWhiteSpace(selected.Entry.InstalledPath) && System.IO.File.Exists(selected.Entry.InstalledPath))
+                {
+                    checkPath = selected.Entry.InstalledPath;
+                    status.Text = "Checking the installed copy/slot for wrestler " + selected.Id.ToString(CultureInfo.InvariantCulture) + ".";
+                }
+                ShowPlaybackCheck(owner, checkPath, selected.Id);
             };
             addFiles.Click += async (sender, args) =>
             {
@@ -251,9 +295,11 @@ namespace GorillaStudio.NameFolders
                 if (!Directory.Exists(currentGame)) { status.Text = "Choose your installed WWE 2K26 game folder in Studio before installing."; return; }
                 if (!string.Equals(currentGame, game, StringComparison.OrdinalIgnoreCase)) { status.Text = "The game folder changed. Refresh this list before installing."; return; }
                 if (Process.GetProcessesByName("WWE2K26_x64").Length != 0) { status.Text = "Close WWE 2K26 before installing completed renders."; return; }
-                var jobs = chosen.Select(row => new BatchRenderJob { Entry = new RosterEntry { Id = row.Id, Name = row.Name },
-                    RenderPath = row.Entry.Path, OutputDirectory = row.Entry.OutputDirectory, PublishedRenderPath = row.Entry.PublishedPath,
-                    AttireName = row.Entry.AttireName, Status = "Complete" }).ToArray();
+                CompletedRenderEntry[] sources = chosen.Select(row => row.Entry).ToArray();
+                var screenChoice = (ComboBoxItem)showOn.SelectedItem;
+                CompletedRenderScreenMode screenMode = (CompletedRenderScreenMode)screenChoice.Tag;
+                string screenLabel = screenChoice.Content as string;
+                var preparationWarnings = new List<string>();
                 string finalSummary = null;
                 bool rescan = false;
                 installing = true; controls();
@@ -266,21 +312,47 @@ namespace GorillaStudio.NameFolders
                 if (ownsBusy) busy.SetValue(owner, true);
                 try
                 {
-                    status.Text = "Installing selected completed renders… Existing replacements are backed up. No render is running.";
+                    status.Text = "Preparing and installing saved renders · " + screenLabel + ". Source files are retained; existing replacements are backed up.";
                     BatchRenderInstallReport report = await Task.Run(() =>
                     {
-                        BatchRenderInstallReport installed = BatchRenderInstaller.Install(AppDomain.CurrentDomain.BaseDirectory, currentGame, jobs);
-                        if (installed.Installed > 0)
-                            foreach (BatchRenderJob job in jobs) CopyInstalledSelectionLoopPolicy(job.RenderPath, currentGame);
-                        return installed;
+                        CompletedRenderScreenPlanReport prepared = CompletedRenderScreenPlan.Prepare(sources,
+                            Path.Combine(StorageDirectory, "completed-installs"), screenMode, CancellationToken.None);
+                        try
+                        {
+                            preparationWarnings.AddRange(prepared.Warnings);
+                            if (prepared.Failed.Count != 0 || prepared.Entries.Count == 0)
+                            {
+                                var failed = new BatchRenderInstallReport();
+                                failed.Failed.AddRange(prepared.Failed);
+                                if (failed.Failed.Count == 0) failed.Failed.Add("No completed renders were prepared for installation.");
+                                return failed;
+                            }
+                            BatchRenderJob[] jobs = prepared.Entries.Select(entry => new BatchRenderJob {
+                                Entry = new RosterEntry { Id = entry.WrestlerId, Name = entry.Name }, RenderPath = entry.Path,
+                                OutputDirectory = entry.OutputDirectory, PublishedRenderPath = entry.PublishedPath,
+                                AttireName = entry.AttireName, Status = "Complete" }).ToArray();
+                            BatchRenderInstallReport installed = BatchRenderInstaller.Install(AppDomain.CurrentDomain.BaseDirectory, currentGame, jobs);
+                            if (installed.Installed > 0)
+                                foreach (BatchRenderJob job in jobs) CopyInstalledSelectionLoopPolicy(job.RenderPath, currentGame);
+                            return installed;
+                        }
+                        finally
+                        {
+                            if (!CompletedRenderScreenPlan.Cleanup(prepared))
+                                preparationWarnings.Add("Some private prepared copies could not be removed. Your saved source files are retained.");
+                        }
                     });
                     string summary = report.Summary;
+                    if (report.Installed > 0) summary += " Show on: " + screenLabel + ". Saved source files were kept.";
                     if (report.BackupDirectory != null) summary += "\nPrevious files backed up to: " + report.BackupDirectory;
                     if (report.Failed.Count != 0) summary += "\n" + string.Join("\n", report.Failed);
+                    if (preparationWarnings.Count != 0) summary += "\n" + string.Join("\n", preparationWarnings);
                     if (report.Installed > 0) summary += "\nScreen layout setup and baking remain separate actions. Use Check match-card setup… for a read-only diagnosis.";
                     status.Text = summary;
                     finalSummary = summary; rescan = report.Installed > 0;
-                    SetModelStatus(owner, report.Summary + (report.Installed > 0 ? " Use Check match-card setup… for diagnosis; screen setup and baking remain separate." : " Open Completed renders for details."));
+                    SetModelStatus(owner, report.Summary + (report.Installed > 0 ? " Show on: " + screenLabel + ". Screen setup and baking remain separate." : " Open Completed renders for details."));
+                    if (report.Installed > 0 && report.Failed.Count == 0)
+                        foreach (CompletedRenderRow row in chosen) row.Selected = false;
                 }
                 catch (Exception error) { status.Text = "Installation stopped: " + BatchError(error).Message; }
                 finally
