@@ -24,7 +24,7 @@ namespace GorillaStudio.NameFolders
         /// </summary>
         public static bool SetScreens(string path, int wrestlerId, string screens)
         {
-            if (string.IsNullOrWhiteSpace(path) || wrestlerId < 1 || wrestlerId > 65535 || (screens != "select" && screens != "both")) return false;
+            if (string.IsNullOrWhiteSpace(path) || wrestlerId < 1 || wrestlerId > 65535 || (screens != "select" && screens != "matchcard" && screens != "both")) return false;
             string temporary = null;
             try
             {
