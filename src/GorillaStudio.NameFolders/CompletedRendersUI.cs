@@ -109,7 +109,10 @@ namespace GorillaStudio.NameFolders
             screenSettings.Children.Add(showOn); heading.Children.Add(screenSettings);
             var screenHint = new TextBlock { Text = "The installed copy will appear on roster selection only. Saved source files are retained.",
                 TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(Color.FromRgb(162, 187, 208)), Margin = new Thickness(0, 0, 0, 12) };
-            heading.Children.Add(screenHint); grid.Children.Add(heading);
+            heading.Children.Add(screenHint);
+            var selectionSummary = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8),
+                Foreground = new SolidColorBrush(Color.FromRgb(184, 202, 218)) };
+            heading.Children.Add(selectionSummary); grid.Children.Add(heading);
             showOn.SelectionChanged += (sender, args) =>
             {
                 CompletedRenderScreenMode mode = (CompletedRenderScreenMode)((ComboBoxItem)showOn.SelectedItem).Tag;
@@ -165,15 +168,17 @@ namespace GorillaStudio.NameFolders
             var actions = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right };
             var selectAll = CompletedRenderButton("Select all shown");
             var clear = CompletedRenderButton("Clear");
+            var chooseVersions = CompletedRenderButton("Choose versions…");
+            chooseVersions.ToolTip = "Keep one checked version for each repeated wrestler ID. Other checked wrestlers and saved files are retained.";
             var open = CompletedRenderButton("Open file folder");
             var cancelScan = CompletedRenderButton("Cancel scan");
             var checkSetup = CompletedRenderButton("Check match-card setup…");
             checkSetup.ToolTip = "Check the installed slot when an unambiguous copy is found, otherwise the selected saved file. Running setup or enabling the plugin remains separate.";
             var installSelected = CompletedRenderButton("Install selected"); installSelected.IsEnabled = false;
             var close = CompletedRenderButton("Close");
-            foreach (Button action in new[] { selectAll, clear, open, cancelScan, checkSetup, installSelected, close }) actions.Children.Add(action);
+            foreach (Button action in new[] { selectAll, clear, chooseVersions, open, cancelScan, checkSetup, installSelected, close }) actions.Children.Add(action);
             Grid.SetRow(actions, 4); grid.Children.Add(actions);
-            bool closed = false, installing = false, closeRequested = false, ownerCloseRequested = false, scanning = false;
+            bool closed = false, installing = false, closeRequested = false, ownerCloseRequested = false, scanning = false, changingChecks = false;
             int scanRevision = 0;
             CancellationTokenSource scanCancellation = null;
             var rows = new List<CompletedRenderRow>();
@@ -188,14 +193,52 @@ namespace GorillaStudio.NameFolders
                     || (row.File ?? "").IndexOf(search.Text.Trim(), StringComparison.OrdinalIgnoreCase) >= 0);
             Action controls = () =>
             {
+                CompletedRenderRow[] selected = rows.Where(row => row.Selected && row.IsValid).ToArray();
+                int ids = selected.Select(row => row.Id).Distinct().Count();
+                int conflicts = selected.GroupBy(row => row.Id).Count(group => group.Count() > 1);
+                int hidden = selected.Count(row => !shown(row));
+                selectionSummary.Text = selected.Length.ToString(CultureInfo.InvariantCulture) + " checked file(s) for " + ids.ToString(CultureInfo.InvariantCulture) + " wrestler ID(s)"
+                    + (hidden == 0 ? "" : " · " + hidden.ToString(CultureInfo.InvariantCulture) + " hidden by filters")
+                    + (conflicts == 0 ? "" : " · " + conflicts.ToString(CultureInfo.InvariantCulture) + " ID(s) need Choose versions…");
                 searchRow.IsEnabled = !installing;
                 showOn.IsEnabled = !installing;
                 table.IsEnabled = !installing;
                 selectAll.IsEnabled = clear.IsEnabled = !installing && !scanning;
                 open.IsEnabled = !installing && table.SelectedItem is CompletedRenderRow;
-                installSelected.IsEnabled = !installing && !scanning && rows.Any(row => row.Selected && row.IsValid);
+                chooseVersions.IsEnabled = !installing && !scanning && conflicts != 0;
+                installSelected.IsEnabled = !installing && !scanning && selected.Length != 0;
+                installSelected.Content = selected.Length == 0 ? "Install selected" : "Install " + ids.ToString(CultureInfo.InvariantCulture) + " selected";
                 cancelScan.IsEnabled = scanning && !installing;
                 checkSetup.IsEnabled = !scanning && !installing;
+            };
+            Action<Action> changeChecks = change =>
+            {
+                changingChecks = true;
+                try { change(); }
+                finally { changingChecks = false; controls(); }
+            };
+            Func<bool> resolveVersions = () =>
+            {
+                if (closed || scanning || installing) return false;
+                CompletedRenderEntry[] selected = rows.Where(row => row.Selected && row.IsValid).Select(row => row.Entry).ToArray();
+                CompletedRenderVersionSelectionResult inspection = CompletedRenderVersionSelection.Inspect(selected);
+                if (inspection.Failed.Count != 0) { status.Text = string.Join("\n", inspection.Failed); return false; }
+                if (inspection.Conflicts.Count == 0) return true;
+                Dictionary<int, string> choices = PickCompletedRenderVersions(dialog, inspection.Conflicts);
+                if (choices == null) { status.Text = "Version choices canceled. Checked files are unchanged."; return false; }
+                if (closed || scanning || installing) return false;
+                CompletedRenderVersionSelectionResult resolved = CompletedRenderVersionSelection.Resolve(selected, choices);
+                if (resolved.Failed.Count != 0) { status.Text = string.Join("\n", resolved.Failed); return false; }
+                var keep = new HashSet<string>(resolved.Entries.Select(entry => entry.Path), StringComparer.OrdinalIgnoreCase);
+                // Resolve only the checked conflicts. Unrelated and hidden selections
+                // remain checked, and no source files or installed files change here.
+                changeChecks(() =>
+                {
+                    foreach (CompletedRenderRow row in rows.Where(row => row.Selected && row.IsValid))
+                        row.Selected = keep.Contains(row.Entry.Path);
+                });
+                status.Text = "Version choices applied. One version is checked for each wrestler ID; other outfits stay saved.";
+                return true;
             };
             Func<Task> scan = async () =>
             {
@@ -215,7 +258,7 @@ namespace GorillaStudio.NameFolders
                     game = scanGame;
                     rows = result.Entries.Select(entry => new CompletedRenderRow { Entry = entry, Selected = entry.IsValid
                         && entry.InstalledState != CompletedRenderInstallState.InstalledIdentical && selected.Contains(entry.Path) }).ToList();
-                    foreach (CompletedRenderRow row in rows) row.PropertyChanged += (sender, args) => controls();
+                    foreach (CompletedRenderRow row in rows) row.PropertyChanged += (sender, args) => { if (!changingChecks) controls(); };
                     view = new ListCollectionView(rows) { Filter = item => shown((CompletedRenderRow)item) };
                     view.SortDescriptions.Add(new SortDescription("Name", ListSortDirection.Ascending));
                     view.SortDescriptions.Add(new SortDescription("Id", ListSortDirection.Ascending));
@@ -235,11 +278,12 @@ namespace GorillaStudio.NameFolders
                     cancellation.Dispose();
                 }
             };
-            search.TextChanged += (sender, args) => applyFilter();
-            hideInstalled.Checked += (sender, args) => applyFilter(); hideInstalled.Unchecked += (sender, args) => applyFilter();
+            search.TextChanged += (sender, args) => { applyFilter(); controls(); };
+            hideInstalled.Checked += (sender, args) => { applyFilter(); controls(); }; hideInstalled.Unchecked += (sender, args) => { applyFilter(); controls(); };
             table.SelectionChanged += (sender, args) => controls();
-            selectAll.Click += (sender, args) => { foreach (CompletedRenderRow row in rows.Where(row => row.IsValid && shown(row))) row.Selected = true; controls(); };
-            clear.Click += (sender, args) => { foreach (CompletedRenderRow row in rows) row.Selected = false; controls(); };
+            selectAll.Click += (sender, args) => changeChecks(() => { foreach (CompletedRenderRow row in rows.Where(row => row.IsValid && shown(row))) row.Selected = true; });
+            clear.Click += (sender, args) => changeChecks(() => { foreach (CompletedRenderRow row in rows) row.Selected = false; });
+            chooseVersions.Click += (sender, args) => resolveVersions();
             refresh.Click += async (sender, args) => await scan();
             cancelScan.Click += (sender, args) => scanCancellation?.Cancel();
             checkSetup.Click += (sender, args) =>
@@ -285,12 +329,14 @@ namespace GorillaStudio.NameFolders
             {
                 if (installing || scanning) return;
                 if (BatchNativeBusy(owner)) { status.Text = "Wait for the current model, render or setup to finish, then install the selected files."; return; }
+                if (!resolveVersions() || closed || installing || scanning) return;
+                if (BatchNativeBusy(owner)) { status.Text = "Wait for the current model, render or setup to finish, then install the selected files."; return; }
                 var chosen = rows.Where(row => row.Selected && row.IsValid).ToArray();
                 if (chosen.Length == 0) return;
                 var unlocked = type.GetMethod("Unlocked", InstanceMembers, null, Type.EmptyTypes, null);
                 if (unlocked == null || !(bool)unlocked.Invoke(owner, null)) return;
                 int[] duplicates = chosen.GroupBy(row => row.Id).Where(group => group.Count() > 1).Select(group => group.Key).ToArray();
-                if (duplicates.Length != 0) { status.Text = "Choose one render per wrestler ID before installing. Multiple versions are checked for: " + string.Join(", ", duplicates) + ". Other outfits stay saved."; return; }
+                if (duplicates.Length != 0) { status.Text = "The checked versions changed. Use Choose versions… again before installing. Other outfits stay saved."; return; }
                 string currentGame = type.GetField("Game", InstanceMembers)?.GetValue(owner) as string;
                 if (!Directory.Exists(currentGame)) { status.Text = "Choose your installed WWE 2K26 game folder in Studio before installing."; return; }
                 if (!string.Equals(currentGame, game, StringComparison.OrdinalIgnoreCase)) { status.Text = "The game folder changed. Refresh this list before installing."; return; }
@@ -352,7 +398,7 @@ namespace GorillaStudio.NameFolders
                     finalSummary = summary; rescan = report.Installed > 0;
                     SetModelStatus(owner, report.Summary + (report.Installed > 0 ? " Show on: " + screenLabel + ". Screen setup and baking remain separate." : " Open Completed renders for details."));
                     if (report.Installed > 0 && report.Failed.Count == 0)
-                        foreach (CompletedRenderRow row in chosen) row.Selected = false;
+                        changeChecks(() => { foreach (CompletedRenderRow row in chosen) row.Selected = false; });
                 }
                 catch (Exception error) { status.Text = "Installation stopped: " + BatchError(error).Message; }
                 finally
