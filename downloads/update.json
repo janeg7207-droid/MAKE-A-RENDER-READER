@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "version": "1.7.19",
+  "version": "1.7.20",
   "minimumUpdaterVersion": 1,
-  "url": "https://raw.githubusercontent.com/janeg7207-droid/MAKE-A-RENDER-READER/4a8e1f6a316b22fee22abb1038b82a3b2a6d6ba3/downloads/GorillaStudio_v1.0.2_Discovery_Experimental_Update.zip",
-  "size": 10804460,
-  "sha256": "3379aa2dabd3a88522e2c762d4e6a7ed2c8092800ef01309702c2cfe77e57d67"
+  "url": "https://raw.githubusercontent.com/janeg7207-droid/MAKE-A-RENDER-READER/d2d0aa0e2c7ddffe470757b25cfc9dcd1f032099/downloads/GorillaStudio_v1.0.2_Discovery_Experimental_Update.zip",
+  "size": 10811846,
+  "sha256": "c132fa868766e225cb7f4fcc72d6c9100982ac04d2ccdcfa31c3ae9fdae7ad5f"
 }
