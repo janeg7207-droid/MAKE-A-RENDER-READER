@@ -167,7 +167,7 @@ namespace GorillaStudio.NameFolders
             return RememberedRoot(window) ?? window.GetType().GetField("SetupFolder", InstanceMembers)?.GetValue(window) as string;
         }
 
-        private static void ShowPlaybackCheck(Window window)
+        private static void ShowPlaybackCheck(Window window, string completedRender = null, int? completedWrestlerId = null)
         {
             var dialog = new Window {
                 Owner = window, Title = "Match-card playback setup", Width = 560, Height = 465,
@@ -199,10 +199,10 @@ namespace GorillaStudio.NameFolders
                 try
                 {
                     string game = window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string;
-                    string render = window.GetType().GetField("LastGmr", InstanceMembers)?.GetValue(window) as string;
+                    string render = completedRender ?? window.GetType().GetField("LastGmr", InstanceMembers)?.GetValue(window) as string;
                     int id;
-                    int? expected = int.TryParse(window.GetType().GetField("TargetSlot", InstanceMembers)?.GetValue(window) as string,
-                        NumberStyles.None, CultureInfo.InvariantCulture, out id) ? (int?)id : null;
+                    int? expected = completedWrestlerId ?? (completedRender == null && int.TryParse(window.GetType().GetField("TargetSlot", InstanceMembers)?.GetValue(window) as string,
+                        NumberStyles.None, CultureInfo.InvariantCulture, out id) ? (int?)id : null);
                     string app = AppDomain.CurrentDomain.BaseDirectory, root = PlaybackRoot(window);
                     report.Text = "Checking the installed render library and match-card files…";
                     var state = await Task.Run(() => MatchCardReadiness.Evaluate(app, game, root, render, expected, lifetime.Token), lifetime.Token);

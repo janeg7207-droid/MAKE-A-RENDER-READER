@@ -47,7 +47,7 @@ internal static class Program
             Check(backups.Length == 5 && backups.All(path => path.EndsWith(".bak", StringComparison.Ordinal)), "Previous GMRs, plugin, configuration and picture map use inactive backup extensions");
             Check(File.ReadAllBytes(backups.Single(path => path.EndsWith("122_Current.gmr.bak", StringComparison.Ordinal))).SequenceEqual(oldCurrent), "The replaced current GMR has an exact original backup");
             Check(File.ReadAllText(backups.Single(path => path.EndsWith("WWE2K26_MovingRenders.cfg.bak", StringComparison.Ordinal))).Contains("old_custom 33"), "Original plugin settings survive in their backup");
-            Check(File.ReadAllText(Path.Combine(game, "Plugins", "WWE2K26_MovingRenders.cfg")) == File.ReadAllText(Path.Combine(app, "plugin", "WWE2K26_MovingRenders.cfg")), "An outdated plugin receives the matching supplied configuration");
+            Check(File.ReadAllText(Path.Combine(game, "Plugins", "WWE2K26_MovingRenders.cfg")) == File.ReadAllText(Path.Combine(app, "plugin", "WWE2K26_MovingRenders.cfg")).Replace("enabled 1", "enabled 0"), "An outdated plugin receives matching defaults while retaining its explicitly disabled state");
             Check(File.ReadAllBytes(Path.Combine(renders, "122_Current.gmr")).SequenceEqual(File.ReadAllBytes(revised.RenderPath)), "The replacement source is installed completely");
 
             string preservedGame = Game("compatible");
@@ -58,6 +58,22 @@ internal static class Program
             Check(preserved.Installed == 1 && preserved.Failed.Count == 0, "Compatible plugin installation succeeds");
             Check(File.ReadAllBytes(Path.Combine(preservedGame, "Plugins", "WWE2K26_MovingRenders.dlp")).SequenceEqual(pluginBefore), "A newer compatible plugin is never downgraded");
             Check(File.ReadAllText(Path.Combine(preservedGame, "Plugins", "WWE2K26_MovingRenders.cfg")).Contains("keep_my_option 99"), "Compatible plugin configuration remains untouched");
+
+            string disabledGame = Game("disabled-upgrade");
+            Write(Path.Combine(disabledGame, "Plugins", "WWE2K26_MovingRenders.dlp"), "old MOVINGRENDERS-4.20 plugin");
+            Write(Path.Combine(disabledGame, "Plugins", "WWE2K26_MovingRenders.cfg"), "# enabled 1\nenabled 1\n  ENABLED\t0 // temporarily disabled for diagnosis\n");
+            var disabledUpgrade = BatchRenderInstaller.Install(app, disabledGame, new[] { one });
+            Check(disabledUpgrade.Installed == 1 && disabledUpgrade.Failed.Count == 0, "Previously completed movies install while upgrading a disabled plugin");
+            Check(File.ReadAllText(Path.Combine(disabledGame, "Plugins", "WWE2K26_MovingRenders.cfg")).StartsWith("enabled 0\n", StringComparison.Ordinal), "An explicit final disabled setting survives plugin replacement and comments");
+            string enabledGame = Game("enabled-upgrade");
+            Write(Path.Combine(enabledGame, "Plugins", "WWE2K26_MovingRenders.dlp"), "old MOVINGRENDERS-4.20 plugin");
+            Write(Path.Combine(enabledGame, "Plugins", "WWE2K26_MovingRenders.cfg"), "enabled 0\nenabled 1 ; current state\n# enabled 0\n");
+            var enabledUpgrade = BatchRenderInstaller.Install(app, enabledGame, new[] { one });
+            Check(enabledUpgrade.Installed == 1 && File.ReadAllText(Path.Combine(enabledGame, "Plugins", "WWE2K26_MovingRenders.cfg")).StartsWith("enabled 1\n", StringComparison.Ordinal), "A later active enabled setting is not overridden by old or commented disabled text");
+            Write(Path.Combine(preservedGame, "Plugins", "WWE2K26_MovingRenders.cfg"), "enabled 0\nkeep_my_option 99\n");
+            byte[] disabledCompatible = File.ReadAllBytes(Path.Combine(preservedGame, "Plugins", "WWE2K26_MovingRenders.cfg"));
+            var compatibleDisabled = BatchRenderInstaller.Install(app, preservedGame, new[] { one });
+            Check(compatibleDisabled.Installed == 1 && File.ReadAllBytes(Path.Combine(preservedGame, "Plugins", "WWE2K26_MovingRenders.cfg")).SequenceEqual(disabledCompatible), "An already compatible disabled plugin keeps its complete existing configuration");
 
             Reject("Duplicate logical wrestler IDs abort before any game write", new[] { one, one });
             var wrong = new BatchRenderJob { Entry = new RosterEntry { Id = 123, Name = "Wrong ID" }, RenderPath = one.RenderPath, OutputDirectory = one.OutputDirectory };

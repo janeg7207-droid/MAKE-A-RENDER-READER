@@ -38,6 +38,7 @@ namespace GorillaStudio.NameFolders
         public static BatchRenderInstallReport Install(string appRoot, string gameRoot, IEnumerable<BatchRenderJob> jobs)
         {
             var report = new BatchRenderInstallReport();
+            string temporaryConfig = null;
             try
             {
                 if (string.IsNullOrWhiteSpace(appRoot) || string.IsNullOrWhiteSpace(gameRoot) || !Directory.Exists(gameRoot))
@@ -49,7 +50,7 @@ namespace GorillaStudio.NameFolders
                 if (Process.GetProcessesByName("WWE2K26_x64").Length != 0)
                     throw new IOException("Close WWE 2K26 before installing the batch.");
                 var rows = (jobs ?? Enumerable.Empty<BatchRenderJob>()).ToList();
-                if (rows.Count == 0) throw new IOException("There are no completed batch renders to install.");
+                if (rows.Count == 0) throw new IOException("There are no completed renders to install.");
                 if (rows.Any(job => job == null || job.Entry == null)) throw new IOException("A batch entry has no wrestler information.");
                 int[] duplicates = rows.GroupBy(job => job.Entry.Id).Where(group => group.Count() > 1).Select(group => group.Key).ToArray();
                 if (duplicates.Length != 0) throw new IOException("More than one batch render uses wrestler ID " + string.Join(", ", duplicates) + ". Choose one render for each slot.");
@@ -77,15 +78,15 @@ namespace GorillaStudio.NameFolders
                     string map = Path.Combine(Path.GetDirectoryName(source), "_roster_pictures.txt");
                     bool present = File.Exists(map);
                     if (hasMap.HasValue && hasMap.Value != present)
-                        throw new IOException("The completed jobs do not share the same roster picture map. Make the batch again from one Discovery roster.");
+                        throw new IOException("Some selected renders have roster picture maps and others do not. Choose a group with the same saved roster context.");
                     hasMap = present;
                     if (!present) continue;
                     SafePath(Path.GetFullPath(job.OutputDirectory), map);
                     string currentMapHash = Hash(map);
                     byte[] current = NormalizeMap(ReadSmall(map));
-                    if (Hash(map) != currentMapHash) throw new IOException("A roster picture map changed during validation. Make the batch again.");
+                    if (Hash(map) != currentMapHash) throw new IOException("A roster picture map changed during validation. Refresh the completed results and try again.");
                     if (agreedMap != null && !agreedMap.SequenceEqual(current))
-                        throw new IOException("The completed jobs contain conflicting roster picture maps. Nothing was installed.");
+                        throw new IOException("The selected results contain conflicting roster picture maps. Choose results from one matching roster context. Nothing was installed.");
                     agreedMap = current; mapSource = map; mapHash = currentMapHash;
                 }
 
@@ -104,8 +105,17 @@ namespace GorillaStudio.NameFolders
                 SafePath(game, plugin); SafePath(game, config);
                 if (updatePlugin)
                 {
+                    string configSource = suppliedConfig;
+                    if (File.Exists(config) && ConfigurationDisabled(ReadSmall(config)))
+                    {
+                        temporaryConfig = Path.Combine(Path.GetTempPath(), "gorilla-disabled-config-" + Guid.NewGuid().ToString("N") + ".cfg");
+                        byte[] disabled = DisabledConfiguration(ReadSmall(suppliedConfig));
+                        using (var stream = new FileStream(temporaryConfig, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                        { stream.Write(disabled, 0, disabled.Length); stream.Flush(true); }
+                        configSource = temporaryConfig;
+                    }
                     InstallFile(game, suppliedPlugin, plugin, Hash(suppliedPlugin), report);
-                    InstallFile(game, suppliedConfig, config, Hash(suppliedConfig), report);
+                    InstallFile(game, configSource, config, Hash(configSource), report);
                 }
                 else if (!File.Exists(config)) InstallFile(game, suppliedConfig, config, Hash(suppliedConfig), report);
                 Directory.CreateDirectory(destination);
@@ -135,7 +145,37 @@ namespace GorillaStudio.NameFolders
                     catch (Exception error) when (Expected(error)) { report.Failed.Add("The renders were copied, but their roster picture map could not be installed: " + error.Message); }
             }
             catch (Exception error) when (Expected(error)) { report.Failed.Add(error.Message); }
+            finally
+            {
+                if (temporaryConfig != null)
+                    try { File.Delete(temporaryConfig); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
             return report;
+        }
+
+        private static bool ConfigurationDisabled(byte[] bytes)
+        {
+            string enabled = null;
+            foreach (string input in Utf8.GetString(bytes).TrimStart('\ufeff').Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string line = input;
+                foreach (string marker in new[] { "#", ";", "//" })
+                { int at = line.IndexOf(marker, StringComparison.Ordinal); if (at >= 0) line = line.Substring(0, at); }
+                string[] words = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (words.Length >= 2 && string.Equals(words[0], "enabled", StringComparison.OrdinalIgnoreCase)) enabled = words[1];
+            }
+            return enabled == "0";
+        }
+
+        private static byte[] DisabledConfiguration(byte[] bytes)
+        {
+            string text = Utf8.GetString(bytes).TrimStart('\ufeff');
+            bool replaced = false;
+            string disabled = Regex.Replace(text, @"^(\s*enabled[ \t]+)([^ \t\r\n#;/]+)", match => {
+                replaced = true; return match.Groups[1].Value + "0";
+            }, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Multiline);
+            if (!replaced) disabled = disabled.TrimEnd('\r', '\n') + "\nenabled 0\n";
+            return Utf8.GetBytes(disabled);
         }
 
         private static string Label(BatchRenderJob job) { return (job.Entry.Name ?? "Wrestler") + " (" + job.Entry.Id.ToString(CultureInfo.InvariantCulture) + ")"; }

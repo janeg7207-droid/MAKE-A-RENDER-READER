@@ -277,6 +277,7 @@ namespace GorillaStudio.NameFolders
                 AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
+                AttachCompletedRenderControls(window);
                 AttachUpdateControls(window);
                 AttachPngExportControls(window);
                 AttachAutomaticTauntPreview(window);
@@ -291,6 +292,7 @@ namespace GorillaStudio.NameFolders
                 AttachBatchControls(window);
                 AttachPictureSelection(window);
                 AttachPlaybackControls(window);
+                AttachCompletedRenderControls(window);
                 AttachUpdateControls(window);
                 AttachPngExportControls(window);
                 AttachAutomaticTauntPreview(window);
