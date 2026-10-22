@@ -7,6 +7,8 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 #if NET8_0_OR_GREATER
 using System.Text.Json;
 #else
@@ -26,6 +28,7 @@ namespace GorillaStudio.NameFolders
         public string Screens { get; internal set; }
         public string Ending { get; internal set; }
         public string InstalledPath { get; internal set; }
+        public GmrLibraryAuditReport Library { get; internal set; }
         // This reports files and settings only. It cannot observe the running game,
         // CakeHook loading, the selected arena, or whether Discovery has baked them.
         public bool IsConfigured { get { return Issues.Count == 0; } }
@@ -51,17 +54,53 @@ namespace GorillaStudio.NameFolders
         private const int MaximumJsonBytes = 16 * 1024 * 1024;
         private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
+        // The original RunPy task has no cancellation argument. A closed check
+        // dialog must release its Busy lease even if that task stops responding.
+        // Observe any later fault without publishing its result to the closed UI.
+        internal static async Task<T> WaitForCheckAsync<T>(Task<T> task, CancellationToken cancellation)
+        {
+            if (task == null) throw new ArgumentNullException(nameof(task));
+            if (cancellation.CanBeCanceled)
+            {
+                var stopped = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (cancellation.Register(() => stopped.TrySetResult(true)))
+                {
+                    if (await Task.WhenAny(task, stopped.Task) != task || cancellation.IsCancellationRequested)
+                    {
+                        ObserveCheckFault(task);
+                        cancellation.ThrowIfCancellationRequested();
+                    }
+                }
+            }
+            T result = await task;
+            cancellation.ThrowIfCancellationRequested();
+            return result;
+        }
+
+        private static void ObserveCheckFault(Task task)
+        {
+            task.ContinueWith(completed => { var ignored = completed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
         public static MatchCardReadinessReport Evaluate(string appRoot, string gameRoot, string discoveryRoot,
             string gmrPath, int? expectedLogicalId)
         {
+            return Evaluate(appRoot, gameRoot, discoveryRoot, gmrPath, expectedLogicalId, CancellationToken.None);
+        }
+
+        public static MatchCardReadinessReport Evaluate(string appRoot, string gameRoot, string discoveryRoot,
+            string gmrPath, int? expectedLogicalId, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
             var report = new MatchCardReadinessReport();
             if (expectedLogicalId.HasValue && (expectedLogicalId < 1 || expectedLogicalId > 65535))
                 report.Issues.Add("The selected logical wrestler ID is invalid.");
-            try { InspectRender(report, gmrPath, expectedLogicalId); }
+            try { InspectRender(report, gmrPath, expectedLogicalId, cancellation); }
             catch (Exception error) when (ReadFailure(error)) { report.Issues.Add("The render could not be checked: " + error.Message); }
-            try { InspectInstallation(report, gameRoot, gmrPath); }
+            try { InspectInstallation(report, gameRoot, gmrPath, cancellation); }
             catch (Exception error) when (ReadFailure(error)) { report.Issues.Add("The installed render or plugin could not be checked: " + error.Message); }
-            try { InspectScreens(report, appRoot, discoveryRoot); }
+            try { InspectScreens(report, appRoot, discoveryRoot, cancellation); }
             catch (Exception error) when (ReadFailure(error)) { report.Issues.Add("The Discovery screen files could not be checked: " + error.Message); }
             report.Notes.Add("Screen files must be baked in Discovery after Game setup changes them. Their presence alone does not confirm a bake.");
             report.Notes.Add("Close WWE 2K26 before installing, then restart it. CakeHook and the Moving Renders plugin must load in the game.");
@@ -69,13 +108,13 @@ namespace GorillaStudio.NameFolders
             return report;
         }
 
-        private static void InspectRender(MatchCardReadinessReport report, string path, int? expectedId)
+        private static void InspectRender(MatchCardReadinessReport report, string path, int? expectedId, CancellationToken cancellation)
         {
             if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
             { report.Issues.Add("Make a full Gorilla Render before installing; a Preview is not a game render."); return; }
             Dictionary<string, object> metadata;
             uint frames;
-            if (!ReadRender(path, out metadata, out frames))
+            if (!ReadRender(path, out metadata, out frames, cancellation))
             { report.Issues.Add("The selected file is not a complete Gorilla Render with a valid video header and metadata."); return; }
             object value;
             int id;
@@ -100,7 +139,7 @@ namespace GorillaStudio.NameFolders
             else if (report.Ending != "loop") report.Issues.Add("The render has an unknown ending setting.");
         }
 
-        private static void InspectInstallation(MatchCardReadinessReport report, string gameRoot, string source)
+        private static void InspectInstallation(MatchCardReadinessReport report, string gameRoot, string source, CancellationToken cancellation)
         {
             if (string.IsNullOrWhiteSpace(gameRoot) || !Directory.Exists(gameRoot))
             { report.Issues.Add("Choose the installed WWE 2K26 game folder."); return; }
@@ -133,16 +172,43 @@ namespace GorillaStudio.NameFolders
                 if (enabled == "0") report.Issues.Add("Moving Renders is disabled in WWE2K26_MovingRenders.cfg (enabled 0). Set enabled 1 with the game closed.");
                 else if (enabled != "1") report.Issues.Add("The configuration does not explicitly set enabled 1; the plugin enabled state is unknown.");
             }
+            report.Library = GmrLibraryAudit.Inspect(Path.Combine(plugins, "GorillaRenders"), plugin, cancellation);
+            AppendLibrary(report, report.Library);
             if (string.IsNullOrWhiteSpace(source) || !File.Exists(source)) return;
             report.InstalledPath = Path.Combine(plugins, "GorillaRenders", Path.GetFileName(source));
             if (!File.Exists(report.InstalledPath))
                 report.Issues.Add("This render is not installed in the selected game. Press Install into the game.");
-            else if (!SameContents(source, report.InstalledPath))
+            else if (!SameContents(source, report.InstalledPath, cancellation))
                 report.Issues.Add("The installed copy differs from this render. Install the current render again.");
             else report.Notes.Add("The installed copy matches this render exactly.");
         }
 
-        private static void InspectScreens(MatchCardReadinessReport report, string appRoot, string discoveryRoot)
+        private static void AppendLibrary(MatchCardReadinessReport report, GmrLibraryAuditReport library)
+        {
+            report.Notes.Add("Installed GMR library: " + library.RootFiles.ToString(CultureInfo.InvariantCulture) + " root file(s), "
+                + library.HeaderCompatibleFiles.ToString(CultureInfo.InvariantCulture) + " header-compatible candidate(s), "
+                + library.NestedFiles.ToString(CultureInfo.InvariantCulture) + " nested file(s). "
+                + (library.Complete ? "The bounded inspection completed." : "Inspection was incomplete; uninspected files are not classified."));
+            report.Notes.Add(library.Original421Verified
+                ? "Installed MovingRenders 4.21 matches the verified original; its measured scan limits apply."
+                : "The installed plugin does not match the verified original 4.21 binary. The library findings below describe original 4.21 rules, not confirmed limits of this installed version.");
+            foreach (string problem in library.Problems.Take(20))
+            {
+                if (library.Original421Verified) report.Issues.Add(problem);
+                else report.Notes.Add("Original 4.21 compatibility: " + problem);
+            }
+            int filesWithProblems = library.Records.Count(item => item.Problems.Count != 0);
+            if (filesWithProblems != 0 && library.Original421Verified)
+                report.Issues.Add(filesWithProblems.ToString(CultureInfo.InvariantCulture) + " installed GMR file(s) could not be verified against the original plugin's header/metadata rules. See file details below.");
+            var detailedFiles = library.Records.Where(row => row.Problems.Count != 0 || row.Notes.Count != 0).ToList();
+            foreach (GmrLibraryRecord item in detailedFiles.Take(30))
+                report.Notes.Add(Path.GetFileName(item.Path) + ": " + string.Join(" ", item.Problems.Concat(item.Notes)));
+            if (library.Problems.Count > 20 || detailedFiles.Count > 30)
+                report.Notes.Add("Additional library findings were omitted from this summary. The native _scan_ids.txt and plugin log can identify the actual accepted files.");
+            report.Notes.AddRange(library.Notes);
+        }
+
+        private static void InspectScreens(MatchCardReadinessReport report, string appRoot, string discoveryRoot, CancellationToken cancellation)
         {
             if (string.IsNullOrWhiteSpace(appRoot))
             { report.Issues.Add("The app's supplied screen pack could not be located."); return; }
@@ -156,12 +222,14 @@ namespace GorillaStudio.NameFolders
             var pending = new Stack<string>(); pending.Push(fullPack);
             while (pending.Count > 0)
             {
+                cancellation.ThrowIfCancellationRequested();
                 string directory = pending.Pop();
                 if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
                     throw new IOException("The supplied screen pack contains a linked directory and could not be checked safely.");
                 foreach (string child in Directory.GetDirectories(directory)) pending.Push(child);
                 foreach (string file in Directory.GetFiles(directory))
                 {
+                    cancellation.ThrowIfCancellationRequested();
                     string relative = file.Substring(fullPack.Length + 1);
                     report.ExpectedScreenFiles++;
                     // Existing mod layouts can differ intentionally; do not require
@@ -277,7 +345,7 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static bool ReadRender(string path, out Dictionary<string, object> metadata, out uint frames)
+        private static bool ReadRender(string path, out Dictionary<string, object> metadata, out uint frames, CancellationToken cancellation)
         {
             metadata = null; frames = 0;
             using (var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -297,6 +365,7 @@ namespace GorillaStudio.NameFolders
                 if (fpsDenominator == 0 || fpsNumerator != fpsDenominator * 30L || (reader.ReadUInt32() & 1048576) == 0 || reader.ReadUInt32() != 0) return false;
                 for (long frame = 0; frame < frames; frame++)
                 {
+                    if ((frame & 255) == 0) cancellation.ThrowIfCancellationRequested();
                     uint offset = reader.ReadUInt32();
                     if ((offset & 1) == 0 || (offset & ~1U) < 44 + (frames + 1L) * 4 || (offset & ~1U) >= videoLength) return false;
                 }
@@ -312,11 +381,22 @@ namespace GorillaStudio.NameFolders
             }
         }
 
-        private static bool SameContents(string first, string second)
+        private static bool SameContents(string first, string second, CancellationToken cancellation)
         {
             if (new FileInfo(first).Length != new FileInfo(second).Length) return false;
-            using (var a = File.OpenRead(first)) using (var b = File.OpenRead(second)) using (var sha = SHA256.Create())
-                return sha.ComputeHash(a).SequenceEqual(sha.ComputeHash(b));
+            using (var a = File.OpenRead(first)) using (var b = File.OpenRead(second))
+                return Hash(a, cancellation).SequenceEqual(Hash(b, cancellation));
+        }
+
+        private static byte[] Hash(Stream source, CancellationToken cancellation)
+        {
+            using (var sha = SHA256.Create())
+            {
+                byte[] buffer = new byte[81920]; int read;
+                while ((read = source.Read(buffer, 0, buffer.Length)) != 0)
+                { cancellation.ThrowIfCancellationRequested(); sha.TransformBlock(buffer, 0, read, buffer, 0); }
+                cancellation.ThrowIfCancellationRequested(); sha.TransformFinalBlock(buffer, 0, 0); return sha.Hash;
+            }
         }
 
         private static bool Integer(object value, out int result)
@@ -346,7 +426,7 @@ namespace GorillaStudio.NameFolders
                 ;
         }
 
-        private static Dictionary<string, object> Deserialize(string json)
+        internal static Dictionary<string, object> Deserialize(string json)
         {
 #if NET8_0_OR_GREATER
             using (var document = JsonDocument.Parse(json)) return ConvertJson(document.RootElement) as Dictionary<string, object>;

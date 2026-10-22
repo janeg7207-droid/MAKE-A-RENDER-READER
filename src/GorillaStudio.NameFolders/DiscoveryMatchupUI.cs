@@ -18,12 +18,15 @@ namespace GorillaStudio.NameFolders
         private static readonly Dictionary<Window, DiscoveryMatchupSetupReport> matchupSetupReports =
             new Dictionary<Window, DiscoveryMatchupSetupReport>();
 
-        private static async Task<DiscoveryMatchupSetupReport> ReadDiscoveryMatchupsAsync(Window window, string root, bool checkOnly)
+        private static async Task<DiscoveryMatchupSetupReport> ReadDiscoveryMatchupsAsync(Window window, string root, bool checkOnly,
+            CancellationToken cancellation = default(CancellationToken))
         {
+            cancellation.ThrowIfCancellationRequested();
             string game = window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string;
-            await LayoutSetupGate.WaitAsync();
+            await LayoutSetupGate.WaitAsync(cancellation);
             try
             {
+                cancellation.ThrowIfCancellationRequested();
                 bool active = true;
                 DiscoveryMatchupSetupReport report;
                 try
@@ -31,13 +34,14 @@ namespace GorillaStudio.NameFolders
                     report = await DiscoveryMatchupSetup.RunAsync(AppDomain.CurrentDomain.BaseDirectory,
                         game, root, Path.Combine(StorageDirectory, "picture-archives"), checkOnly,
                         message => {
-                            if (!window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
+                            if (!cancellation.IsCancellationRequested && !window.Dispatcher.HasShutdownStarted && !window.Dispatcher.HasShutdownFinished)
                                 window.Dispatcher.BeginInvoke(new Action(() => {
-                                    if (active && window.IsLoaded) SetModelStatus(window, message);
+                                    if (active && !cancellation.IsCancellationRequested && window.IsLoaded) SetModelStatus(window, message);
                                 }));
-                        }, CancellationToken.None);
+                        }, cancellation);
                 }
                 finally { active = false; }
+                cancellation.ThrowIfCancellationRequested();
                 if (window.IsLoaded) matchupSetupReports[window] = report;
                 return report;
             }

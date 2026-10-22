@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/GorillaStudio.NameFolders/MatchCardReadiness.cs" Link="MatchCardReadiness.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/GmrLibraryAudit.cs" Link="GmrLibraryAudit.cs" />
+  </ItemGroup>
+</Project>

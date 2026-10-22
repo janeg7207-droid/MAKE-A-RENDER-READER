@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/GorillaStudio.NameFolders/MatchCardReadiness.cs" Link="MatchCardReadiness.cs" />
+    <Compile Include="../../src/GorillaStudio.NameFolders/GmrLibraryAudit.cs" Link="GmrLibraryAudit.cs" />
   </ItemGroup>
 </Project>

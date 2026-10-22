@@ -19,6 +19,7 @@ namespace GorillaStudio.NameFolders
         private static readonly Dictionary<Window, MatchCardSetupReport> screenSetupReports = new Dictionary<Window, MatchCardSetupReport>();
         private static readonly Dictionary<Window, MatchCardLayoutsReport> layoutSetupReports = new Dictionary<Window, MatchCardLayoutsReport>();
         private static readonly HashSet<Window> combinedGameSetups = new HashSet<Window>();
+        private static readonly HashSet<Window> directPlaybackChecks = new HashSet<Window>();
         private static readonly SemaphoreSlim LayoutSetupGate = new SemaphoreSlim(1, 1);
 
         private static void AttachPlaybackControls(Window window)
@@ -188,8 +189,13 @@ namespace GorillaStudio.NameFolders
                 Background = Brushes.Transparent, Foreground = Brushes.White, BorderThickness = new Thickness(0)
             };
             body.Children.Add(report); dialog.Content = body;
-            Action update = () =>
+            var lifetime = new CancellationTokenSource();
+            dialog.Closed += (sender, args) => lifetime.Cancel();
+            int reportRequest = 0;
+            Func<Task> update = async () =>
             {
+                if (lifetime.IsCancellationRequested) return;
+                int request = ++reportRequest;
                 try
                 {
                     string game = window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string;
@@ -197,7 +203,10 @@ namespace GorillaStudio.NameFolders
                     int id;
                     int? expected = int.TryParse(window.GetType().GetField("TargetSlot", InstanceMembers)?.GetValue(window) as string,
                         NumberStyles.None, CultureInfo.InvariantCulture, out id) ? (int?)id : null;
-                    var state = MatchCardReadiness.Evaluate(AppDomain.CurrentDomain.BaseDirectory, game, PlaybackRoot(window), render, expected);
+                    string app = AppDomain.CurrentDomain.BaseDirectory, root = PlaybackRoot(window);
+                    report.Text = "Checking the installed render library and match-card files…";
+                    var state = await Task.Run(() => MatchCardReadiness.Evaluate(app, game, root, render, expected, lifetime.Token), lifetime.Token);
+                    if (lifetime.IsCancellationRequested || request != reportRequest) return;
                     report.Text = state.Summary + "\n\n" + string.Join("\n", state.Notes);
                     if (!string.IsNullOrWhiteSpace(state.InstalledPath)) report.Text += "\n\nInstalled render:\n" + state.InstalledPath;
                     MatchCardSetupReport last;
@@ -209,17 +218,18 @@ namespace GorillaStudio.NameFolders
                     DiscoveryMatchupSetupReport matchups;
                     if (matchupSetupReports.TryGetValue(window, out matchups)) report.Text += "\n\nDiscovery matchup catalog:\n" + DiscoveryMatchupDetails(matchups);
                 }
-                catch (Exception error) when (PictureError(error)) { report.Text = error.Message; }
+                catch (OperationCanceledException) { }
+                catch (Exception error) when (PictureError(error)) { if (!lifetime.IsCancellationRequested) report.Text = error.Message; }
             };
             bool checking = false;
             Func<Task> checkScreens = async () =>
             {
-                if (checking) return;
+                if (checking || lifetime.IsCancellationRequested) return;
                 var nativeBusy = window.GetType().GetField("Busy", InstanceMembers);
                 if (nativeBusy != null && nativeBusy.GetValue(window) is bool && (bool)nativeBusy.GetValue(window))
                 { report.Text = "Wait for the current model, render or setup to finish, then check again."; return; }
                 checking = true; refresh.IsEnabled = false;
-                setup.IsEnabled = false; cards.IsEnabled = false;
+                setup.IsEnabled = false; cards.IsEnabled = false; enable.IsEnabled = false;
                 bool ownsBusy = nativeBusy != null && nativeBusy.FieldType == typeof(bool);
                 if (ownsBusy) nativeBusy.SetValue(window, true);
                 try
@@ -230,15 +240,29 @@ namespace GorillaStudio.NameFolders
                         MethodInfo run = window.GetType().GetMethod("RunPy", InstanceMembers, null,
                             new[] { typeof(string), typeof(IEnumerable<string>), typeof(Action<string>), typeof(Action<Process>) }, null);
                         string studio = window.GetType().GetField("Studio", InstanceMembers)?.GetValue(window) as string;
-                        update();
+                        await update();
+                        if (lifetime.IsCancellationRequested) return;
                         try
                         {
-                            var task = run?.Invoke(window, new object[] {
-                                Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
-                                new[] { root, "check" }, null, null
-                            }) as Task<ValueTuple<int, List<string>>>;
+                            Process nativeCheck = null;
+                            Task<ValueTuple<int, List<string>>> task;
+                            directPlaybackChecks.Add(window);
+                            try
+                            {
+                                task = run?.Invoke(window, new object[] {
+                                    Path.Combine(studio ?? AppDomain.CurrentDomain.BaseDirectory, "pipeline", "setup_screens.py"),
+                                    new[] { root, "check" }, null, (Action<Process>)(process => nativeCheck = process)
+                                }) as Task<ValueTuple<int, List<string>>>;
+                            }
+                            finally { directPlaybackChecks.Remove(window); }
                             if (task == null) throw new InvalidOperationException("The original screen check could not be started.");
-                            var output = await task;
+                            // Stop only this dialog's read-only native check. The
+                            // original RunPy owns disposal until its task finishes.
+                            var stop = lifetime.Token.Register(() => StopPlaybackCheck(nativeCheck));
+                            _ = task.ContinueWith(completed => stop.Dispose(), CancellationToken.None,
+                                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                            var output = await MatchCardReadiness.WaitForCheckAsync(task, lifetime.Token);
+                            lifetime.Token.ThrowIfCancellationRequested();
                             var checkedSetup = MatchCardReadiness.FromSetupResult(output.Item2);
                             if (output.Item1 != 0)
                             {
@@ -247,31 +271,40 @@ namespace GorillaStudio.NameFolders
                             }
                             report.Text += "\n\nCurrent screen check:\n" + checkedSetup.Summary;
                         }
+                        catch (OperationCanceledException) { throw; }
                         catch (Exception error)
-                        { report.Text += "\n\nOriginal screen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
-                        var matchups = await ReadDiscoveryMatchupsAsync(window, root, true);
+                        {
+                            lifetime.Token.ThrowIfCancellationRequested();
+                            report.Text += "\n\nOriginal screen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message;
+                        }
+                        lifetime.Token.ThrowIfCancellationRequested();
+                        var matchups = await ReadDiscoveryMatchupsAsync(window, root, true, lifetime.Token);
+                        lifetime.Token.ThrowIfCancellationRequested();
                         var layouts = matchups.Layouts;
                         report.Text += "\n\nCurrent match-card layout check:\n" + layouts.Summary
                             + LayoutDetails(layouts);
                         report.Text += "\n\nDiscovery matchup catalog:\n" + DiscoveryMatchupDetails(matchups);
                     }
-                    else update();
+                    else await update();
                 }
+                catch (OperationCanceledException) { }
                 catch (Exception error)
-                { update(); report.Text += "\n\nScreen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
+                { await update(); if (!lifetime.IsCancellationRequested) report.Text += "\n\nScreen check could not run: " + (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
                 finally {
                     if (ownsBusy) nativeBusy.SetValue(window, false);
-                    checking = false; refresh.IsEnabled = true; setup.IsEnabled = true; cards.IsEnabled = true;
+                    checking = false;
+                    if (!lifetime.IsCancellationRequested)
+                    { refresh.IsEnabled = true; setup.IsEnabled = true; cards.IsEnabled = true; enable.IsEnabled = true; }
                 }
             };
             refresh.Click += async (sender, args) => await checkScreens();
-            enable.Click += (sender, args) =>
+            enable.Click += async (sender, args) =>
             {
                 try
                 {
                     string game = window.GetType().GetField("Game", InstanceMembers)?.GetValue(window) as string;
                     if (!MatchCardReadiness.EnablePlugin(game)) report.Text = "The plugin configuration could not be enabled. Check Game setup and the selected game folder.";
-                    else { update(); report.Text += "\n\nRestart WWE after enabling moving renders."; }
+                    else { await update(); if (!lifetime.IsCancellationRequested) report.Text += "\n\nRestart WWE after enabling moving renders."; }
                 }
                 catch (Exception error) when (PictureError(error)) { report.Text = error.Message; }
             };
@@ -284,14 +317,22 @@ namespace GorillaStudio.NameFolders
                 try
                 {
                     await RunCombinedGameSetupAsync(window);
-                    update();
+                    await update();
                 }
                 catch (Exception error)
                 { report.Text = (error is TargetInvocationException && error.InnerException != null ? error.InnerException : error).Message; }
                 finally { setup.IsEnabled = true; }
             };
             dialog.Loaded += async (sender, args) => await checkScreens();
-            update(); dialog.Show();
+            report.Text = "Checking the installed render library and match-card files…"; dialog.Show();
+        }
+
+        private static void StopPlaybackCheck(Process process)
+        {
+            if (process == null) return;
+            try { if (!process.HasExited) process.Kill(); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
         }
 
         private static string LayoutDetails(MatchCardLayoutsReport report)
@@ -311,7 +352,7 @@ namespace GorillaStudio.NameFolders
                 if (setupRoot == null) setupRoot = argument;
                 else if (argument == "check") requestedCheck = true;
             }
-            bool handledByCaller = combinedGameSetups.Contains(window);
+            bool handledByCaller = combinedGameSetups.Contains(window) || directPlaybackChecks.Contains(window);
             if (handledByCaller) return; // The direct caller validates exit code and result.
             var completion = new TaskCompletionSource<MatchCardSetupReport>();
             var gate = new object();
